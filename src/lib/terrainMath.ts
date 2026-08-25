@@ -18,7 +18,7 @@
 
 import {
   F, MACRO, MOUNTAIN, WARP, VALLEY, CONTINENT, REGION, ANOMALY,
-  CLIMATE, MARCH,
+  CLIMATE, MARCH, MAX_WORLD_H, MAX_DIST,
 } from "./constants";
 
 /* ------------------------------------------------------------------ */
@@ -395,7 +395,7 @@ export function marchRay(
     record?: boolean;
   },
 ): MarchResult {
-  const maxDist = opts.maxDist ?? 6000;
+  const maxDist = opts.maxDist ?? MAX_DIST;
   const rows: MarchRow[] = [];
   let t = MARCH.startT;
   let tPrev = t;
@@ -406,7 +406,7 @@ export function marchRay(
     const py = ro[1] + rd[1] * t;
     const pz = ro[2] + rd[2] * t;
 
-    if (py > 1300 && rd[1] > 0) return { hit: false, t, rows, bisectRows: [] }; // §26 early exit
+    if (py > MAX_WORLD_H && rd[1] > 0) return { hit: false, t, rows, bisectRows: [] }; // §26 early exit
 
     const dp = Math.max(t * opts.footprint, 1e-4);
     const e = elevation(px, pz, seed, dp);
@@ -476,7 +476,7 @@ export function softShadow(
     const qx = p[0] + sunDir[0] * t;
     const qy = p[1] + sunDir[1] * t;
     const qz = p[2] + sunDir[2] * t;
-    if (qy > 1300) break;
+    if (qy > MAX_WORLD_H) break;
     const h = qy - elevation(qx, qz, seed, 4.0 * t * footprint); // §18: 4×Δp
     res = Math.min(res, 10.0 * h / t); // penumbra kernel
     if (res < 0.005) break;

@@ -1,0 +1,651 @@
+     1→// ============================================================================
+     2→//  W(x,y) — Continuous World Engine · GPU surface
+     3→//  Godot 4 Spatial Shader · Forward+ · Metal (Apple Silicon TBDR) · SDFGI
+     4→// ============================================================================
+     5→//
+     6→//  THE SURFACE IS NOT A MESH (spec §1, §15).
+     7→//  Every pixel is a raymarch against the continuous 2D field E(x, z) —
+     8→//  the SAME field the CPU twin evaluates (gdextension/src/terrain_cpu.h,
+     9→//  scripts/terrain_math_fallback.gd, and the WebGL2 parity harness).
+    10→//
+    11→//  ── APPLE SILICON / TBDR CONSTRAINTS (Metal) ─────────────────────────────
+    12→//  * render_mode cull_disabled — the fullscreen quad must survive any camera
+    13→//    orientation; a giant custom_aabb (set by scripts/terrain_renderer.gd)
+    14→//    defeats frustum culling.
+    15→//  * render_priority = -100 (set on the MeshInstance3D) — on a TBDR GPU the
+    16→//    tile binning happens before fragment execution, so drawing the terrain
+    17→//    FIRST in the opaque queue lets subsequent per-tile fragments depth-test
+    18→//    against our analytically written DEPTH for free (no overdraw blending
+    19→//    cost, no late-Z surprises in the tile transient memory).
+    20→//  * depth_draw_always — we write DEPTH for every fragment (hit AND miss);
+    21→//    reversed-Z far (0.0) for sky so real geometry still sorts correctly.
+    22→//  * MSAA is OFF project-wide (see project.godot): analytic coverage from the
+    23→//    Nyquist-weighted field is the anti-aliaser; FXAA is enabled instead.
+    24→//    MSAA would multiply per-tile bandwidth for zero benefit on a surface
+    25→//    whose geometry exists only as depth writes.
+    26→//  * The march is bounded (u_march_steps) and the per-step cost falls with
+    27→//    distance because the Nyquist weights switch octaves off — TBDR cost is
+    28→//    per-tile, and distant tiles evaluate a cheaper field.
+    29→//
+    30→//  ── SDFGI CONSTRAINTS (Forward+ voxel GI) ────────────────────────────────
+    31→//  * We write ALBEDO + NORMAL (view space) + DEPTH, which is exactly what
+    32→//    SDFGI voxelization consumes — the mathematical terrain therefore
+    33→//    participates in global illumination like any mesh.
+    34→//  * Direct sun lighting is computed HERE (EMISSION) and the DirectionalLight
+    35→//    uses a light_cull_mask that excludes the terrain's layer (set in
+    36→//    scripts/main.gd) — otherwise the engine would light the quad a second
+    37→//    time. SDFGI INDIRECT light still reaches the terrain through ALBEDO.
+    38→//  * Sky fragments write DEPTH = 0.0 (reversed-Z far) → outside every SDFGI
+    39→//    cascade → the sky is never voxelized as glowing geometry.
+    40→//  * VALIDATION (spec §31): drop a red DebugBox at a cascade boundary and
+    41→//    confirm no light leaking where the cascade changes; the analytic DEPTH
+    42→//    is continuous, so seams can only come from cascade resolution.
+    43→//
+    44→//  ── REVERSED-Z DEPTH WRITE (Metal NDC) ───────────────────────────────────
+    45→//  Godot 4's projection is reversed-Z ([1 = near, 0 = far]) on Metal. For a
+    46→//  hit at world point p we reconstruct the exact clip position the engine
+    47→//  would produce for a mesh vertex at p:
+    48→//        p_view  = transpose(view→world) · (p − cam_pos)
+    49→//        clip    = PROJECTION_MATRIX · p_view
+    50→//        DEPTH   = clip.z / clip.w
+    51→//  This is bit-compatible with rasterized geometry — meshes, particles and
+    52→//  the player capsule inter-occlude with the terrain correctly (§16).
+    53→//
+    54→//  ── FLOATING ORIGIN (spec §25) ────────────────────────────────────────────
+    55→//  The shader receives (chunk-local fp32 position, u_chunk_origin). Every
+    56→//  frequency in the contract is a dyadic rational n/2^20 and the chunk size
+    57→//  is 2^13, so origin·f is EXACT in fp32 — noise lattices align across
+    58→//  rebases with zero jitter. Global coordinates never leave fp32 territory.
+    59→// ============================================================================
+    60→
+    61→shader_type spatial;
+    62→render_mode cull_disabled, fog_disabled, depth_draw_always;
+    63→
+    64→// ---- per-frame uniforms (scripts/terrain_renderer.gd) ----------------------
+    65→uniform vec2  u_chunk_origin = vec2(0.0); // multiples of 8192 — fp32-exact
+    66→uniform int   u_seed = 1337;
+    67→uniform float u_time = 0.0;               // water ripple / cloud drift
+    68→uniform int   u_march_steps = 96;         // quality preset (§26)
+    69→uniform int   u_shadow_steps = 20;
+    70→uniform float u_tan_half = 0.7002;        // tan(70°/2)
+    71→uniform float u_aspect = 1.7778;
+    72→uniform float u_footprint = 0.0026;       // 2·tan(FOV/2)/Res_y (Nyquist Δp/t)
+    73→
+    74→// ---- varyings: camera plumbing from vertex to fragment ---------------------
+    75→// Godot does not expose VIEW/PROJECTION matrices in fragment(), so the vertex
+    76→// stage forwards them as varyings (constant across the quad → exact).
+    77→varying vec2 v_ndc;                        // quad coords, [-1, 1]
+    78→varying vec3 v_cam;                        // camera position (node = world)
+    79→varying vec3 v_r;                          // view→world basis: right
+    80→varying vec3 v_u;                          //                   up
+    81→varying vec3 v_b;                          //                   back
+    82→varying vec4 v_pc0;                        // PROJECTION_MATRIX column 0
+    83→varying vec4 v_pc1;                        //                      column 1
+    84→varying vec4 v_pc2;                        //                      column 2
+    85→varying vec4 v_pc3;                        //                      column 3
+    86→
+    87→// ---- contract constants (MIRROR constants.ts / terrain_cpu.h / demoShader) -
+    88→const float MAXH     = 1300.0;
+    89→const float MAXDIST  = 6000.0;
+    90→const float F_MACRO  = 512.0  / 1048576.0;
+    91→const float F_RIDGE  = 341.0  / 1048576.0;
+    92→const float F_MASK   = 128.0  / 1048576.0;
+    93→const float F_WARP   = 655.0  / 1048576.0;
+    94→const float F_VALLEY = 1942.0 / 1048576.0;
+    95→const float F_CONT   = 64.0   / 1048576.0;
+    96→const float F_MOIST  = 512.0  / 1048576.0;
+    97→const float F_DUNE   = 23.0   / 1048576.0;
+    98→const float F_CLOUD  = 403.0  / 1048576.0;
+    99→const float VEG_WL   = 14.0;
+   100→
+   101→const int   OCT_MACRO = 9;
+   102→const float LAC_MACRO = 2.0,  GAIN_MACRO = 0.5,  H_BASE  = 90.0;
+   103→const int   OCT_RIDGE = 5;
+   104→const float LAC_RIDGE = 2.17, GAIN_RIDGE = 0.48, H_MOUNT = 880.0;
+   105→const float MASK_LO = 0.28,  MASK_HI = 0.60;
+   106→const int   OCT_WARP = 2;
+   107→const float S_WARP   = 620.0;
+   108→const float C_DEPTH  = 48.0,  W_VALLEY = 0.42, W_LEVEL = 5.0, W_WIDTH = 0.18;
+   109→const float CONT_LO  = 0.22,  CONT_HI  = 0.44, CONT_MIN = 0.2;
+   110→const float REGION_CELL = 8192.0;
+   111→const float REG_BLEND_LO = 0.04, REG_BLEND_HI = 0.18;
+   112→const float REG_HILLS = 0.45, REG_MTN = 1.3, REG_DUNE = 0.85, DUNE_H = 42.0;
+   113→const float ANOM_CELL = 2048.0, P_ANOM = 0.06;
+   114→const float ANOM_R_IN = 380.0,  ANOM_R_OUT = 620.0;
+   115→const float TERRACE_STEP = 70.0, TERRACE_H = 15.0;
+   116→const float SPIRE_H = 250.0, SPIRE_R = 150.0;
+   117→const float SPIRAL_AMP = 16.0, SPIRAL_TURNS = 6.0, SPIRAL_RAD = 0.05;
+   118→const float T_BASE = 14.0, L_LAT = 1.2e-5, L_ALT = 0.02;
+   119→const float M_BASE = 0.5,  M_AMP = 0.40, M_OCEAN = 0.35;
+   120→
+   121→const float LAMBDA  = 0.8;
+   122→const float DMIN    = 0.05;
+   123→const float GROWTH  = 0.0015;
+   124→const float START_T = 0.4;
+   125→const int   BISECT  = 6;
+   126→
+   127→const vec3  SUN     = vec3(0.550743, 0.420567, 0.720972); // normalize(0.55,0.42,0.72)
+   128→const vec3  SUN_COL = vec3(1.0, 0.955, 0.885) * 3.4;
+   129→const vec3  SKY_ZEN = vec3(0.20, 0.36, 0.52);
+   130→const vec3  SKY_HOR = vec3(0.78, 0.80, 0.82);
+   131→const float CLOUD_PLANE = 1500.0;
+   132→const int   CLOUD_OCT = 4;
+   133→const float SIGMA_FOG = 9.0e-4;
+   134→const float FOG_H     = 900.0;
+   135→
+   136→// ---------------------------------------------------------------------------
+   137→// §4 — deterministic hashing (uint32, Murmur3 finalizer)
+   138→// ---------------------------------------------------------------------------
+   139→uint hashU(uint x) {
+   140→        x ^= x >> 16; x *= 0x85ebca6bu;
+   141→        x ^= x >> 13; x *= 0xc2b2ae35u;
+   142→        x ^= x >> 16;
+   143→        return x;
+   144→}
+   145→uint hash3(int xi, int yi, int seed) {
+   146→        uint h = uint(xi) ^ (uint(yi) * 0x27d4eb2fu) ^ (uint(seed) * 0x9e3779b9u);
+   147→        return hashU(h);
+   148→}
+   149→float hash01(int xi, int yi, int seed) {
+   150→        return float(hash3(xi, yi, seed)) / 4294967295.0;
+   151→}
+   152→void cellPoint(int ix, int iy, int seed, out vec2 p) {
+   153→        uint h = hash3(ix, iy, seed);
+   154→        p = vec2(float(h & 0xfffu), float((h >> 12) & 0xfffu)) / 4095.0;
+   155→}
+   156→float cellType(int ix, int iy, int seed) {
+   157→        return float(hash3(ix, iy, seed) >> 24) / 255.0;
+   158→}
+   159→
+   160→// ---------------------------------------------------------------------------
+   161→// §5 — quintic value noise (C²) + Nyquist weights
+   162→// ---------------------------------------------------------------------------
+   163→float quintic(float t) { return t * t * t * (t * (t * 6.0 - 15.0) + 10.0); }
+   164→
+   165→float vnoise(float x, float y, int seed) {
+   166→        float ix = floor(x), iy = floor(y);
+   167→        float fx = x - ix,   fy = y - iy;
+   168→        float ux = quintic(fx), uy = quintic(fy);
+   169→        int XI = int(ix), YI = int(iy);
+   170→        float a = hash01(XI,     YI,     seed);
+   171→        float b = hash01(XI + 1, YI,     seed);
+   172→        float c = hash01(XI,     YI + 1, seed);
+   173→        float d = hash01(XI + 1, YI + 1, seed);
+   174→        float v = a + (b - a) * ux + (c - a) * uy + (a - b - c + d) * ux * uy;
+   175→        return v * 2.0 - 1.0;
+   176→}
+   177→
+   178→float nyqW(float f, float dp) {
+   179→        return clamp(2.0 - (f * dp) / 0.5, 0.0, 1.0);
+   180→}
+   181→
+   182→float fbm(float x, float y, int seed, int oct, float lac, float gain, float dp, float f0) {
+   183→        float freq = 1.0, amp = 1.0, sum = 0.0, wsum = 0.0, asum = 0.0;
+   184→        for (int i = 0; i < oct; i++) {
+   185→                float w = nyqW(f0 * freq, dp);
+   186→                sum  += amp * w * vnoise(x * freq, y * freq, seed + i * 0x9e37);
+   187→                wsum += amp * w;
+   188→                asum += amp;
+   189→                freq *= lac;
+   190→                amp  *= gain;
+   191→        }
+   192→        return sum * (asum / max(wsum, 1e-6));
+   193→}
+   194→
+   195→float ridged(float x, float y, int seed, int oct, float lac, float gain, float dp, float f0) {
+   196→        float freq = 1.0, amp = 0.5, sum = 0.0, wsum = 0.0, asum = 0.0;
+   197→        for (int i = 0; i < oct; i++) {
+   198→                float w = nyqW(2.0 * f0 * freq, dp);
+   199→                float n = 1.0 - abs(vnoise(x * freq, y * freq, seed + i * 0x85eb));
+   200→                float r = n * n;
+   201→                sum  += amp * w * r;
+   202→                wsum += amp * w;
+   203→                asum += amp;
+   204→                freq *= lac;
+   205→                amp  *= gain;
+   206→        }
+   207→        return sum * (asum / max(wsum, 1e-6));
+   208→}
+   209→
+   210→// ---------------------------------------------------------------------------
+   211→// §7/§12/§13 — cellular (Worley) fields
+   212→// ---------------------------------------------------------------------------
+   213→struct Vor {
+   214→        float f1;    float f2;    float edge;
+   215→        float cx;    float cy;    float type;
+   216→};
+   217→
+   218→Vor voronoi(float x, float y, int seed) {
+   219→        float ipx = floor(x), ipy = floor(y);
+   220→        float fx = x - ipx,   fy = y - ipy;
+   221→        Vor v;
+   222→        v.f1 = 8.0; v.f2 = 8.0; v.edge = 0.0;
+   223→        v.cx = 0.0;  v.cy = 0.0;  v.type = 0.0;
+   224→        for (int j = -1; j <= 1; j++) {
+   225→                for (int i = -1; i <= 1; i++) {
+   226→                        int cxi = int(ipx) + i, cyi = int(ipy) + j;
+   227→                        vec2 p; cellPoint(cxi, cyi, seed, p);
+   228→                        float dx = float(i) + p.x - fx;
+   229→                        float dy = float(j) + p.y - fy;
+   230→                        float d = sqrt(dx * dx + dy * dy);
+   231→                        if (d < v.f1) {
+   232→                                v.f2 = v.f1; v.f1 = d;
+   233→                                v.cx = float(cxi) + p.x; v.cy = float(cyi) + p.y;
+   234→                                v.type = cellType(cxi, cyi, seed);
+   235→                        } else if (d < v.f2) {
+   236→                                v.f2 = d;
+   237→                        }
+   238→                }
+   239→        }
+   240→        v.edge = v.f2 - v.f1;
+   241→        return v;
+   242→}
+   243→
+   244→// ---------------------------------------------------------------------------
+   245→// §14 — domain warp
+   246→// ---------------------------------------------------------------------------
+   247→void domainWarp(float x, float y, int seed, float dp, out vec2 q) {
+   248→        float wx = x * F_WARP, wy = y * F_WARP;
+   249→        float qx = fbm(wx, wy,             seed + 11, OCT_WARP, 2.0, 0.5, dp, F_WARP);
+   250→        float qy = fbm(wx + 5.2, wy + 1.3, seed + 37, OCT_WARP, 2.0, 0.5, dp, F_WARP);
+   251→        q = vec2(x + S_WARP * qx, y + S_WARP * qy);
+   252→}
+   253→
+   254→// ---------------------------------------------------------------------------
+   255→// §12 — geological anomalies (Zonai terraces + spire + spiral)
+   256→// ---------------------------------------------------------------------------
+   257→float anomalyE(float x, float y, int seed) {
+   258→        Vor v = voronoi(x / ANOM_CELL, y / ANOM_CELL, seed + 400);
+   259→        if (v.type >= P_ANOM) return 0.0;
+   260→        float cx = v.cx * ANOM_CELL;
+   261→        float cy = v.cy * ANOM_CELL;
+   262→        float dx = x - cx, dy = y - cy;
+   263→        float r = sqrt(dx * dx + dy * dy);
+   264→        if (r >= ANOM_R_OUT) return 0.0;
+   265→        float theta = atan2(dy, dx);
+   266→        float fall = 1.0 - smoothstep(ANOM_R_IN, ANOM_R_OUT, r);
+   267→        float t = r / TERRACE_STEP;
+   268→        float ft = t - floor(t);
+   269→        float steps = (floor(t) + smoothstep(0.3, 0.7, ft)) * TERRACE_H;
+   270→        float spire = SPIRE_H * exp(-(r / SPIRE_R) * (r / SPIRE_R));
+   271→        float spiral = SPIRAL_AMP * sin(SPIRAL_TURNS * theta + SPIRAL_RAD * r);
+   272→        return fall * (steps + spire + spiral);
+   273→}
+   274→
+   275→// ---------------------------------------------------------------------------
+   276→// §13 — regional rules
+   277→// ---------------------------------------------------------------------------
+   278→struct Reg { float wRegion; float mountFactor; float duneAmount; };
+   279→
+   280→Reg regionField(float x, float y, int seed) {
+   281→        Vor v = voronoi(x / REGION_CELL, y / REGION_CELL, seed + 900);
+   282→        Reg r;
+   283→        r.wRegion = smoothstep(REG_BLEND_LO, REG_BLEND_HI, v.edge);
+   284→        float h = v.type;
+   285→        r.mountFactor = h < 0.33 ? REG_HILLS : (h < 0.66 ? REG_MTN : REG_DUNE);
+   286→        r.duneAmount = smoothstep(0.66, 0.8, h) * r.wRegion;
+   287→        return r;
+   288→}
+   289→
+   290→float dunesE(float x, float y, int seed, float dp, float amount) {
+   291→        if (amount <= 0.0) return 0.0;
+   292→        float phase = x * F_DUNE * 6.28318530718
+   293→                + 3.0 * fbm(x * F_WARP, y * F_WARP, seed + 301, 2, 2.0, 0.5, dp, F_WARP);
+   294→        float c = 1.0 - abs(sin(phase));
+   295→        return DUNE_H * amount * c * c * c;
+   296→}
+   297→
+   298→// ---------------------------------------------------------------------------
+   299→// Master elevation field — spec §2 composition (mirror terrain_cpu.h)
+   300→// ---------------------------------------------------------------------------
+   301→float elevation(vec2 g, float dp, int seed) {
+   302→        vec2 wq;
+   303→        domainWarp(g.x, g.y, seed, dp, wq);
+   304→
+   305→        Reg reg = regionField(g.x, g.y, seed);
+   306→
+   307→        float cont = smoothstep(CONT_LO, CONT_HI,
+   308→                0.5 + 0.5 * vnoise(g.x * F_CONT, g.y * F_CONT, seed + 801));
+   309→
+   310→        float base = H_BASE * (0.5 + 0.5 * fbm(
+   311→                wq.x * F_MACRO, wq.y * F_MACRO, seed + 1,
+   312→                OCT_MACRO, LAC_MACRO, GAIN_MACRO, dp, F_MACRO));
+   313→
+   314→        float mask = smoothstep(MASK_LO, MASK_HI,
+   315→                0.5 + 0.5 * vnoise(wq.x * F_MASK, wq.y * F_MASK, seed + 77));
+   316→        float ridge = ridged(wq.x * F_RIDGE, wq.y * F_RIDGE, seed + 5,
+   317→                OCT_RIDGE, LAC_RIDGE, GAIN_RIDGE, dp, F_RIDGE);
+   318→        float hMount = H_MOUNT * (1.0 + (reg.mountFactor - 1.0) * reg.wRegion);
+   319→
+   320→        Vor vv = voronoi(wq.x * F_VALLEY, wq.y * F_VALLEY, seed + 21);
+   321→        float sv = 1.0 - smoothstep(0.0, W_VALLEY, vv.edge);
+   322→        float valley = C_DEPTH * sv * sv;
+   323→
+   324→        float dune = dunesE(g.x, g.y, seed, dp, reg.duneAmount);
+   325→        float anom = anomalyE(g.x, g.y, seed);
+   326→
+   327→        return base * (CONT_MIN + (1.0 - CONT_MIN) * cont)
+   328→             + hMount * mask * ridge
+   329→             + dune
+   330→             - valley
+   331→             + anom;
+   332→}
+   333→
+   334→// §17 — analytic normal via central differences at the pixel footprint.
+   335→vec2 gradient(vec2 g, float eps, float dp, int seed) {
+   336→        float e = max(eps, 0.05);
+   337→        float gx = (elevation(g + vec2(e, 0.0), dp, seed) - elevation(g - vec2(e, 0.0), dp, seed)) / (2.0 * e);
+   338→        float gz = (elevation(g + vec2(0.0, e), dp, seed) - elevation(g - vec2(0.0, e), dp, seed)) / (2.0 * e);
+   339→        return vec2(gx, gz);
+   340→}
+   341→
+   342→// ---------------------------------------------------------------------------
+   343→// §9 — climate fields
+   344→// ---------------------------------------------------------------------------
+   345→float temperature(vec2 g, float e, int seed) {
+   346→        return T_BASE - L_LAT * abs(g.y) - L_ALT * max(e, 0.0);
+   347→}
+   348→float moisture(vec2 g, int seed) {
+   349→        float n = fbm(g.x * F_MOIST, g.y * F_MOIST, seed + 61, 2, 2.0, 0.5, 0.0, F_MOIST);
+   350→        float cont = smoothstep(CONT_LO, CONT_HI,
+   351→                0.5 + 0.5 * vnoise(g.x * F_CONT, g.y * F_CONT, seed + 801));
+   352→        return M_BASE + M_AMP * n + M_OCEAN * (1.0 - cont);
+   353→}
+   354→
+   355→// ---------------------------------------------------------------------------
+   356→// §10/§11/§21 — biome RBF anchors in OKLab
+   357→// ---------------------------------------------------------------------------
+   358→vec3 oklabToLinear(vec3 lab) {
+   359→        float l_ = lab.x + 0.3963377774 * lab.y + 0.2158037573 * lab.z;
+   360→        float m_ = lab.x - 0.1055613458 * lab.y - 0.0638541728 * lab.z;
+   361→        float s_ = lab.x - 0.0894841775 * lab.y - 1.2914855480 * lab.z;
+   362→        float l = l_ * l_ * l_, m = m_ * m_ * m_, s = s_ * s_ * s_;
+   363→        return vec3(
+   364→                +4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
+   365→                -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
+   366→                -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s);
+   367→}
+   368→
+   369→float rbf(float x, float c, float s) {
+   370→        float d = (x - c) / s;
+   371→        return exp(-d * d);
+   372→}
+   373→
+   374→vec3 biomeColor(float T, float M, float e, float slopeM, float vegNoise, out float vegOut) {
+   375→        float w0 = rbf(T, -4.0, 4.5)  * rbf(M, 0.55, 0.45) * rbf(e, 800.0, 600.0) * rbf(slopeM, 1.0, 1.1);
+   376→        float w1 = rbf(T, 9.0, 22.0)  * rbf(M, 0.45, 0.55) * rbf(e, 550.0, 600.0) * rbf(slopeM, 1.7, 0.8);
+   377→        float w2 = rbf(T, 13.0, 6.5)  * rbf(M, 0.72, 0.22) * rbf(e, 90.0, 260.0)  * rbf(slopeM, 0.32, 0.5);
+   378→        float w3 = rbf(T, 11.0, 7.0)  * rbf(M, 0.9, 0.15)  * rbf(e, 230.0, 380.0) * rbf(slopeM, 0.45, 0.55);
+   379→        float w4 = rbf(T, 16.0, 8.0)  * rbf(M, 0.13, 0.17) * rbf(e, 55.0, 320.0)  * rbf(slopeM, 0.35, 0.5);
+   380→
+   381→        float wsum = max(w0 + w1 + w2 + w3 + w4, 1e-6);
+   382→        vec3 lab = (
+   383→                w0 * vec3(0.93,  0.0,    -0.015) +
+   384→                w1 * vec3(0.44,  0.004,   0.008) +
+   385→                w2 * vec3(0.52, -0.058,   0.048) +
+   386→                w3 * vec3(0.32, -0.072,   0.032) +
+   387→                w4 * vec3(0.79,  0.012,   0.072)) / wsum;
+   388→
+   389→        vegOut = (w2 * 0.92 + w3 * 1.0 + w1 * 0.06 + w4 * 0.05) / wsum;
+   390→
+   391→        float clump = smoothstep(0.2, 0.8, 0.5 + 0.5 * vegNoise);
+   392→        vec3 col = oklabToLinear(lab);
+   393→        return mix(col, col * 0.52 + vec3(0.002, 0.020, 0.004), vegOut * clump * 0.85);
+   394→}
+   395→
+   396→// ---------------------------------------------------------------------------
+   397→// §18 — soft shadow ray (4× footprint → free penumbra)
+   398→// ---------------------------------------------------------------------------
+   399→float softShadow(vec3 p, int seed, float footprint) {
+   400→        float res = 1.0;
+   401→        float t = 0.6;
+   402→        for (int i = 0; i < 40; i++) {
+   403→                if (i >= u_shadow_steps) break;
+   404→                vec3 q = p + SUN * t;
+   405→                if (q.y > MAXH) break;
+   406→                float h = q.y - elevation(q.xz + u_chunk_origin, 4.0 * t * footprint, seed);
+   407→                res = min(res, 10.0 * h / t);
+   408→                if (res < 0.005) break;
+   409→                t += clamp(h * 0.8, 0.5, 60.0) + t * 0.04;
+   410→        }
+   411→        return clamp(res, 0.0, 1.0);
+   412→}
+   413→
+   414→// ---------------------------------------------------------------------------
+   415→// §20–§22 — sky, clouds, Beer-Lambert aerial perspective
+   416→// ---------------------------------------------------------------------------
+   417→vec3 skyColor(vec3 rd) {
+   418→        float sd = max(dot(rd, SUN), 0.0);
+   419→        float k = pow(max(rd.y, 0.0), 0.55);
+   420→        vec3 sky = mix(SKY_HOR, SKY_ZEN, k);
+   421→        sky = mix(SKY_HOR * 1.04, sky, smoothstep(-0.08, 0.06, rd.y));
+   422→        sky += SUN_COL * (pow(sd, 8.0) * 0.10 + pow(sd, 90.0) * 0.30);
+   423→        sky += SUN_COL * smoothstep(0.99955, 0.99985, sd) * 6.0;
+   424→        return sky;
+   425→}
+   426→
+   427→vec3 applyFog(vec3 col, float t, float h, vec3 rd) {
+   428→        float od = SIGMA_FOG * t * exp(-max(h, 0.0) / FOG_H);
+   429→        vec3 T = exp(-vec3(0.58, 0.72, 0.95) * od);
+   430→        vec3 inscatter = mix(skyColor(rd), SKY_HOR, 0.5);
+   431→        return col * T + inscatter * (1.0 - T);
+   432→}
+   433→
+   434→// ---------------------------------------------------------------------------
+   435→// Vertex — fullscreen clip-space quad + camera plumbing
+   436→// ---------------------------------------------------------------------------
+   437→void vertex() {
+   438→        v_ndc = VERTEX.xy; // QuadMesh(size 2) spans [-1, 1]²
+   439→        v_cam = INV_VIEW_MATRIX[3].xyz;
+   440→        v_r = INV_VIEW_MATRIX[0].xyz;
+   441→        v_u = INV_VIEW_MATRIX[1].xyz;
+   442→        v_b = INV_VIEW_MATRIX[2].xyz;
+   443→        v_pc0 = PROJECTION_MATRIX[0];
+   444→        v_pc1 = PROJECTION_MATRIX[1];
+   445→        v_pc2 = PROJECTION_MATRIX[2];
+   446→        v_pc3 = PROJECTION_MATRIX[3];
+   447→        // Overriding POSITION emits the quad directly in clip space at the far
+   448→        // plane (z = 0 = reversed-Z far). Depth comes from the raymarch below.
+   449→        POSITION = vec4(VERTEX.xy, 0.0, 1.0);
+   450→}
+   451→
+   452→// ---------------------------------------------------------------------------
+   453→// Fragment — Lipschitz march, bisection, water plane, shading, DEPTH write
+   454→// ---------------------------------------------------------------------------
+   455→void fragment() {
+   456→        mat3 v2w = mat3(v_r, v_u, v_b);          // view → world rotation
+   457→        mat3 w2v = transpose(v2w);               // world → view rotation
+   458→        mat4 proj = mat4(v_pc0, v_pc1, v_pc2, v_pc3);
+   459→
+   460→        vec3 dirView = vec3(v_ndc.x * u_aspect * u_tan_half, v_ndc.y * u_tan_half, -1.0);
+   461→        vec3 rd = normalize(v2w * dirView);
+   462→        vec3 ro = v_cam;
+   463→
+   464→        // Underwater camera: cheap depth fog (rare gameplay state).
+   465→        if (ro.y < W_LEVEL) {
+   466→                EMISSION = vec3(0.012, 0.055, 0.075) * (0.6 + 0.4 * max(rd.y, 0.0));
+   467→                ALBEDO = vec3(0.0);
+   468→                ROUGHNESS = 1.0;
+   469→                SPECULAR = 0.0;
+   470→                DEPTH = 0.0;
+   471→                return;
+   472→        }
+   473→
+   474→        // §26 early exit: above the ceiling and climbing → pure sky
+   475→        if (ro.y > MAXH && rd.y >= 0.0) {
+   476→                EMISSION = skyColor(rd);
+   477→                ALBEDO = vec3(0.0);
+   478→                ROUGHNESS = 1.0;
+   479→                SPECULAR = 0.0;
+   480→                DEPTH = 0.0; // reversed-Z far — SDFGI ignores it (outside cascades)
+   481→                return;
+   482→        }
+   483→
+   484→        float t = START_T;
+   485→        float tPrev = t;
+   486→        float grad = 0.0;
+   487→        float prevY = ro.y;
+   488→        float tWater = -1.0;
+   489→        float eWater = 0.0;
+   490→        bool hit = false;
+   491→        float tHit = 0.0;
+   492→
+   493→        for (int i = 0; i < 160; i++) {
+   494→                if (i >= u_march_steps) break;
+   495→                vec3 p = ro + rd * t;
+   496→
+   497→                if (p.y > MAXH && rd.y > 0.0) break;
+   498→
+   499→                float dp = max(t * u_footprint, 1e-4);
+   500→                float e = elevation(p.xz + u_chunk_origin, dp, u_seed);
+   501→
+   502→                // water plane crossing (§8): accept only over a submerged column
+   503→                if (tWater < 0.0 && prevY > W_LEVEL && p.y <= W_LEVEL) {
+   504→                        float f = (W_LEVEL - prevY) / (p.y - prevY);
+   505→                        float tw = tPrev + (t - tPrev) * f;
+   506→                        vec2 cw = ro.xz + rd.xz * tw + u_chunk_origin;
+   507→                        float ew = elevation(cw, dp, u_seed);
+   508→                        if (ew < W_LEVEL - 0.25) {
+   509→                                tWater = tw;
+   510→                                eWater = ew;
+   511→                                break; // water is above any later terrain hit
+   512→                        }
+   513→                }
+   514→                prevY = p.y;
+   515→
+   516→                if (p.y < e) { hit = true; break; }
+   517→
+   518→                // Lipschitz ‖∇E‖ via forward differences, refreshed every 2nd sample
+   519→                if (i - (i / 2) * 2 == 0) {
+   520→                        float eps = max(dp, 0.15);
+   521→                        vec2 g = p.xz + u_chunk_origin;
+   522→                        float ex = elevation(g + vec2(eps, 0.0), dp, u_seed);
+   523→                        float ez = elevation(g + vec2(0.0, eps), dp, u_seed);
+   524→                        grad = length(vec2((ex - e) / eps, (ez - e) / eps));
+   525→                }
+   526→
+   527→                tPrev = t;
+   528→                float step = max(DMIN, (p.y - e) / sqrt(grad * grad + 1.0) * LAMBDA);
+   529→                step *= 1.0 + t * GROWTH;         // §26 adaptive growth
+   530→                step = min(step, t * 0.06 + 2.0); // horizon clamp (anti-tunnel)
+   531→                t += step;
+   532→
+   533→                if (t > MAXDIST) break;
+   534→        }
+   535→
+   536→        if (hit) {
+   537→                // bisection refinement over [tPrev, t] (§16)
+   538→                float lo = tPrev, hi = t;
+   539→                for (int b = 0; b < BISECT; b++) {
+   540→                        float tm = 0.5 * (lo + hi);
+   541→                        vec3 m = ro + rd * tm;
+   542→                        float gap = m.y - elevation(m.xz + u_chunk_origin, tm * u_footprint, u_seed);
+   543→                        if (gap < 0.0) hi = tm; else lo = tm;
+   544→                }
+   545→                tHit = 0.5 * (lo + hi);
+   546→        }
+   547→
+   548→        if (hit && (tWater < 0.0 || tHit < tWater)) {
+   549→                // ---------------- terrain shading ----------------
+   550→                vec3 p = ro + rd * tHit;
+   551→                vec2 g = p.xz + u_chunk_origin;
+   552→                float dp = max(tHit * u_footprint, 1e-4);
+   553→
+   554→                vec2 grad2 = gradient(g, dp, dp, u_seed);   // §17: ε = pixel footprint
+   555→                vec3 n = normalize(vec3(-grad2.x, 1.0, -grad2.y));
+   556→
+   557→                float e = elevation(g, dp, u_seed);
+   558→                float T = temperature(g, e, u_seed);
+   559→                float M = moisture(g, u_seed);
+   560→
+   561→                float vegNoise = vnoise(g.x / VEG_WL, g.y / VEG_WL, u_seed + 171);
+   562→                float veg;
+   563→                vec3 albedo = biomeColor(T, M, e, length(grad2), vegNoise, veg);
+   564→
+   565→                float ndl = max(dot(n, SUN), 0.0);
+   566→                float sh = softShadow(p + n * 0.15, u_seed, u_footprint);
+   567→
+   568→                vec3 sunTerm = albedo * SUN_COL * ndl * sh;
+   569→                vec3 skyTint = mix(SKY_HOR, SKY_ZEN, 0.5);
+   570→                vec3 ambTerm = albedo * skyTint * (0.22 + 0.28 * max(n.y, 0.0));
+   571→
+   572→                // Beer-Lambert inscatter only (transmittance applies to lit terms):
+   573→                vec3 fogInscatter = applyFog(vec3(0.0), tHit, p.y, rd);
+   574→                vec3 sunLit = sunTerm * exp(-vec3(0.58, 0.72, 0.95)
+   575→                        * (SIGMA_FOG * tHit * exp(-max(p.y, 0.0) / FOG_H)));
+   576→
+   577→                // SDFGI: ALBEDO + NORMAL feed voxelization → indirect light reaches
+   578→                // the terrain; the sun's DIRECT term lives in EMISSION (the engine
+   579→                // light is culled from this layer to avoid double lighting). A
+   580→                // half-strength analytic sky-ambient floor keeps the surface sane
+   581→                // when voxel GI is off; SDFGI bounce adds the rest on top.
+   582→                ALBEDO = albedo;
+   583→                NORMAL = normalize(w2v * n); // view space, as the engine expects
+   584→                EMISSION = sunLit + 0.5 * ambTerm + fogInscatter;
+   585→                ROUGHNESS = 1.0;
+   586→                SPECULAR = 0.0;
+   587→                METALLIC = 0.0;
+   588→
+   589→                // REVERSED-Z DEPTH (Metal NDC): exact clip depth for a mesh vertex
+   590→                // at p — bit-compatible with rasterized geometry (§16).
+   591→                vec4 pView = vec4(w2v * (p - v_cam), 1.0);
+   592→                vec4 clip = proj * pView;
+   593→                DEPTH = clip.z / clip.w;
+   594→        } else if (tWater > 0.0) {
+   595→                // ---------------- water plane (§8) ----------------
+   596→                vec3 p = ro + rd * tWater;
+   597→                vec2 g = p.xz + u_chunk_origin;
+   598→                float depth = max(W_LEVEL - eWater, 0.0);
+   599→
+   600→                float r1 = vnoise(g.x / 5.5 + u_time * 0.35, g.y / 5.5 - u_time * 0.22, u_seed + 911);
+   601→                float r2 = vnoise(g.x / 9.7 - u_time * 0.20, g.y / 9.7 + u_time * 0.31, u_seed + 913);
+   602→                vec3 n = normalize(vec3(-0.22 * r1, 1.0, -0.22 * r2));
+   603→
+   604→                float sh = softShadow(p + vec3(0.0, 0.15, 0.0), u_seed, u_footprint);
+   605→                vec3 shallow = vec3(0.110, 0.320, 0.300);
+   606→                vec3 deep    = vec3(0.016, 0.075, 0.100);
+   607→                vec3 body = mix(shallow, deep, smoothstep(1.5, 14.0, depth))
+   608→                        * (0.35 + 0.65 * sh) * (0.6 + 0.4 * max(dot(n, SUN), 0.0));
+   609→
+   610→                float foamN = vnoise(g.x / 3.1, g.y / 3.1, u_seed + 917);
+   611→                body += vec3(0.9) * smoothstep(0.6, 0.05, depth) * (0.25 + 0.35 * foamN);
+   612→
+   613→                vec3 refl = skyColor(reflect(rd, n));
+   614→                float fres = 0.02 + 0.98 * pow(1.0 - max(dot(-rd, n), 0.0), 5.0);
+   615→                float spec = pow(max(dot(reflect(rd, n), SUN), 0.0), 240.0) * 3.0;
+   616→
+   617→                vec3 col = applyFog(mix(body, refl, fres) + SUN_COL * spec / 3.4, tWater, W_LEVEL, rd);
+   618→
+   619→                ALBEDO = vec3(0.0); // water is fully custom-lit
+   620→                NORMAL = normalize(w2v * n);
+   621→                EMISSION = col;
+   622→                ROUGHNESS = 0.1;
+   623→                SPECULAR = 0.0;
+   624→                METALLIC = 0.0;
+   625→
+   626→                vec4 pView = vec4(w2v * (p - v_cam), 1.0);
+   627→                vec4 clip = proj * pView;
+   628→                DEPTH = clip.z / clip.w;
+   629→        } else {
+   630→                // ---------------- sky + clouds (§20/§22) ----------------
+   631→                vec3 col = skyColor(rd);
+   632→                if (rd.y > 0.02 && ro.y < CLOUD_PLANE) {
+   633→                        float tc = (CLOUD_PLANE - ro.y) / rd.y;
+   634→                        vec2 cp = ro.xz + rd.xz * tc + u_chunk_origin + vec2(u_time * 6.0, u_time * 2.0);
+   635→                        float dpc = max(tc * u_footprint, 0.02);
+   636→                        float c = fbm(cp.x * F_CLOUD, cp.y * F_CLOUD, u_seed + 501,
+   637→                                CLOUD_OCT, 2.0, 0.5, dpc, F_CLOUD);
+   638→                        float cov = smoothstep(0.42, 0.78, 0.5 + 0.5 * c);
+   639→                        float shade = 0.85 + 0.30 * smoothstep(0.9, 0.2, c);
+   640→                        vec3 cloudCol = vec3(shade) * (0.62 + 0.38 * max(SUN.y, 0.0));
+   641→                        float fade = exp(-tc * 6.0e-5) * smoothstep(0.02, 0.12, rd.y);
+   642→                        col = mix(col, cloudCol, cov * fade);
+   643→                }
+   644→                EMISSION = col;
+   645→                ALBEDO = vec3(0.0);
+   646→                ROUGHNESS = 1.0;
+   647→                SPECULAR = 0.0;
+   648→                DEPTH = 0.0; // reversed-Z far
+   649→        }
+   650→}
+   651→
