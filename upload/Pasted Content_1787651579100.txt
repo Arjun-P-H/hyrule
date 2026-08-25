@@ -1,0 +1,522 @@
+# 1. Executive overview of the proposed mathematical world
+
+The proposed system abandons conventional polygon-based rendering in favor of a **purely mathematical, continuous scalar field** evaluated in real-time via GPU raymarching. The world fundamentally exists as a 2D plane $(x,y) \in \mathbb{R}^2$, governed by a deterministic master function $W(x,y,\text{seed})$. This function outputs environmental properties (elevation, moisture, temperature, biome weights). 
+
+To achieve the visual illusion of a 3D natural world, the 2D elevation field $E(x,y)$ is treated as a heightmap in a pseudo-3D space. A virtual camera casts mathematical rays through a 2D screen projection into this space, intersecting the continuous surface $z = E(x,y)$. Lighting, atmosphere, and depth are derived analytically from the gradients and intersection distances of this field. The result is an infinitely extensible, seamlessly coherent, and entirely asset-free natural environment where every visual pixel is a direct evaluation of underlying mathematics.
+
+# 2. Fundamental mathematical assumptions
+
+1. **Continuity**: The world is defined over $\mathbb{R}^2$. There are no discrete grids or voxels at the foundational level; discretization only occurs at the screen-sample (pixel) level.
+2. **Determinism**: $W(x,y,\text{seed})$ is a pure function. It has no side effects and relies on no external state.
+3. **Spatial Coherence**: The fields are Lipschitz continuous or smoothly differentiable almost everywhere, ensuring no visual tearing or infinite gradients.
+4. **Multi-scale Self-Similarity**: The world exhibits fractal properties, where statistical characteristics repeat across spatial frequencies.
+5. **Computational Locality**: The state at $(x,y)$ can be computed using only local mathematical operations and a bounded neighborhood, enabling massive parallelization on a GPU.
+
+# 3. Coordinate system
+
+The world utilizes a dual-coordinate architecture to balance infinite scale with numerical precision:
+* **Global Coordinates $(X, Y)$**: Represents the absolute position in the infinite world. Stored as 64-bit floating-point (`double`) or a pair of 32-bit floats (double-float emulation) on the CPU to prevent precision loss at extreme distances.
+* **Local Coordinates $(x, y)$**: Represents the position relative to the current camera chunk. $x = X - X_{\text{chunk}}$, $y = Y - Y_{\text{chunk}}$. Stored as 32-bit floating-point (`float`) in the GPU shader. All mathematical field evaluations use $(x,y)$ to ensure high precision and avoid floating-point jitter.
+
+# 4. Seed and deterministic hashing
+
+To ensure determinism without storing state, we use a 32-bit integer hash function based on the PCG/Murmur3 finalizer. This maps integer coordinates and a seed to a pseudo-random uniform distribution.
+
+$$ H(x_i, y_i, s) = \text{finalize}(x_i \oplus (y_i \times 0x27D4EB2F) \oplus (s \times 0x9E3779B9)) $$
+
+Where $\text{finalize}(h)$ applies bitwise shifts and multiplications to avalanche the bits:
+$$ h \mathrel{\oplus}= h \gg 16; \quad h \times= 0x85EBCA6B; \quad h \mathrel{\oplus}= h \gg 13; \quad h \times= 0xC2B2AE35; \quad h \mathrel{\oplus}= h \gg 16 $$
+
+To generate continuous noise, we evaluate $H$ at the integer lattice points $\lfloor x \rfloor, \lfloor y \rfloor$, convert to floats $U = H / 4294967295.0 \in [0,1]$, and interpolate using a quintic smoothstep $S(t) = 6t^5 - 15t^4 + 10t^3$ to ensure $C^2$ continuity (continuous second derivatives), eliminating visible grid artifacts.
+
+# 5. Macro terrain equation
+
+The macro terrain defines continents, oceans, and major tectonic plates. It uses low-frequency Fractal Brownian Motion (fBm).
+
+$$ E_{\text{macro}}(x,y) = \sum_{i=0}^{N_{\text{macro}}-1} a_i N(f_i x, f_i y) $$
+
+* **Variables**: $N$ is the base continuous noise function $\in [-1, 1]$. $f_i = f_0 \cdot L^i$ is the frequency (lacunarity $L \approx 2.0$). $a_i = P^i$ is the amplitude (persistence $P \approx 0.5$).
+* **Range**: Approximately $[-1.5, 1.5]$, normalized to $[-1, 1]$.
+* **Utility**: Creates broad, sweeping landmasses. Values $< 0$ conceptually represent ocean basins; values $> 0$ represent land.
+* **Interaction**: Acts as a base mask and elevation offset for all meso and micro scales.
+
+# 6. Mountain equation
+
+Mountains require sharp ridges and asymmetric slopes, which standard fBm cannot produce. We use a **Ridged Multifractal** modulated by domain warping.
+
+First, the ridge function:
+$$ R(x,y) = 1.0 - |N(x,y)| $$
+To sharpen the peaks, we square it: $R_{\text{sharp}} = R(x,y)^2$.
+
+The mountain elevation field:
+$$ E_{\text{mount}}(x,y) = \sum_{i=0}^{N_{\text{mount}}-1} a_i \left( 1.0 - |N(f_i x + W_x, f_i y + W_y)| \right)^2 \cdot M_{\text{macro}}(x,y) $$
+
+* **Variables**: $W_x, W_y$ are domain warp offsets (see Sec 14). $M_{\text{macro}}$ is a mask derived from $E_{\text{macro}}$ ensuring mountains only form on land.
+* **Range**: $[0, \text{MaxHeight}]$.
+* **Utility**: The absolute value creates sharp discontinuities in the derivative (ridges). Squaring narrows the peaks. The mask prevents mountains from forming in the ocean.
+* **Parameters**: Higher persistence ($P \approx 0.6$) creates more jagged, alpine peaks.
+
+# 7. Valley equation
+
+Valleys and canyons are carved using **Cellular (Worley) Noise**, which calculates the distance to the nearest randomly distributed seed point.
+
+Let $F_1(x,y)$ be the distance to the nearest seed, and $F_2(x,y)$ be the distance to the second nearest. The distance to the cell boundary (the "edge") is:
+$$ D_{\text{edge}}(x,y) = F_2(x,y) - F_1(x,y) $$
+
+The valley carving function:
+$$ E_{\text{valley}}(x,y) = C_{\text{depth}} \cdot \left( 1.0 - \text{smoothstep}(0, W_{\text{valley}}, D_{\text{edge}}(x,y)) \right)^2 $$
+
+* **Variables**: $C_{\text{depth}}$ is maximum carving depth. $W_{\text{valley}}$ controls valley width.
+* **Range**: $[0, C_{\text{depth}}]$.
+* **Utility**: $D_{\text{edge}}$ is exactly $0$ at the boundaries between Voronoi cells. This creates a natural, branching network of low points that perfectly mimics fluvial erosion and drainage basins.
+* **Interaction**: Subtracted from the combined macro and mountain elevation.
+
+# 8. Water equation
+
+Water is not an independent layer; it is a mathematical consequence of elevation and cellular boundaries.
+
+**Oceans and Lakes**:
+$$ W_{\text{body}}(x,y) = \text{smoothstep}(E_{\text{terrain}}(x,y) - \epsilon, E_{\text{terrain}}(x,y) + \epsilon, W_{\text{level}}) $$
+Where $E_{\text{terrain}} = E_{\text{macro}} + E_{\text{mount}} - E_{\text{valley}}$.
+
+**Rivers and Streams**:
+Rivers flow along the Voronoi edges defined in the valley equation, but only where the terrain is above sea level and slope is sufficient.
+$$ W_{\text{river}}(x,y) = \text{smoothstep}(W_{\text{river\_width}}, 0, D_{\text{edge}}(x,y)) \cdot \text{smoothstep}(W_{\text{level}}, W_{\text{level}} + 0.1, E_{\text{terrain}}) \cdot \|\nabla E_{\text{terrain}}\| $$
+
+* **Utility**: This guarantees rivers naturally connect lakes, follow the steepest descent (via the gradient magnitude multiplier), and never flow uphill or exist in the ocean.
+
+# 9. Climate equations
+
+Climate is derived from global position, elevation, and noise, avoiding disconnected random maps.
+
+**Temperature**:
+$$ T(x,y) = T_{\text{base}} - \lambda_{\text{lat}} |Y_{\text{global}}| - \lambda_{\text{alt}} \max(0, E_{\text{terrain}}) + N_{\text{temp}}(x,y) $$
+* **Variables**: $\lambda_{\text{lat}}$ is the latitude cooling rate. $\lambda_{\text{alt}}$ is the adiabatic lapse rate (altitude cooling). $N_{\text{temp}}$ is low-frequency noise for local climate anomalies.
+* **Range**: $[-1, 1]$ (normalized, where $-1$ is freezing, $1$ is hot).
+
+**Moisture**:
+$$ M(x,y) = M_{\text{base}} + N_{\text{moist}}(x,y) + \lambda_{\text{ocean}} \exp(-D_{\text{ocean}}(x,y) / \sigma_{\text{moist}}) $$
+* **Variables**: $D_{\text{ocean}}$ is the distance to the nearest ocean (approximated via the macro field). $\sigma_{\text{moist}}$ is the moisture decay distance.
+* **Range**: $[0, 1]$.
+
+# 10. Biome equation
+
+Biomes are calculated using continuous radial basis functions (RBF) in the $(T, M, E)$ space, ensuring perfectly smooth transitions without hard thresholds.
+
+Define $K$ biome centers $C_k = (T_k, M_k, E_k)$. The weight for biome $k$ is:
+$$ w_k(x,y) = \exp\left( - \left( \frac{(T - T_k)^2}{\sigma_{T,k}^2} + \frac{(M - M_k)^2}{\sigma_{M,k}^2} + \frac{(E - E_k)^2}{\sigma_{E,k}^2} \right) \right) $$
+
+Normalize the weights:
+$$ W_k(x,y) = \frac{w_k(x,y)}{\sum_{j=1}^K w_j(x,y)} $$
+
+* **Utility**: Any environmental property $P$ (color, vegetation density, roughness) is computed as $P(x,y) = \sum_{k=1}^K W_k(x,y) P_k$. This guarantees $C^\infty$ smooth blending between biomes.
+
+# 11. Vegetation equation
+
+Vegetation is a scalar density field $V(x,y)$ that modulates surface color and perturbs the surface normal to simulate grass/leaves without 3D models.
+
+$$ V(x,y) = \left( \sum_{k=1}^K W_k(x,y) V_{\text{base},k} \right) \cdot \text{smoothstep}(0.2, 0.4, M(x,y)) \cdot \text{smoothstep}(0.8, 0.6, \|\nabla E_{\text{terrain}}\|) $$
+
+* **Variables**: $V_{\text{base},k}$ is the max vegetation for biome $k$. The smoothsteps ensure plants only grow with sufficient moisture and on flat ground (not cliffs).
+* **Visual Application**: $V(x,y)$ is used to mix rock/dirt colors with green colors, and added as high-frequency noise to the surface normal $\vec{n}$ to create a fuzzy, grass-like shading effect.
+
+# 12. Geological anomaly equation
+
+To create rare, unusual mathematical structures (e.g., spiral valleys, fractal craters), we use a low-frequency Voronoi grid to assign unique IDs to massive regions.
+
+$$ \text{CellID} = \text{WorleyID}(X \cdot S_{\text{anom}}, Y \cdot S_{\text{anom}}) $$
+$$ \text{AnomHash} = H(\text{CellID}_x, \text{CellID}_y, \text{seed}) / 4294967295.0 $$
+
+If $\text{AnomHash} < P_{\text{anom}}$ (e.g., 0.005 for 0.5% rarity):
+Calculate distance to cell center $D_c$. Apply a radial falloff $F = \text{smoothstep}(R_{\text{anom}}, 0, D_c)$.
+Generate anomalous terrain $E_{\text{anom}}$ using non-standard math (e.g., $E_{\text{anom}} = \sin(D_c \cdot 10) \cdot \cos(\theta \cdot 5)$).
+$$ E_{\text{final}} = \text{mix}(E_{\text{terrain}}, E_{\text{anom}}, F) $$
+
+* **Utility**: Guarantees statistical rarity, absolute determinism, and spatial coherence without storing a database of landmarks.
+
+# 13. Regional mathematical-rule equation
+
+Large regions are governed by different terrain generation algorithms. We use a macro Voronoi grid (scale $S_{\text{region}} \approx 0.0001$).
+
+Let $R_{\text{id}}$ be the region ID. We define different terrain functions:
+* $f_0$: Standard fBm (Mountains)
+* $f_1$: Trigonometric waves (Rolling dunes/hills)
+* $f_2$: Quantized/Stepped noise (Mesas/Plateaus)
+
+The blending weight between the current region and its neighbor is derived from the Worley edge distance $D_{\text{edge\_region}}$:
+$$ B_{\text{region}} = \text{smoothstep}(0, W_{\text{blend}}, D_{\text{edge\_region}}) $$
+The final terrain smoothly interpolates between the mathematical rules of adjacent regions.
+
+# 14. Domain-warping system
+
+Domain warping breaks the isotropic (directionally uniform) look of standard noise, creating organic, fluid-like geological folding.
+
+$$ q(x,y) = \begin{pmatrix} \text{fBm}(x, y) \\ \text{fBm}(x + 5.2, y + 1.3) \end{pmatrix} $$
+$$ r(x,y) = \begin{pmatrix} \text{fBm}(x + 4.0 q_x, y + 4.0 q_y) \\ \text{fBm}(x + 4.0 q_x + 1.7, y + 4.0 q_y + 9.2) \end{pmatrix} $$
+$$ \begin{pmatrix} x' \\ y' \end{pmatrix} = \begin{pmatrix} x \\ y \end{pmatrix} + S_{\text{warp}} \cdot r(x,y) $$
+
+* **Variables**: $S_{\text{warp}}$ is the warp strength.
+* **Utility**: The nested fBm evaluations create chaotic, swirling distortions. When $E(x', y')$ is evaluated, it produces winding mountain ranges, meandering coastlines, and highly natural, non-repetitive structures.
+
+# 15. Pseudo-3D projection model
+
+I investigated five models. **Model E (Ray-like mathematical sampling / Heightfield Raymarching)** is the superior choice.
+
+* **Model A (Orthographic)**: Lacks depth perception.
+* **Model B (Perspective-warped 2D)**: Creates "treadmilling" artifacts and fails at steep angles.
+* **Model C (Height-dependent)**: Complex to implement, breaks at horizons.
+* **Model D (Layered depth)**: Looks like cardboard cutouts (parallax scrolling).
+* **Model E (Raymarching)**: The 2D field $E(x,y)$ is treated as a surface $z = E(x,y)$ in 3D space. Rays are cast from the camera. This natively produces true perspective, occlusion, parallax, and shadows from a purely 2D mathematical field.
+
+**Recommendation**: Model E. It perfectly fulfills the "2D world pretending to be 3D" requirement while providing genuine 3D visual fidelity.
+
+# 16. Depth model
+
+Depth is the distance $t$ along the view ray $\vec{R}$ from the camera origin $\vec{C}$ to the intersection point $\vec{P}$ where $P_z = E(P_x, P_y)$.
+
+$$ \vec{P}(t) = \vec{C} + t \vec{R} $$
+The raymarching loop solves for $t$ iteratively:
+$$ t_{i+1} = t_i + \max(\Delta_{\text{min}}, (P_{z,i} - E(P_{x,i}, P_{y,i})) \cdot \lambda_{\text{step}}) $$
+Where $\lambda_{\text{step}} \approx 0.5$ ensures we don't overstep the surface. Depth $t$ is used for fog, atmospheric scattering, and level-of-detail (LOD) noise cutoff.
+
+# 17. Surface-normal model
+
+The surface normal $\vec{n}$ is derived analytically from the elevation gradient $\nabla E$.
+
+$$ \nabla E(x,y) = \begin{pmatrix} \frac{\partial E}{\partial x} \\ \frac{\partial E}{\partial y} \end{pmatrix} \approx \begin{pmatrix} \frac{E(x+\epsilon, y) - E(x-\epsilon, y)}{2\epsilon} \\ \frac{E(x, y+\epsilon) - E(x, y-\epsilon)}{2\epsilon} \end{pmatrix} $$
+
+The 3D normal vector is:
+$$ \vec{n}(x,y) = \frac{(-\frac{\partial E}{\partial x}, -\frac{\partial E}{\partial y}, 1)}{\sqrt{(\frac{\partial E}{\partial x})^2 + (\frac{\partial E}{\partial y})^2 + 1}} $$
+* **Optimization**: $\epsilon$ is scaled by the ray distance $t$ to maintain constant screen-space detail and avoid aliasing.
+
+# 18. Lighting model
+
+Lighting uses a Lambertian diffuse model with a Blinn-Phong specular highlight for water, plus shadow raymarching.
+
+$$ L_{\text{diffuse}} = \max(0, \vec{n} \cdot \vec{L}_{\text{sun}}) $$
+$$ L_{\text{specular}} = \left( \max(0, \vec{n} \cdot \vec{H}) \right)^{\alpha} \cdot W_{\text{body}} $$
+Where $\vec{H} = \text{normalize}(\vec{L}_{\text{sun}} - \vec{R})$.
+
+**Shadows**: To check if a point $\vec{P}$ is in shadow, march a secondary ray from $\vec{P}$ toward $\vec{L}_{\text{sun}}$. If $P_z(t) < E(P_x(t), P_y(t))$ at any point before reaching the sky, $L_{\text{shadow}} = 0$, else $1$.
+
+# 19. Atmospheric model
+
+Atmosphere is modeled using the Beer-Lambert law for light extinction and in-scattering.
+
+$$ \tau(t) = \int_0^t \sigma(s) ds \approx \sigma_{\text{fog}} \cdot t $$
+$$ T_{\text{transmittance}} = \exp(-\tau(t)) $$
+$$ I_{\text{inscatter}} = C_{\text{sky}} \cdot (1 - \exp(-\tau(t))) $$
+
+* **Variables**: $\sigma_{\text{fog}}$ is the scattering coefficient (density). $C_{\text{sky}}$ is the sky color at the ray's altitude.
+* **Utility**: Distant objects smoothly fade into the sky color, providing massive depth cues and hiding the raymarching cutoff distance.
+
+# 20. Sky model
+
+The sky is a procedural gradient with raymarched volumetric clouds.
+
+**Gradient**:
+$$ C_{\text{sky}}(\vec{R}) = \text{mix}(C_{\text{horizon}}, C_{\text{zenith}}, \max(0, R_z)^{0.5}) $$
+
+**Clouds**: Intersect the view ray with a flat cloud plane at height $H_c$.
+$$ \vec{P}_c = \vec{C} + \frac{H_c - C_z}{R_z} \vec{R} $$
+$$ D_{\text{cloud}} = \text{fBm}_{\text{cloud}}(P_{cx}, P_{cy}) $$
+$$ C_{\text{cloud}} = \text{smoothstep}(0.4, 0.6, D_{\text{cloud}}) \cdot \max(0, \vec{n}_{\text{cloud}} \cdot \vec{L}_{\text{sun}}) $$
+Clouds are blended over the sky gradient based on $D_{\text{cloud}}$.
+
+# 21. Color model
+
+Colors are defined in the **OKLab** perceptual color space to ensure that interpolations between biomes (e.g., green forest to brown desert) do not pass through muddy, desaturated grays, which happens in RGB or HSV.
+
+1. Define biome base colors in OKLab: $(L_k, a_k, b_k)$.
+2. Interpolate using biome weights $W_k$: $L = \sum W_k L_k$, etc.
+3. Add lighting: $L_{\text{final}} = L \cdot (L_{\text{ambient}} + L_{\text{diffuse}})$.
+4. Convert OKLab back to Linear sRGB, then apply gamma correction ($x^{1/2.2}$) for final output.
+
+# 22. Final compositing equation
+
+The final pixel color $C_{\text{pixel}}$ combines surface, lighting, and atmosphere:
+
+$$ C_{\text{surface}} = C_{\text{biome}} \cdot (L_{\text{ambient}} + L_{\text{diffuse}} \cdot L_{\text{shadow}}) + L_{\text{specular}} $$
+$$ C_{\text{pixel}} = \text{mix}(C_{\text{sky\_ray}}, C_{\text{surface}}, T_{\text{transmittance}}) + I_{\text{inscatter}} $$
+
+If the ray never intersects the terrain (looks at the sky), $C_{\text{pixel}} = C_{\text{sky\_ray}} + C_{\text{cloud}}$.
+
+# 23. Cursor/observer equations
+
+The observer's viewing direction is controlled by the mouse. We map mouse delta $\Delta M$ to spherical coordinates (yaw $\theta$, pitch $\phi$).
+
+$$ \theta_{\text{target}} = \theta_{\text{current}} + \Delta M_x \cdot S_{\text{sens}} $$
+$$ \phi_{\text{target}} = \text{clamp}(\phi_{\text{current}} + \Delta M_y \cdot S_{\text{sens}}, -\frac{\pi}{2} + \epsilon, \frac{\pi}{2} - \epsilon) $$
+
+The camera direction vector is:
+$$ \vec{D}_{\text{cam}} = \begin{pmatrix} \cos(\phi) \sin(\theta) \\ \sin(\phi) \\ \cos(\phi) \cos(\theta) \end{pmatrix} $$
+
+# 24. Camera smoothing equations
+
+To prevent jerky movement and simulate visual inertia, we use a critically damped spring system for position, and exponential smoothing for rotation.
+
+**Rotation (Exponential Smoothing)**:
+$$ \theta_{\text{current}} = \text{mix}(\theta_{\text{current}}, \theta_{\text{target}}, 1 - \exp(-k_{\text{rot}} \Delta t)) $$
+
+**Position (Spring-Damper)**:
+$$ \vec{a} = k_s (\vec{P}_{\text{target}} - \vec{P}_{\text{current}}) - k_d \vec{v} $$
+$$ \vec{v} = \vec{v} + \vec{a} \Delta t $$
+$$ \vec{P}_{\text{current}} = \vec{P}_{\text{current}} + \vec{v} \Delta t $$
+Where $k_d = 2 \sqrt{k_s}$ for critical damping (no oscillation).
+
+# 25. Infinite-world architecture
+
+The world is divided into conceptual chunks of size $2^{16}$ units.
+1. **CPU**: Maintains the global camera position $\vec{C}_{\text{global}}$ in 64-bit precision.
+2. **Chunking**: Calculates $\vec{C}_{\text{chunk}} = \text{floor}(\vec{C}_{\text{global}} / \text{ChunkSize}) \cdot \text{ChunkSize}$.
+3. **GPU Uniforms**: Passes $\vec{C}_{\text{chunk}}$ (as high-precision pair) and $\vec{C}_{\text{local}} = \vec{C}_{\text{global}} - \vec{C}_{\text{chunk}}$ (as 32-bit float).
+4. **Shader**: All raymarching and noise evaluations use $\vec{P}_{\text{local}} = \vec{C}_{\text{local}} + t \vec{R}$. This ensures the math never operates on numbers larger than $\approx 65536$, preserving 32-bit float precision and eliminating vertex/pixel jitter.
+
+# 26. GPU optimization strategy
+
+* **Adaptive Raymarching**: Step size $dt$ increases with distance $t$ ($dt = t \cdot 0.01$). Distant terrain requires less precision.
+* **Early Exit**: If the ray's $z$ component is positive and its current $z$ is above the maximum possible world height, terminate the ray and draw sky.
+* **LOD Noise**: High-frequency noise octaves are dropped when the ray intersection distance $t$ exceeds a threshold, saving ALU operations.
+* **Derivative Reuse**: The gradient $\nabla E$ calculated for the normal is reused for slope-based biome blending and river flow masks.
+* **Half-Resolution Atmosphere**: Fog and sky calculations can be done at half resolution and upsampled, as they lack high-frequency detail.
+
+# 27. Numerical precision strategy
+
+* **Global State**: `double` (Float64) for camera X, Y, Z.
+* **Local State**: `float` (Float32) for shader math.
+* **Hash Precision**: Integer `uint32` for hashing. Never use floating-point coordinates for hashing, as $1000000.1$ and $1000000.2$ may hash identically due to precision loss. Always cast to integer grid coordinates first: `uint ix = uint(floor(x))`.
+* **Continuity**: Ensure noise interpolation uses `fract(x)` and integer `floor(x)` to avoid seams at chunk boundaries.
+
+# 28. Full dependency graph
+
+```text
+[Seed] + [Global X, Y]
+   │
+   ├─> [Hash Function] ─> [Base Noise N(x,y)]
+   │                         │
+   │                         ├─> [fBm] ─> [Macro Terrain E_macro]
+   │                         │               │
+   │                         ├─> [Ridged fBm]┘ (Mountains)
+   │                         │
+   │                         └─> [Worley Noise] ─> [Valleys / Rivers]
+   │
+   └─> [Domain Warping] (Modifies x,y inputs to above)
+                             │
+                             ▼
+                      [Final Elevation E_terrain]
+                             │
+              ┌──────────────┼──────────────┐
+              ▼              ▼              ▼
+      [Gradient ∇E]    [Climate T, M]   [Water Mask]
+              │              │              │
+              ▼              ▼              ▼
+       [Normal n]      [Biome Weights]  [Water Color]
+              │              │              │
+              └──────┬───────┘              │
+                     ▼                      │
+              [Surface Color]               │
+                     │                      │
+                     ▼                      ▼
+              [Lighting & Shadows] <── [Raymarching Depth t]
+                     │                      │
+                     ▼                      ▼
+              [Atmosphere/Fog] <──── [Sky & Clouds]
+                     │
+                     ▼
+              [Final Pixel RGB]
+```
+
+# 29. Complete parameter table
+
+| Parameter | Meaning | Default | Min | Max | Visual Effect | Cost |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| `S_macro` | Macro noise scale | 0.001 | 0.0001 | 0.01 | Continent size | Low |
+| `S_mountain` | Mountain noise scale | 0.01 | 0.005 | 0.05 | Mountain density | Med |
+| `Roughness` | fBm persistence | 0.5 | 0.2 | 0.8 | Terrain jaggedness | Low |
+| `Octaves` | fBm octave count | 6 | 2 | 10 | Fine detail level | High |
+| `Warp_str` | Domain warp strength | 2.0 | 0.0 | 10.0 | Organic distortion | High |
+| `T_gradient` | Latitude temp drop | 0.01 | 0.0 | 0.05 | Ice caps vs equator | Low |
+| `E_lapse` | Altitude temp drop | 0.5 | 0.0 | 2.0 | Snowy peaks | Low |
+| `M_scale` | Moisture noise scale| 0.005 | 0.001 | 0.02 | Climate zone size | Med |
+| `Water_lvl` | Global sea level | 0.0 | -1.0 | 1.0 | Ocean coverage | Low |
+| `Fog_dens` | Atmospheric density | 0.02 | 0.0 | 0.1 | Visibility distance | Low |
+| `Sun_dir` | Sunlight vector | (0.5,0.8,0.3)| - | - | Shadow direction | Low |
+| `Shadow_res`| Shadow ray steps | 16 | 4 | 64 | Shadow crispness | High |
+| `Anom_prob` | Anomaly probability | 0.005 | 0.0 | 0.1 | Landmark rarity | Low |
+| `Cam_sens` | Mouse sensitivity | 0.002 | 0.001 | 0.01 | Look speed | None |
+| `Cam_damp` | Camera damping | 5.0 | 1.0 | 20.0 | Movement smoothness | None |
+| `FOV` | Field of view | 60.0 | 30.0 | 110.0 | Peripheral vision | None |
+
+# 30. Fully worked numerical example at one world coordinate
+
+Let $(X, Y) = (100.5, 200.3)$, $\text{seed} = 42$.
+1. **Hash**: $H(100, 200, 42) \rightarrow \text{yields } 0.65$.
+2. **Noise**: Interpolating lattice yields $N(100.5, 200.3) = 0.4$.
+3. **Macro fBm**: $E_{\text{macro}} = 0.4 + 0.5(0.2) + 0.25(-0.1) = 0.475$ (Land).
+4. **Mountain**: Ridged noise yields $0.8$. Squared = $0.64$. $E_{\text{mount}} = 0.64 \cdot 1.0 = 0.64$.
+5. **Valley**: Worley edge distance $D_{\text{edge}} = 0.1$. Carve depth $= 0.2$.
+6. **Final Elevation**: $E_{\text{terrain}} = 0.475 + 0.64 - 0.2 = 0.915$.
+7. **Climate**: $T = 1.0 - 0.01(200) - 0.5(0.915) = -1.45 \rightarrow \text{clamped to } -1.0$ (Freezing). $M = 0.3$ (Dry).
+8. **Biome**: High weight for "Alpine Snow" and "Tundra".
+9. **Normal**: $\nabla E = (0.2, -0.1)$. $\vec{n} = (-0.2, 0.1, 1) / \text{length} \approx (-0.19, 0.09, 0.97)$.
+10. **Lighting**: Sun $\vec{L} = (0.5, 0.8, 0.3)$. Diffuse $= \max(0, \vec{n} \cdot \vec{L}) = 0.28$.
+11. **Color**: OKLab interpolation of Snow (White) and Rock (Gray). Modulated by lighting $0.28$. Final RGB $\approx (0.65, 0.68, 0.72)$.
+
+# 31. Pseudocode for the entire pipeline (CPU/Logic)
+
+```cpp
+struct Camera {
+    dvec3 pos_global;
+    vec3 pos_local;
+    vec3 velocity;
+    double yaw, pitch;
+    double target_yaw, target_pitch;
+};
+
+void update(Camera& cam, Input input, double dt) {
+    // 1. Mouse smoothing
+    cam.target_yaw += input.mouse_dx * SENSITIVITY;
+    cam.target_pitch += input.mouse_dy * SENSITIVITY;
+    cam.yaw = mix(cam.yaw, cam.target_yaw, 1.0 - exp(-10.0 * dt));
+    cam.pitch = clamp(mix(cam.pitch, cam.target_pitch, 1.0 - exp(-10.0 * dt)), -PI/2 + 0.1, PI/2 - 0.1);
+
+    // 2. Movement spring-damper
+    vec3 wish_dir = get_wish_direction(cam.yaw, input.keys);
+    vec3 accel = SPRING_K * (wish_dir * SPEED - cam.pos_local) - DAMPING_K * cam.velocity;
+    cam.velocity += accel * dt;
+    cam.pos_local += cam.velocity * dt;
+    
+    // 3. Chunking and precision rebasing
+    cam.pos_global += dvec3(cam.velocity * dt);
+    dvec3 chunk_origin = floor(cam.pos_global / CHUNK_SIZE) * CHUNK_SIZE;
+    cam.pos_local = vec3(cam.pos_global - chunk_origin);
+    
+    // 4. Upload to GPU
+    set_uniform("u_chunk_origin", chunk_origin);
+    set_uniform("u_cam_local", cam.pos_local);
+    set_uniform("u_yaw_pitch", vec2(cam.yaw, cam.pitch));
+}
+```
+
+# 32. GPU shader-oriented pseudocode (Fragment Shader)
+
+```glsl
+#version 450
+layout(location = 0) out vec4 fragColor;
+uniform vec3 u_cam_local;
+uniform vec2 u_yaw_pitch;
+uniform float u_time;
+
+// [Include Noise, Hash, and fBm functions here]
+
+float get_elevation(vec2 p) {
+    vec2 warped = domain_warp(p);
+    float macro = fbm(warped * 0.001);
+    float mount = ridged_fbm(warped * 0.01) * smoothstep(0.0, 0.5, macro);
+    float valley = worley_edge(warped * 0.02) * 0.5;
+    return macro + mount - valley;
+}
+
+vec3 get_normal(vec2 p, float eps) {
+    float eL = get_elevation(p - vec2(eps, 0));
+    float eR = get_elevation(p + vec2(eps, 0));
+    float eD = get_elevation(p - vec2(0, eps));
+    float eU = get_elevation(p + vec2(0, eps));
+    return normalize(vec3(eL - eR, 2.0 * eps, eD - eU));
+}
+
+void main() {
+    vec2 uv = (gl_FragCoord.xy / resolution) * 2.0 - 1.0;
+    uv.x *= aspect_ratio;
+    
+    // Ray generation
+    vec3 ro = u_cam_local;
+    vec3 rd = get_ray_direction(uv, u_yaw_pitch, FOV);
+    
+    // Raymarching
+    float t = 0.0;
+    float t_max = 5000.0;
+    bool hit = false;
+    vec3 p;
+    
+    for (int i = 0; i < 128; i++) {
+        p = ro + rd * t;
+        float h = get_elevation(p.xz);
+        if (p.y < h) { hit = true; break; }
+        t += max(0.1, (p.y - h) * 0.5); // Adaptive step
+        if (t > t_max) break;
+    }
+    
+    vec3 col;
+    if (hit) {
+        vec3 n = get_normal(p.xz, t * 0.001);
+        float diffuse = max(0.0, dot(n, sun_dir));
+        vec3 base_col = get_biome_color(p.xz, get_elevation(p.xz));
+        col = base_col * (ambient + diffuse);
+        
+        // Atmosphere
+        float fog = 1.0 - exp(-t * fog_density);
+        col = mix(col, sky_color(rd), fog);
+    } else {
+        col = get_sky_and_clouds(ro, rd);
+    }
+    
+    fragColor = vec4(linear_to_srgb(col), 1.0);
+}
+```
+
+# 33. Recommended first prototype (Progressive Implementation)
+
+* **Stage 1**: Deterministic color field. Implement hash, value noise, and fBm. Map fBm output directly to a grayscale color. *Test: Smooth, continuous noise without grid artifacts.*
+* **Stage 2**: Multi-scale terrain. Add lacunarity and persistence. *Test: Visual fractal detail.*
+* **Stage 3**: Elevation & Raymarching. Implement Model E projection. Map fBm to height. *Test: Flying over a 3D heightmap.*
+* **Stage 4**: Water. Add sea level threshold. *Test: Flat blue planes intersecting terrain.*
+* **Stage 5**: Climate. Add global Y and altitude modifiers. *Test: Color gradients based on height and latitude.*
+* **Stage 6**: Biomes. Implement RBF biome blending. *Test: Smooth transitions between green, brown, and white.*
+* **Stage 7**: Pseudo-3D Depth. Implement adaptive step sizes and distance-based LOD. *Test: Stable rendering at high altitudes.*
+* **Stage 8**: Lighting. Implement gradient normals and Lambertian shading. *Test: 3D shape perception and shadows.*
+* **Stage 9**: Atmosphere. Add Beer-Lambert fog. *Test: Distant mountains fading into the sky.*
+* **Stage 10**: Rare anomalies. Add Voronoi ID hashing and radial math blends. *Test: Discovering a spiral valley.*
+* **Stage 11**: Observer system. Add spring-damper camera and mouse look. *Test: Smooth, weighty flight controls.*
+* **Stage 12**: GPU Optimization. Implement early exits, half-res fog, and derivative reuse. *Test: 60+ FPS at 1080p.*
+
+# 34. Failure modes and how to fix them
+
+1. **Raymarching Leaks (Tunneling)**: The ray steps over a thin mountain peak.
+   * *Fix*: Use a relaxed marching factor ($\lambda_{\text{step}} < 1.0$) or implement a binary search refinement upon detecting a hit.
+2. **Aliasing / Moiré Patterns**: High-frequency noise shimmers when the camera moves.
+   * *Fix*: Scale the finite-difference $\epsilon$ for normals by the ray distance $t$. Drop noise octaves where the spatial frequency exceeds the Nyquist limit of the screen pixel.
+3. **Floating-Point Jitter**: Distant terrain vibrates violently.
+   * *Fix*: Strictly enforce the floating-origin (chunking) architecture. Never pass global coordinates to the GPU as 32-bit floats.
+4. **Muddy Biome Colors**: Interpolating RGB green and red yields brown.
+   * *Fix*: Strictly enforce OKLab color space interpolation for all biome blending.
+5. **Performance Bottlenecks**: Shadow raymarching halves the framerate.
+   * *Fix*: Limit shadow rays to a short distance (e.g., 50 units) and use a very low step count (4-8 steps). Distant shadows are hidden by fog anyway.
+
+# 35. Final master mathematical specification
+
+The complete visual output for a screen coordinate $(u,v)$ is defined hierarchically:
+
+$$
+\boxed{
+\begin{aligned}
+&\textbf{1. Projection \& Intersection:} \\
+&\vec{R}(u,v) = M_{\text{cam}}(\theta, \phi) \cdot \begin{pmatrix} u \\ v \\ -1 \end{pmatrix}, \quad \vec{P}(t) = \vec{C}_{\text{local}} + t \vec{R} \\
+&t^* = \min \{ t \mid P_z(t) \le E_{\text{terrain}}(P_x(t), P_y(t)) \} \\
+\\
+&\textbf{2. Environmental Fields (evaluated at } \vec{P}_{xz} = (P_x(t^*), P_y(t^*)): \\
+&E_{\text{terrain}}(x,y) = E_{\text{macro}} + E_{\text{mount}}(W(x,y)) - E_{\text{valley}}(W(x,y)) \\
+&T(x,y) = T_{\text{base}} - \lambda_{\text{lat}} |Y_{\text{global}}| - \lambda_{\text{alt}} E_{\text{terrain}} \\
+&M(x,y) = M_{\text{base}} + N_{\text{moist}} + \lambda_{\text{ocean}} \exp(-D_{\text{ocean}}/\sigma) \\
+&W_k(x,y) = \frac{\exp(-\| (T,M,E) - C_k \|^2_{\Sigma})}{\sum_j \exp(-\| (T,M,E) - C_j \|^2_{\Sigma})} \\
+\\
+&\textbf{3. Shading \& Atmosphere:} \\
+&\vec{n} = \frac{(-\nabla E_{\text{terrain}}, 1)}{\|(-\nabla E_{\text{terrain}}, 1)\|}, \quad L_{\text{diff}} = \max(0, \vec{n} \cdot \vec{L}_{\text{sun}}) \cdot L_{\text{shadow}} \\
+&C_{\text{surface}} = \text{OKLab\_to\_sRGB}\left( \sum_k W_k C_{\text{biome},k} \right) \cdot (L_{\text{amb}} + L_{\text{diff}}) \\
+&\tau = \sigma_{\text{fog}} t^*, \quad T_{\text{trans}} = e^{-\tau}, \quad I_{\text{scatter}} = C_{\text{sky}}(\vec{R}) (1 - e^{-\tau}) \\
+\\
+&\textbf{4. Final Compositing:} \\
+&C_{\text{final}}(u,v) = C_{\text{surface}} \cdot T_{\text{trans}} + I_{\text{scatter}}
+\end{aligned}
+}
+$$
