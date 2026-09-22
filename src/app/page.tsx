@@ -7,17 +7,15 @@
  *   - TerrainDemo    (WebGL2 raymarcher, §30 Stage-0 GPU parity harness)
  *   - HillshadePanel (relief map from the CPU twin)
  *   - WorkedExample  (instrumented §30 march table)
- *   - FileBrowser    (the real godot-project/ sources via /api/files)
+ *   - FileBrowser    (the browser world engine sources via /api/files)
  * plus the distilled spec (formula cards), the §29 parameter table and the
  * §27/§31 parity contract. Seed + quality preset state lives here only —
  * TerrainDemo owns all interaction internally.
  */
 
-import { Fragment, useMemo, useState } from 'react';
-import { motion } from 'framer-motion';
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowDownToLine,
-  Boxes,
   CloudFog,
   Compass,
   Cpu,
@@ -46,7 +44,7 @@ import {
   CardTitle,
 } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import TerrainDemo from '@/components/terrain/TerrainDemo';
 import HillshadePanel from '@/components/terrain/HillshadePanel';
 import WorkedExample from '@/components/terrain/WorkedExample';
@@ -59,38 +57,54 @@ import {
   PLAYER,
   QUALITY_PRESETS,
   type ParamRow,
+  type PresetId,
 } from '@/lib/constants';
-
-type PresetId = 'low' | 'med' | 'high';
-
-/** Thin scrollbar — Tailwind arbitrary values only (globals.css untouched). */
-const THIN_SCROLL =
-  '[scrollbar-width:thin] [scrollbar-color:#44403c_transparent] ' +
-  '[&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-track]:bg-transparent ' +
-  '[&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-stone-700';
+import { useSeedState } from '@/lib/engine/useSeedState';
+import {
+  THIN_SCROLL,
+  oklabToHex,
+} from '@/lib/utils';
 
 /* -- small local helpers --------------------------------------------------- */
 
 function FadeIn({
   children,
-  className,
+  className = '',
   id,
 }: {
   children: React.ReactNode;
   className?: string;
   id?: string;
 }) {
+  const [visible, setVisible] = useState(false);
+  const ref = useRef<HTMLElement>(null);
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const obs = new IntersectionObserver(
+      ([entry]) => {
+        if (entry.isIntersecting) {
+          setVisible(true);
+          obs.disconnect();
+        }
+      },
+      { rootMargin: '-60px' }
+    );
+    obs.observe(el);
+    return () => obs.disconnect();
+  }, []);
+
   return (
-    <motion.section
+    <section
       id={id}
-      className={className}
-      initial={{ opacity: 0, y: 14 }}
-      whileInView={{ opacity: 1, y: 0 }}
-      viewport={{ once: true, margin: '-60px' }}
-      transition={{ duration: 0.45, ease: 'easeOut' }}
+      ref={ref}
+      className={`transition-all duration-500 ease-out ${
+        visible ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-3.5'
+      } ${className}`}
     >
       {children}
-    </motion.section>
+    </section>
   );
 }
 
@@ -128,26 +142,6 @@ function Stat({ label, value, sub }: { label: string; value: string; sub?: strin
       {sub && <div className="mt-1 font-mono text-[10px] text-stone-500">{sub}</div>}
     </div>
   );
-}
-
-/** OKLab → sRGB hex, for the biome anchor swatches. */
-function oklabToHex(L: number, a: number, b: number): string {
-  const l_ = L + 0.3963377774 * a + 0.2158037573 * b;
-  const m_ = L - 0.1055613458 * a - 0.0638541728 * b;
-  const s_ = L - 0.0894841775 * a - 1.291485548 * b;
-  const l = l_ * l_ * l_;
-  const m = m_ * m_ * m_;
-  const s = s_ * s_ * s_;
-  const lin = [
-    4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
-    -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
-    -0.0041960863 * l - 0.7034186147 * m + 1.707614701 * s,
-  ];
-  const enc = (c: number) => {
-    const v = c <= 0.0031308 ? 12.92 * c : 1.055 * Math.pow(c, 1 / 2.4) - 0.055;
-    return Math.round(Math.min(1, Math.max(0, v)) * 255);
-  };
-  return `#${lin.map(enc).map((v) => v.toString(16).padStart(2, '0')).join('')}`;
 }
 
 /* -- content data ----------------------------------------------------------- */
@@ -221,96 +215,81 @@ const FORMULAS: { icon: LucideIcon; tag: string; title: string; formula: string;
     tag: '§16/§33',
     title: 'Depth',
     formula: 'DEPTH = (P·V·p).z / (P·V·p).w',
-    note: "Inherits Godot's reversed-Z Metal NDC, so real meshes inter-occlude with pure math.",
+    note: 'Reversed-Z depth buffer mapping for sub-millimeter precision at any viewing distance.',
   },
 ];
 
 const PARITY_ROWS: { impl: string; precision: string; hash: string; role: string }[] = [
   {
-    impl: 'gdextension/src/terrain_cpu.h',
-    precision: 'double globals',
-    hash: 'uint32_t',
-    role: 'reference twin, shipping physics',
+    impl: 'src/lib/terrainMath.ts',
+    precision: 'double (fp64 globals)',
+    hash: 'Math.imul (strict uint32)',
+    role: 'CPU mathematical twin & physics loop',
   },
   {
-    impl: 'scripts/terrain_math_fallback.gd',
-    precision: 'double (GDScript floats are 64-bit)',
-    hash: 'int64 masked to 32 bits',
-    role: 'zero-dependency fallback',
-  },
-  {
-    impl: 'shaders/terrain_raymarch.gdshader',
+    impl: 'src/components/terrain/demoShader.ts',
     precision: 'fp32 chunk-local + fp32-exact origin',
     hash: 'GLSL uint',
-    role: 'the visible world',
+    role: 'WebGL2 high-framerate raymarcher',
   },
   {
-    impl: 'src/lib/terrainMath.ts',
-    precision: 'double',
-    hash: 'Math.imul',
-    role: 'browser twin + worked example',
+    impl: 'src/app/game/page.tsx',
+    precision: 'fp64 physics / fp32 visual',
+    hash: 'strict uint32',
+    role: 'standalone fullscreen browser game',
   },
   {
-    impl: 'demoShader.ts (GLSL ES 3.0)',
+    impl: 'src/components/terrain/TerrainDemo.tsx',
     precision: 'fp32 chunk-local',
     hash: 'GLSL uint',
-    role: 'WebGL2 parity proof',
+    role: 'interactive console canvas',
+  },
+  {
+    impl: 'src/components/terrain/HillshadePanel.tsx',
+    precision: 'double globals',
+    hash: 'Math.imul',
+    role: '2D relief and elevation mapper',
   },
 ];
 
 const TBDR_CARDS: { icon: LucideIcon; title: string; note: string }[] = [
   {
     icon: Layers,
-    title: 'render_priority = −100',
-    note: 'Terrain first in the opaque bin; later per-tile fragments depth-test against analytic depth for free.',
-  },
-  {
-    icon: ArrowDownToLine,
-    title: 'depth_draw_always + DEPTH every pixel',
-    note: 'A miss writes 0.0 = reversed-Z far.',
+    title: 'Fullscreen Triangle Pipeline',
+    note: 'Zero vertex buffer allocation; gl_VertexID generates clip-space triangle directly on the GPU without mesh overhead.',
   },
   {
     icon: Gauge,
-    title: 'MSAA 0 + FXAA',
-    note: 'The Nyquist-weighted field IS the anti-aliaser; MSAA would multiply tile bandwidth for nothing.',
+    title: 'WebGLSync Frame Pacing',
+    note: 'GPU fence syncing (clientWaitSync / fenceSync) prevents command queue congestion and maintains stable 120-240 FPS.',
+  },
+  {
+    icon: Move,
+    title: 'Toroidal Origin Rebasing',
+    note: 'Double-precision chunk origin rebasing at 8192 m (2^13) combined with dyadic frequencies (n/2^20) eliminates fp32 jitter.',
+  },
+  {
+    icon: ArrowDownToLine,
+    title: 'Adaptive Dynamic Resolution',
+    note: 'Frametime EMA auto-adjusts render target resolution scale to sustain target framerate on any GPU or software rasterizer.',
   },
   {
     icon: Sun,
-    title: 'Light cull-mask',
-    note: "The sun's engine light excludes the terrain layer; direct sun lives in EMISSION, SDFGI indirect still reaches ALBEDO.",
+    title: 'Central-Difference Normals',
+    note: 'Analytic 4-tap central differences at the pixel footprint provide Nyquist-consistent shading in a single fragment pass.',
   },
   {
     icon: CloudFog,
-    title: 'Sky DEPTH = 0',
-    note: 'Outside every SDFGI cascade: the sky is never voxelized.',
-  },
-  {
-    icon: Boxes,
-    title: 'Red-box validation',
-    note: 'Drop a red box at a cascade boundary to verify no light leaking.',
+    title: 'OKLab & Beer-Lambert Atmosphere',
+    note: '5-biome RBF blending in OKLab with Beer-Lambert extinction fog hiding the 6 km cutoff distance seamlessly.',
   },
 ];
 
 /* -- page -------------------------------------------------------------------- */
 
 export default function Home() {
-  const [seedText, setSeedText] = useState(String(DEFAULT_SEED));
-  const [seed, setSeed] = useState<number>(DEFAULT_SEED);
+  const { seed, seedText, onSeedChange, randomizeSeed } = useSeedState(DEFAULT_SEED);
   const [preset, setPreset] = useState<PresetId>('med');
-
-  const onSeedChange = (v: string) => {
-    setSeedText(v);
-    const n = Math.floor(Number(v));
-    if (v.trim() !== '' && Number.isFinite(n)) {
-      setSeed(((n % 4294967296) + 4294967296) % 4294967296);
-    }
-  };
-
-  const randomizeSeed = () => {
-    const n = 1 + Math.floor(Math.random() * 999_999);
-    setSeedText(String(n));
-    setSeed(n);
-  };
 
   /** PARAM_TABLE grouped by `group`, preserving declaration order. */
   const paramGroups = useMemo(() => {
@@ -364,12 +343,20 @@ export default function Home() {
               </a>
             ))}
           </nav>
-          <Badge
-            variant="outline"
-            className="border-stone-700 bg-stone-900/60 font-mono text-[10px] text-stone-300"
-          >
-            Godot 4 · Metal · SDFGI
-          </Badge>
+          <div className="flex items-center gap-2">
+            <a
+              href="/game"
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-emerald-500 hover:bg-emerald-400 text-stone-950 font-mono text-xs font-bold transition-all shadow-lg hover:shadow-emerald-500/20 active:scale-95"
+            >
+              🎮 Fullscreen Game
+            </a>
+            <Badge
+              variant="outline"
+              className="border-stone-700 bg-stone-900/60 font-mono text-[10px] text-stone-300"
+            >
+              WebGL2 · 120-240 FPS · Pure Math
+            </Badge>
+          </div>
         </div>
       </header>
 
@@ -407,6 +394,20 @@ export default function Home() {
               contact. Five implementations of the same equations agree to under
               a millimetre.
             </p>
+            <div className="mt-6 flex flex-wrap items-center gap-3">
+              <a
+                href="/game"
+                className="flex items-center gap-2 px-5 py-2.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-stone-950 font-mono text-xs font-bold transition-all shadow-lg hover:shadow-emerald-500/25 active:scale-95"
+              >
+                🎮 Play Fullscreen in Browser
+              </a>
+              <a
+                href="#demo"
+                className="flex items-center gap-1.5 px-4 py-2.5 rounded-lg border border-stone-800 bg-stone-900/60 hover:bg-stone-800 text-stone-300 font-mono text-xs transition-colors"
+              >
+                Interactive Canvas ↓
+              </a>
+            </div>
             <div className="mt-8 grid grid-cols-2 gap-3">
               <Stat label="geometry" value="0 mesh vertices" sub="no LOD · no streaming" />
               <Stat label="determinism" value="uint32 hash lattice" sub="Murmur3 finalizer" />
@@ -425,11 +426,11 @@ export default function Home() {
                 Relief map — computed live by the CPU twin
               </CardTitle>
               <CardDescription className="font-mono text-[11px] text-stone-500">
-                seed 1337 · spawn (2016, −2592) · ±1.8 km
+                seed {seed} · spawn (2016, −2592) · ±1.8 km
               </CardDescription>
             </CardHeader>
             <CardContent className="px-0">
-              <HillshadePanel />
+              <HillshadePanel seed={seed} />
               <p className="mt-3 font-mono text-[10px] leading-relaxed text-stone-500">
                 E(x,z) sampled at 200² points around the spawn, shaded with the §17
                 analytic normal against the contract sun; water plane at 5 m.
@@ -444,9 +445,9 @@ export default function Home() {
       <FadeIn id="demo" className="scroll-mt-20 border-b border-stone-800/60">
         <div className="mx-auto max-w-7xl px-4 py-14 sm:px-6">
           <SectionHeading
-            eyebrow="§30 · stage-0 GPU parity"
-            title="The same math, live in your browser"
-            description="This canvas runs the exact field as the Godot Metal shader (WebGL2 port, fp32 chunk-local evaluation, floating origin at 2^13). Walk mode is driven by the TypeScript CPU twin running the §31 movement loop — jump-preserving clamp, GROUND_BIAS parity absorber, slope slide-off. Click the canvas first, then fly."
+            eyebrow="§30 · WebGL2 terrain engine"
+            title="The procedural world, live in your browser"
+            description="This canvas runs the procedural world field in real-time WebGL2 (fp32 chunk-local evaluation, floating origin at 2^13). Walk mode is driven by the TypeScript engine running the §31 movement loop — jump-preserving clamp, GROUND_BIAS parity absorber, slope slide-off. Click the canvas first, then fly."
           />
 
           <div className="mt-8 rounded-xl border border-stone-800 bg-stone-900/30 p-4 sm:p-5">
@@ -483,33 +484,35 @@ export default function Home() {
                 <span className="font-mono text-[10px] uppercase tracking-wider text-stone-500">
                   quality preset
                 </span>
-                <span className="flex flex-wrap gap-2">
-                  {QUALITY_PRESETS.map((p) => {
-                    const activePreset = preset === p.id;
-                    return (
-                      <Tooltip key={p.id}>
-                        <TooltipTrigger asChild>
-                          <Button
-                            variant="outline"
-                            onClick={() => setPreset(p.id)}
-                            aria-pressed={activePreset}
-                            className={`h-9 min-w-16 font-mono text-xs ${
-                              activePreset
-                                ? 'border-emerald-500 bg-emerald-500 text-stone-950 hover:bg-emerald-400'
-                                : 'border-stone-700 bg-stone-950 text-stone-300 hover:bg-stone-800 hover:text-emerald-300'
-                            }`}
-                          >
-                            {p.label.toUpperCase()}
-                          </Button>
-                        </TooltipTrigger>
-                        <TooltipContent className="border border-stone-700 bg-stone-900 font-mono text-[11px] text-stone-200">
-                          {p.resScale}× res · {p.marchSteps} march ·{' '}
-                          {p.shadowSteps} shadow — {p.note}
-                        </TooltipContent>
-                      </Tooltip>
-                    );
-                  })}
-                </span>
+                <TooltipProvider delayDuration={150}>
+                  <span className="flex flex-wrap gap-2">
+                    {QUALITY_PRESETS.map((p) => {
+                      const activePreset = preset === p.id;
+                      return (
+                        <Tooltip key={p.id}>
+                          <TooltipTrigger asChild>
+                            <Button
+                              variant="outline"
+                              onClick={() => setPreset(p.id)}
+                              aria-pressed={activePreset}
+                              className={`h-9 min-w-16 font-mono text-xs ${
+                                activePreset
+                                  ? 'border-emerald-500 bg-emerald-500 text-stone-950 hover:bg-emerald-400'
+                                  : 'border-stone-700 bg-stone-950 text-stone-300 hover:bg-stone-800 hover:text-emerald-300'
+                              }`}
+                            >
+                              {p.label.toUpperCase()}
+                            </Button>
+                          </TooltipTrigger>
+                          <TooltipContent className="border border-stone-700 bg-stone-900 font-mono text-[11px] text-stone-200">
+                            {p.resScale}× res · {p.marchSteps} march ·{' '}
+                            {p.shadowSteps} shadow — {p.note}
+                          </TooltipContent>
+                        </Tooltip>
+                      );
+                    })}
+                  </span>
+                </TooltipProvider>
               </div>
             </div>
 
@@ -588,7 +591,7 @@ export default function Home() {
           <SectionHeading
             eyebrow="§4 – §21 · the spec, one card per subsystem"
             title="The specification, distilled"
-            description="Every constant below traces to the §29 parameter table and to a named symbol in each of the five implementations — CPU twin, GDScript fallback, Godot shader, browser twin and WebGL2 parity proof."
+            description="Every constant below traces to the §29 parameter table and is shared across the browser engine — TypeScript CPU math twin, WebGL2 raymarcher, and interactive game controller."
           />
 
           <div className="mt-8 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
@@ -747,9 +750,9 @@ export default function Home() {
       <FadeIn id="parity" className="scroll-mt-20 border-b border-stone-800/60">
         <div className="mx-auto max-w-7xl px-4 py-14 sm:px-6">
           <SectionHeading
-            eyebrow="§27 · §31 · five implementations, one field"
-            title="Parity contract & Apple-Silicon constraints"
-            description="The same equations exist five times — C++ twin, GDScript fallback, Godot/Metal shader, browser twin and the WebGL2 proof on this page. The contract: double globals, fp32 chunk-locals, strict uint32 hashing."
+            eyebrow="§27 · §31 · mathematical invariance"
+            title="Parity contract & precision architecture"
+            description="The procedural equations run across the browser stack — TypeScript CPU math twin, WebGL2 shader pipeline, and interactive game runner. The contract: double globals, fp32 chunk-locals, strict uint32 hashing."
           />
 
           <div className="mt-8 grid gap-4 lg:grid-cols-5">
@@ -844,8 +847,8 @@ export default function Home() {
         <div className="mx-auto max-w-7xl px-4 py-14 sm:px-6">
           <SectionHeading
             eyebrow="§34 · deliverable"
-            title="The complete Godot 4 project"
-            description="Every file below is real and served straight from godot-project/ — the Metal-class raymarch shader, the GDScripts, the C++ GDExtension CPU twin and the SConstruct build. This is the exact code the parity table audits."
+            title="Browser Engine Sources"
+            description="Every file below is real and served straight from src/ — the WebGL2 raymarch shader, the TypeScript procedural mathematics engine, and the first-person locomotion controller."
           />
           <div className="mt-8">
             <FileBrowser />
@@ -857,8 +860,7 @@ export default function Home() {
       <footer className="mt-auto border-t border-stone-800 bg-stone-950">
         <div className="mx-auto flex max-w-7xl flex-col gap-2 px-4 py-6 font-mono text-[10px] leading-relaxed text-stone-500 sm:flex-row sm:items-center sm:justify-between sm:px-6">
           <span>
-            W(x,y) Continuous World Engine — generated for Apple Silicon · Godot 4
-            Forward+ · Metal TBDR · SDFGI · seed 1337
+            W(x,y) Continuous World Engine — WebGL2 Browser Engine · 120-240 FPS · seed 1337
           </span>
           <span className="text-stone-600">
             CPU twin: fp64 · GPU: fp32 + dyadic origin · GROUND_BIAS 0.08 m

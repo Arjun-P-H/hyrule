@@ -10,8 +10,7 @@
  *     (n / 2^20) keeps origin·f exactly representable, so lattice cells align
  *     across chunk borders; residual divergence (< 1 mm on a 700 m peak) is
  *     absorbed by GROUND_BIAS = 0.08 in the walk-mode physics twin.
- *   - Demo-only output transform: gamma 1/2.2 (in Godot the engine
- *     tonemapper owns this — terrain_raymarch.gdshader writes linear light).
+ *   - Output transform: gamma 1/2.2 for sRGB monitor calibration.
  *
  * Coordinate convention: y-up. Terrain field is E(p.x, p.z). Spec z ↔ engine y.
  * Camera basis is LEFT-handed (x=right, z=forward) to match the CPU twin's
@@ -129,13 +128,23 @@ float quintic(float t) { return t * t * t * (t * (t * 6.0 - 15.0) + 10.0); }
 float vnoise(float x, float y, int seed) {
   float ix = floor(x), iy = floor(y);
   float fx = x - ix,   fy = y - iy;
-  float ux = quintic(fx), uy = quintic(fy);
-  int XI = int(ix), YI = int(iy);
-  float a = hash01(XI,     YI,     seed);
-  float b = hash01(XI + 1, YI,     seed);
-  float c = hash01(XI,     YI + 1, seed);
-  float d = hash01(XI + 1, YI + 1, seed);
-  // identical bilinear expansion as the CPU twin (NOT mix(mix)) — bit parity
+  float ux = fx * fx * fx * (fx * (fx * 6.0 - 15.0) + 10.0);
+  float uy = fy * fy * fy * (fy * (fy * 6.0 - 15.0) + 10.0);
+
+  uint ux0 = uint(int(ix));
+  uint ux1 = ux0 + 1u;
+  uint uy0 = uint(int(iy)) * 0x27d4eb2fu;
+  uint uy1 = uint(int(iy) + 1) * 0x27d4eb2fu;
+  uint s_term = uint(seed) * 0x9e3779b9u;
+
+  uint h0 = uy0 ^ s_term;
+  uint h1 = uy1 ^ s_term;
+
+  float a = float(hashU(ux0 ^ h0)) / 4294967295.0;
+  float b = float(hashU(ux1 ^ h0)) / 4294967295.0;
+  float c = float(hashU(ux0 ^ h1)) / 4294967295.0;
+  float d = float(hashU(ux1 ^ h1)) / 4294967295.0;
+
   float v = a + (b - a) * ux + (c - a) * uy + (a - b - c + d) * ux * uy;
   return v * 2.0 - 1.0;
 }
@@ -149,8 +158,10 @@ float fbm(float x, float y, int seed, int oct, float lac, float gain, float dp, 
   float freq = 1.0, amp = 1.0, sum = 0.0, wsum = 0.0, asum = 0.0;
   for (int i = 0; i < oct; i++) {
     float w = nyqW(f0 * freq, dp);
-    sum  += amp * w * vnoise(x * freq, y * freq, seed + i * 0x9e37);
-    wsum += amp * w;
+    if (w > 0.0) {
+      sum  += amp * w * vnoise(x * freq, y * freq, seed + i * 0x9e37);
+      wsum += amp * w;
+    }
     asum += amp;
     freq *= lac;
     amp  *= gain;
@@ -163,10 +174,12 @@ float ridged(float x, float y, int seed, int oct, float lac, float gain, float d
   float freq = 1.0, amp = 0.5, sum = 0.0, wsum = 0.0, asum = 0.0;
   for (int i = 0; i < oct; i++) {
     float w = nyqW(2.0 * f0 * freq, dp);
-    float n = 1.0 - abs(vnoise(x * freq, y * freq, seed + i * 0x85eb));
-    float r = n * n;
-    sum  += amp * w * r;
-    wsum += amp * w;
+    if (w > 0.0) {
+      float n = 1.0 - abs(vnoise(x * freq, y * freq, seed + i * 0x85eb));
+      float r = n * n;
+      sum  += amp * w * r;
+      wsum += amp * w;
+    }
     asum += amp;
     freq *= lac;
     amp  *= gain;
@@ -183,21 +196,25 @@ struct Vor {
 };
 
 Vor voronoi(float x, float y, int seed) {
-  float ipx = floor(x), ipy = floor(y);
-  float fx = x - ipx,   fy = y - ipy;
-  Vor v;
-  v.f1 = 8.0; v.f2 = 8.0; v.edge = 0.0;
-  v.cx = 0.0;  v.cy = 0.0;  v.type = 0.0;
+  float ipx = floor(x);
+  float ipy = floor(y);
+  float fx = x - ipx;
+  float fy = y - ipy;
+  Vor v = Vor(8.0, 8.0, 0.0, 0.0, 0.0, 0.0);
   for (int j = -1; j <= 1; j++) {
     for (int i = -1; i <= 1; i++) {
-      int cxi = int(ipx) + i, cyi = int(ipy) + j;
-      vec2 p; cellPoint(cxi, cyi, seed, p);
+      int cxi = int(ipx) + i;
+      int cyi = int(ipy) + j;
+      vec2 p;
+      cellPoint(cxi, cyi, seed, p);
       float dx = float(i) + p.x - fx;
       float dy = float(j) + p.y - fy;
       float d = sqrt(dx * dx + dy * dy);
       if (d < v.f1) {
-        v.f2 = v.f1; v.f1 = d;
-        v.cx = float(cxi) + p.x; v.cy = float(cyi) + p.y;
+        v.f2 = v.f1;
+        v.f1 = d;
+        v.cx = float(cxi) + p.x;
+        v.cy = float(cyi) + p.y;
         v.type = cellType(cxi, cyi, seed);
       } else if (d < v.f2) {
         v.f2 = d;
@@ -279,11 +296,15 @@ float elevation(vec2 g, float dp, int seed) {
     wq.x * F_MACRO, wq.y * F_MACRO, seed + 1,
     OCT_MACRO, LAC_MACRO, GAIN_MACRO, dp, F_MACRO));
 
-  float mask = smoothstep(MASK_LO, MASK_HI,    // §6 macro mask (warped)
-    0.5 + 0.5 * vnoise(wq.x * F_MASK, wq.y * F_MASK, seed + 77));
-  float ridge = ridged(wq.x * F_RIDGE, wq.y * F_RIDGE, seed + 5,
-    OCT_RIDGE, LAC_RIDGE, GAIN_RIDGE, dp, F_RIDGE);
+  float maskVal = 0.5 + 0.5 * vnoise(wq.x * F_MASK, wq.y * F_MASK, seed + 77);
+  float mask = smoothstep(MASK_LO, MASK_HI, maskVal);
   float hMount = H_MOUNT * (1.0 + (reg.mountFactor - 1.0) * reg.wRegion);
+
+  float ridge = 0.0;
+  if (mask > 0.0) {
+    ridge = ridged(wq.x * F_RIDGE, wq.y * F_RIDGE, seed + 5,
+      OCT_RIDGE, LAC_RIDGE, GAIN_RIDGE, dp, F_RIDGE);
+  }
 
   Vor vv = voronoi(wq.x * F_VALLEY, wq.y * F_VALLEY, seed + 21); // §7 carve
   float sv = 1.0 - smoothstep(0.0, W_VALLEY, vv.edge);
@@ -299,7 +320,8 @@ float elevation(vec2 g, float dp, int seed) {
        + anom;
 }
 
-// Central-difference gradient (§17). Shading uses ε = pixel footprint
+// §17 — analytic normal via central differences at the pixel footprint.
+// Note: This must remain a central difference (4 taps) to match the CPU twin
 // (Nyquist-consistent normals); the CPU twin queries near-field with ε = 0.25.
 vec2 gradient(vec2 g, float eps, float dp, int seed) {
   float e = max(eps, 0.05);
@@ -567,7 +589,7 @@ void main() {
     }
   }
 
-  // demo-only output transform (Godot tonemapper owns this in the engine)
+  // output transform (gamma correction for sRGB display)
   fragColor = vec4(pow(max(col, 0.0), vec3(1.0 / 2.2)), 1.0);
 }
 `;

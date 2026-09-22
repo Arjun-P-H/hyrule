@@ -8,16 +8,22 @@
  */
 
 import { useEffect, useRef } from 'react';
-import { elevation } from '@/lib/terrainMath';
+import { clamp, elevation } from '@/lib/terrainMath';
 import { DEFAULT_SEED, SPAWN, LIGHT, VALLEY } from '@/lib/constants';
 
 const SIZE = 200; // grid cells per side
 const EXTENT = 3600.0; // metres across
 
 function lerp(a: number, b: number, t: number) { return a + (b - a) * t; }
-function clamp01(x: number) { return x < 0 ? 0 : x > 1 ? 1 : x; }
+const clamp01 = (x: number) => clamp(x, 0, 1);
 
-export default function HillshadePanel({ className = '' }: { className?: string }) {
+export default function HillshadePanel({
+  className = '',
+  seed = DEFAULT_SEED,
+}: {
+  className?: string;
+  seed?: number;
+}) {
   const ref = useRef<HTMLCanvasElement>(null);
 
   useEffect(() => {
@@ -36,19 +42,20 @@ export default function HillshadePanel({ className = '' }: { className?: string 
     const data = new Float32Array(SIZE * SIZE);
     let row = 0;
     let cancelled = false;
+    let rafId = 0;
 
     const sample = () => {
       if (cancelled) return;
       if (row >= SIZE) { paint(); return; }
-      // sample a few rows per frame (~4 ms budget)
-      for (let r = 0; r < 6 && row < SIZE; r++, row++) {
+      // sample 25 rows per frame (~8 ms budget for fast, responsive display)
+      for (let r = 0; r < 25 && row < SIZE; r++, row++) {
         const z = SPAWN.z - EXTENT / 2 + row * step;
         for (let j = 0; j < SIZE; j++) {
           const x = SPAWN.x - EXTENT / 2 + j * step;
-          data[row * SIZE + j] = elevation(x, z, DEFAULT_SEED, 0);
+          data[row * SIZE + j] = elevation(x, z, seed, 0);
         }
       }
-      requestAnimationFrame(sample);
+      rafId = requestAnimationFrame(sample);
     };
 
     const paint = () => {
@@ -106,9 +113,12 @@ export default function HillshadePanel({ className = '' }: { className?: string 
       ctx.beginPath(); ctx.moveTo(6, 16); ctx.lineTo(6, 26); ctx.stroke();
     };
 
-    requestAnimationFrame(sample);
-    return () => { cancelled = true; };
-  }, []);
+    rafId = requestAnimationFrame(sample);
+    return () => {
+      cancelled = true;
+      cancelAnimationFrame(rafId);
+    };
+  }, [seed]);
 
   return (
     <canvas

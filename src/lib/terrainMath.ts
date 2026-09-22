@@ -18,7 +18,7 @@
 
 import {
   F, MACRO, MOUNTAIN, WARP, VALLEY, CONTINENT, REGION, ANOMALY,
-  CLIMATE, MARCH, MAX_WORLD_H, MAX_DIST,
+  CLIMATE, MARCH, MAX_WORLD_H, MAX_DIST, PLAYER,
 } from "./constants";
 
 /* ------------------------------------------------------------------ */
@@ -73,14 +73,25 @@ export function quintic(t: number): number {
 export function vnoise(x: number, y: number, seed: number): number {
   const ix = Math.floor(x), iy = Math.floor(y);
   const fx = x - ix, fy = y - iy;
-  const ux = quintic(fx), uy = quintic(fy);
-  const a = hash01(ix, iy, seed);
-  const b = hash01(ix + 1, iy, seed);
-  const c = hash01(ix, iy + 1, seed);
-  const d = hash01(ix + 1, iy + 1, seed);
-  // bilinear expansion == mix(mix(a,b,ux), mix(c,d,ux), uy)
+  const ux = fx * fx * fx * (fx * (fx * 6.0 - 15.0) + 10.0);
+  const uy = fy * fy * fy * (fy * (fy * 6.0 - 15.0) + 10.0);
+
+  const ux0 = ix | 0;
+  const ux1 = (ux0 + 1) | 0;
+  const uy0 = Math.imul(iy | 0, 0x27d4eb2f);
+  const uy1 = Math.imul((iy | 0) + 1, 0x27d4eb2f);
+  const sTerm = Math.imul(seed | 0, 0x9e3779b9);
+
+  const h0 = (uy0 ^ sTerm) >>> 0;
+  const h1 = (uy1 ^ sTerm) >>> 0;
+
+  const a = hashU((ux0 ^ h0) >>> 0) / 4294967295.0;
+  const b = hashU((ux1 ^ h0) >>> 0) / 4294967295.0;
+  const c = hashU((ux0 ^ h1) >>> 0) / 4294967295.0;
+  const d = hashU((ux1 ^ h1) >>> 0) / 4294967295.0;
+
   const v = a + (b - a) * ux + (c - a) * uy + (a - b - c + d) * ux * uy;
-  return v * 2.0 - 1.0; // [-1, 1]
+  return v * 2.0 - 1.0;
 }
 
 /**
@@ -105,8 +116,10 @@ export function fbm(
   let freq = 1.0, amp = 1.0, sum = 0.0, wsum = 0.0, asum = 0.0;
   for (let i = 0; i < octaves; i++) {
     const w = nyqW(f0 * freq, dp);
-    sum += amp * w * vnoise(x * freq, y * freq, seed + i * 0x9e37);
-    wsum += amp * w;
+    if (w > 0.0) {
+      sum += amp * w * vnoise(x * freq, y * freq, seed + i * 0x9e37);
+      wsum += amp * w;
+    }
     asum += amp;
     freq *= lacunarity;
     amp *= gain;
@@ -126,10 +139,12 @@ export function ridged(
   let freq = 1.0, amp = 0.5, sum = 0.0, wsum = 0.0, asum = 0.0;
   for (let i = 0; i < octaves; i++) {
     const w = nyqW(2.0 * f0 * freq, dp);
-    const n = 1.0 - Math.abs(vnoise(x * freq, y * freq, seed + i * 0x85eb));
-    const r = n * n;
-    sum += amp * w * r;
-    wsum += amp * w;
+    if (w > 0.0) {
+      const n = 1.0 - Math.abs(vnoise(x * freq, y * freq, seed + i * 0x85eb));
+      const r = n * n;
+      sum += amp * w * r;
+      wsum += amp * w;
+    }
     asum += amp;
     freq *= lacunarity;
     amp *= gain;
@@ -285,11 +300,15 @@ export function elevation(x: number, z: number, seed: number, dp: number): numbe
     MACRO.octaves, MACRO.lacunarity, MACRO.gain, dp, F.macro));
 
   // §6 — ridged mountains gated by a macro mask
-  const mask = smoothstep(MOUNTAIN.maskLo, MOUNTAIN.maskHi,
-    0.5 + 0.5 * vnoise(wx * F.mask, wy * F.mask, seed + 77));
-  const ridge = ridged(wx * F.ridge, wy * F.ridge, seed + 5,
-    MOUNTAIN.octaves, MOUNTAIN.lacunarity, MOUNTAIN.gain, dp, F.ridge);
+  const maskVal = 0.5 + 0.5 * vnoise(wx * F.mask, wy * F.mask, seed + 77);
+  const mask = smoothstep(MOUNTAIN.maskLo, MOUNTAIN.maskHi, maskVal);
   const hMount = MOUNTAIN.hMount * (1 + (reg.mountFactor - 1) * reg.wRegion);
+  
+  let ridge = 0.0;
+  if (mask > 0.0) {
+    ridge = ridged(wx * F.ridge, wy * F.ridge, seed + 5,
+      MOUNTAIN.octaves, MOUNTAIN.lacunarity, MOUNTAIN.gain, dp, F.ridge);
+  }
 
   // §7 — cellular valleys carve the network of rivers
   const de = worleyEdge(wx * F.valley, wy * F.valley, seed + 21);
@@ -327,10 +346,11 @@ export function slope(x: number, z: number, seed: number): number {
 /* ------------------------------------------------------------------ */
 
 export function temperature(
-  x: number, z: number, globalY: number, e: number, seed: number,
+  x: number, z: number, e: number, _seed = 0, globalY?: number,
 ): number {
+  const lat = globalY !== undefined ? globalY : z;
   return CLIMATE.tBase
-    - CLIMATE.lambdaLat * Math.abs(globalY)
+    - CLIMATE.lambdaLat * Math.abs(lat)
     - CLIMATE.lambdaAlt * Math.max(0, e);
 }
 
@@ -397,8 +417,8 @@ export function marchRay(
 ): MarchResult {
   const maxDist = opts.maxDist ?? MAX_DIST;
   const rows: MarchRow[] = [];
-  let t = MARCH.startT;
-  let tPrev = t;
+  let t: number = MARCH.startT;
+  let tPrev: number = t;
   let grad = 0;
 
   for (let i = 0; i < opts.steps; i++) {
@@ -423,7 +443,7 @@ export function marchRay(
     if (py < e) {
       // crossed the surface — bisect over [tPrev, t] (spec §16)
       const bisectRows: { i: number; t: number; gap: number }[] = [];
-      let lo = tPrev, hi = t;
+      let lo: number = tPrev, hi: number = t;
       for (let b = 0; b < MARCH.bisectSteps; b++) {
         const tm = 0.5 * (lo + hi);
         const mx = ro[0] + rd[0] * tm;
@@ -511,7 +531,7 @@ export type InputState = {
 export function updatePlayer(
   s: PlayerState, input: InputState, dt: number, seed: number,
 ): void {
-  const speed = 6.0 * (input.sprint ? 1.8 : 1.0);
+  const speed = PLAYER.walkSpeed * (input.sprint ? PLAYER.sprintMul : 1.0);
   const sin = Math.sin(input.yaw), cos = Math.cos(input.yaw);
   // forward = (sin yaw, 0, cos yaw) — matches demo camera basis
   const wishX = (sin * input.forward + cos * input.strafe) * speed;
@@ -522,16 +542,16 @@ export function updatePlayer(
   s.vx += (wishX - s.vx) * k;
   s.vz += (wishZ - s.vz) * k;
 
-  if (input.jump && s.grounded) s.vy = 8.5;
+  if (input.jump && s.grounded) s.vy = PLAYER.jumpVelocity;
 
-  s.vy -= 22.0 * dt;                       // GRAVITY
+  s.vy -= PLAYER.gravity * dt;              // GRAVITY
   s.x += s.vx * dt; s.y += s.vy * dt; s.z += s.vz * dt;
 
   // Global-frame evaluation (spec §25/§27): the CPU twin computes in double
   // precision on GLOBAL coordinates; the GPU computes (local + chunk_origin)
   // in fp32 — the dyadic frequency table keeps that sum exact, and the
   // residual divergence is absorbed by GROUND_BIAS below.
-  const groundZ = elevation(s.x, s.z, seed, 0) + 0.08 + 1.7;
+  const groundZ = elevation(s.x, s.z, seed, 0) + PLAYER.groundBias + PLAYER.height;
 
   s.grounded = false;
   if (s.y < groundZ) {
@@ -544,10 +564,10 @@ export function updatePlayer(
   if (s.grounded) {
     const [gx, gz] = gradient(s.x, s.z, seed, 0.25);
     const m = Math.hypot(gx, gz);
-    if (m > 1.5) {
+    if (m > PLAYER.slopeMax) {
       const inv = 1 / m;
-      s.vx += -gx * inv * (m - 1.5) * 14.0 * dt;
-      s.vz += -gz * inv * (m - 1.5) * 14.0 * dt;
+      s.vx += -gx * inv * (m - PLAYER.slopeMax) * PLAYER.slideAccel * dt;
+      s.vz += -gz * inv * (m - PLAYER.slopeMax) * PLAYER.slideAccel * dt;
     }
   }
 }

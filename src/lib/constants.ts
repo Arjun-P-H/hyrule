@@ -4,9 +4,7 @@
  * Single source of truth for every implementation of the terrain math:
  *   - src/lib/terrainMath.ts            (TypeScript CPU twin, double precision)
  *   - src/components/terrain/demoShader.ts  (WebGL2 / GLSL ES 3.00)
- *   - godot-project/shaders/terrain_raymarch.gdshader (Godot 4 / Metal)
- *   - godot-project/gdextension/src/terrain_cpu.h     (C++ GDExtension twin)
- *   - godot-project/scripts/terrain_math_fallback.gd (pure GDScript twin)
+ *   - src/app/game/page.tsx             (Fullscreen browser game controller)
  *
  * SPEC PARITY RULE (§27, §31):
  *   Global state = double, local (chunk-relative) state = float32,
@@ -180,6 +178,8 @@ export type QualityPreset = {
   shadowSteps: number;
   note: string;
 };
+
+export type PresetId = QualityPreset['id'];
 
 export const QUALITY_PRESETS: QualityPreset[] = [
   {

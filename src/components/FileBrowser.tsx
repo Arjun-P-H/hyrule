@@ -1,7 +1,7 @@
 'use client';
 
 /**
- * FileBrowser — client-side code browser for the real Godot 4 project.
+ * FileBrowser — client-side code browser for the browser world engine sources.
  * ---------------------------------------------------------------------------
  * - GET /api/files            → { root, tree: [{ path, size, lines }] }
  * - GET /api/files?path=<rel> → { path, content, lines, size }
@@ -18,23 +18,18 @@ import { Check, Copy, FileCode2, FolderOpen } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
+import { THIN_SCROLL } from '@/lib/utils';
 
 type FileEntry = { path: string; size: number; lines: number };
 type FileContent = { path: string; content: string; lines: number; size: number };
 
-/** Thin scrollbar — Tailwind arbitrary values only (globals.css untouched). */
-const THIN_SCROLL =
-  '[scrollbar-width:thin] [scrollbar-color:#44403c_transparent] ' +
-  '[&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-track]:bg-transparent ' +
-  '[&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-stone-700';
-
-/** Extension → icon colour (amber = C/C++, emerald = shader/TS, …). */
+/** Extension → icon colour (emerald = TS/TSX, cyan = CSS, amber = JSON/JS, etc.). */
 function extColor(path: string): string {
-  if (/\.(h|cpp)$/i.test(path)) return 'text-amber-400';
-  if (/\.(gdshader|ts|tsx)$/i.test(path)) return 'text-emerald-400';
-  if (/\.gd$/i.test(path)) return 'text-stone-400';
+  if (/\.(ts|tsx)$/i.test(path)) return 'text-emerald-400';
+  if (/\.(json|mjs|js)$/i.test(path)) return 'text-amber-400';
+  if (/\.css$/i.test(path)) return 'text-cyan-400';
   if (/\.md$/i.test(path)) return 'text-stone-300';
-  return 'text-stone-500';
+  return 'text-stone-400';
 }
 
 function fmtKB(bytes: number): string {
@@ -53,9 +48,8 @@ function escapeHtml(s: string): string {
 
 /** Comment marker per language family (markdown headings stay untouched). */
 function commentRegex(path: string): RegExp | null {
-  if (/\.(h|cpp|ts|tsx|js|mjs|gdshader|glsl)$/i.test(path)) return /\/\/.*$/;
-  if (/\.gd$/i.test(path)) return /#.*$/;
-  if (/\.(lua|sql)$/i.test(path)) return /--.*$/;
+  if (/\.(ts|tsx|js|mjs|glsl)$/i.test(path)) return /\/\/.*$/;
+  if (/\.(sh|command)$/i.test(path)) return /#.*$/;
   return null;
 }
 
@@ -106,6 +100,7 @@ function CodeSkeleton() {
 
 export default function FileBrowser() {
   const [tree, setTree] = useState<FileEntry[] | null>(null);
+  const [rootName, setRootName] = useState<string>('src');
   const [treeError, setTreeError] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [active, setActive] = useState<FileContent | null>(null);
@@ -115,6 +110,15 @@ export default function FileBrowser() {
 
   const cache = useRef(new Map<string, FileContent>());
   const reqToken = useRef(0);
+  const copyTimeoutRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (copyTimeoutRef.current !== null) {
+        window.clearTimeout(copyTimeoutRef.current);
+      }
+    };
+  }, []);
 
   const open = useCallback(async (path: string) => {
     setSelected(path);
@@ -150,9 +154,10 @@ export default function FileBrowser() {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = (await res.json()) as { root: string; tree: FileEntry[] };
         if (cancelled) return;
+        if (data.root) setRootName(data.root);
         setTree(data.tree);
         const first =
-          data.tree.find((f) => f.path === 'README.md') ?? data.tree[0];
+          data.tree.find((f) => f.path.includes('demoShader') || f.path.includes('page')) ?? data.tree[0];
         if (first) void open(first.path);
       } catch (e) {
         if (!cancelled) setTreeError(e instanceof Error ? e.message : String(e));
@@ -168,7 +173,10 @@ export default function FileBrowser() {
     try {
       await navigator.clipboard.writeText(active.content);
       setCopied(true);
-      window.setTimeout(() => setCopied(false), 1500);
+      if (copyTimeoutRef.current !== null) {
+        window.clearTimeout(copyTimeoutRef.current);
+      }
+      copyTimeoutRef.current = window.setTimeout(() => setCopied(false), 1500);
     } catch {
       /* clipboard API unavailable — silently ignore */
     }
@@ -183,7 +191,7 @@ export default function FileBrowser() {
     return (
       <Card className="border-stone-800 bg-stone-900/30 p-6">
         <p className="font-mono text-sm text-red-300">
-          failed to list godot-project/ — {treeError}
+          failed to list {rootName}/ — {treeError}
         </p>
         <p className="mt-2 font-mono text-xs text-stone-500">
           GET /api/files did not answer with the file tree.
@@ -200,7 +208,7 @@ export default function FileBrowser() {
           <div className="flex items-center justify-between gap-2 border-b border-stone-800/70 px-3 py-2">
             <span className="flex min-w-0 items-center gap-1.5 font-mono text-[10px] uppercase tracking-wider text-stone-500">
               <FolderOpen className="size-3.5 shrink-0 text-amber-400" />
-              <span className="truncate">godot-project</span>
+              <span className="truncate">{rootName}</span>
             </span>
             {tree && (
               <span className="shrink-0 font-mono text-[10px] text-stone-600">
