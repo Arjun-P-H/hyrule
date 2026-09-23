@@ -10,10 +10,11 @@ import {
   CAMERA,
   PLAYER,
   QUALITY_PRESETS,
+  type PresetId,
 } from '@/lib/constants';
 
-export type PresetId = 'low' | 'med' | 'high';
-export type CamMode = 'walk' | 'fly';
+export type { PresetId };
+type CamMode = 'walk' | 'fly';
 
 export type EngineStats = {
   fps: number;
