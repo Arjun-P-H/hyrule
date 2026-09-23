@@ -38,7 +38,7 @@ export function hashU(x: number): number {
  * H(x_i, y_i, s) = finalize(x_i ⊕ (y_i · 0x27D4EB2F) ⊕ (s · 0x9E3779B9))
  * xi/yi are integer lattice coords (may be negative — two's-complement wrap).
  */
-export function hash3(xi: number, yi: number, seed: number): number {
+function hash3(xi: number, yi: number, seed: number): number {
   const h =
     (xi | 0) ^
     Math.imul(yi | 0, 0x27d4eb2f) ^
@@ -52,13 +52,13 @@ export function hash01(xi: number, yi: number, seed: number): number {
 }
 
 /** Feature-point coords in [0,1]² packed from the two 12-bit halves of one hash. */
-export function cellPoint(ix: number, iy: number, seed: number): [number, number] {
+function cellPoint(ix: number, iy: number, seed: number): [number, number] {
   const h = hash3(ix, iy, seed);
   return [(h & 0xfff) / 4095.0, ((h >>> 12) & 0xfff) / 4095.0];
 }
 
 /** Cell type byte packed from the top 8 bits of the same hash (0..1). */
-export function cellType(ix: number, iy: number, seed: number): number {
+function cellType(ix: number, iy: number, seed: number): number {
   return (hash3(ix, iy, seed) >>> 24) / 255.0;
 }
 
@@ -98,7 +98,7 @@ export function vnoise(x: number, y: number, seed: number): number {
  * Nyquist octave weight (spec §5): fade out between 0.5 and 1 cycle/pixel.
  * Δp(t) = t · 2tan(FOV/2) / Res_y is the world-space pixel footprint.
  */
-export function nyqW(freq: number, dp: number): number {
+function nyqW(freq: number, dp: number): number {
   return Math.min(1, Math.max(0, 2.0 - (freq * dp) / 0.5));
 }
 
@@ -108,7 +108,7 @@ export function nyqW(freq: number, dp: number): number {
  * frequency so the Nyquist weight uses the ABSOLUTE octave frequency
  * f_i = f0 · lac^i against the metre-space footprint Δp.
  */
-export function fbm(
+function fbm(
   x: number, y: number, seed: number,
   octaves: number, lacunarity: number, gain: number, dp: number,
   f0 = 1.0,
@@ -131,7 +131,7 @@ export function fbm(
  * Ridged multifractal (spec §6): (1 − |N|)² octaves; ridged features double
  * the effective bandwidth, so the Nyquist weight uses 2f.
  */
-export function ridged(
+function ridged(
   x: number, y: number, seed: number,
   octaves: number, lacunarity: number, gain: number, dp: number,
   f0 = 1.0,
@@ -156,7 +156,7 @@ export function ridged(
 /* §7 / §12 / §13 — Cellular (Worley) fields                           */
 /* ------------------------------------------------------------------ */
 
-export type VoronoiResult = {
+type VoronoiResult = {
   f1: number;          // nearest feature distance (cell units)
   f2: number;          // second nearest
   edge: number;        // F2 − F1 (spec §7 edge distance)
@@ -169,7 +169,7 @@ export type VoronoiResult = {
  * 3×3 Worley scan. ONE hash per cell packs the feature point (two 12-bit
  * halves) and the cell type byte (top 8 bits) — see worklog, GPU budget.
  */
-export function voronoi(x: number, y: number, seed: number): VoronoiResult {
+function voronoi(x: number, y: number, seed: number): VoronoiResult {
   const ipx = Math.floor(x), ipy = Math.floor(y);
   const fx = x - ipx, fy = y - ipy;
   let f1 = 8.0, f2 = 8.0;
@@ -268,7 +268,7 @@ export function dunesE(x: number, y: number, seed: number, dp: number, amount: n
 /* Master elevation field — spec §2 environment composition            */
 /* ------------------------------------------------------------------ */
 
-export function smoothstep(e0: number, e1: number, x: number): number {
+function smoothstep(e0: number, e1: number, x: number): number {
   const t = Math.min(1, Math.max(0, (x - e0) / (e1 - e0)));
   return t * t * (3 - 2 * t);
 }
@@ -367,7 +367,7 @@ export function moisture(x: number, z: number, e: number, seed: number): number 
 /* §16 — Lipschitz-corrected raymarch + bisection refinement           */
 /* ------------------------------------------------------------------ */
 
-export type MarchRow = {
+type MarchRow = {
   i: number;
   t: number;
   px: number; py: number; pz: number;
