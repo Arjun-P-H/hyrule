@@ -13,7 +13,7 @@
  * TerrainDemo owns all interaction internally.
  */
 
-import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useEffect, useRef, useState } from 'react';
 import {
   ArrowDownToLine,
   CloudFog,
@@ -45,10 +45,40 @@ import {
 } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
-import TerrainDemo from '@/components/terrain/TerrainDemo';
+import dynamic from 'next/dynamic';
+import Link from 'next/link';
 import HillshadePanel from '@/components/terrain/HillshadePanel';
-import WorkedExample from '@/components/terrain/WorkedExample';
-import FileBrowser from '@/components/FileBrowser';
+
+const TerrainDemo = dynamic(() => import('@/components/terrain/TerrainDemo'), {
+  ssr: false,
+  loading: () => (
+    <div className="relative w-full h-[46vh] min-h-[320px] sm:h-[56vh] rounded-xl border border-stone-800 bg-stone-950 flex flex-col items-center justify-center gap-2">
+      <div className="font-mono text-xs text-stone-400 animate-pulse flex items-center gap-2">
+        <span className="size-2 rounded-full bg-emerald-500"></span>
+        Loading WebGL2 Procedural Terrain Engine...
+      </div>
+      <span className="font-mono text-[10px] text-stone-600">Initializing shader pipeline</span>
+    </div>
+  ),
+});
+
+const WorkedExample = dynamic(() => import('@/components/terrain/WorkedExample'), {
+  ssr: false,
+  loading: () => (
+    <div className="h-64 rounded-xl border border-stone-800 bg-stone-950/50 animate-pulse flex items-center justify-center">
+      <span className="font-mono text-xs text-stone-500">Loading instrumented march table...</span>
+    </div>
+  ),
+});
+
+const FileBrowser = dynamic(() => import('@/components/FileBrowser'), {
+  ssr: false,
+  loading: () => (
+    <div className="h-96 rounded-xl border border-stone-800 bg-stone-900/30 animate-pulse flex items-center justify-center">
+      <span className="font-mono text-xs text-stone-500">Loading engine sources...</span>
+    </div>
+  ),
+});
 import {
   BIOME_ANCHORS,
   CHUNK_SIZE,
@@ -106,6 +136,44 @@ function FadeIn({
       {children}
     </section>
   );
+}
+
+function LazyMount({
+  children,
+  fallback,
+  rootMargin = '350px',
+}: {
+  children: React.ReactNode;
+  fallback: React.ReactNode;
+  rootMargin?: string;
+}) {
+  const [mounted, setMounted] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (mounted) return;
+    const el = ref.current;
+    if (!el) return;
+
+    if (typeof IntersectionObserver === 'undefined') {
+      const id = requestAnimationFrame(() => setMounted(true));
+      return () => cancelAnimationFrame(id);
+    }
+
+    const obs = new IntersectionObserver(
+      ([entry]) => {
+        if (entry.isIntersecting) {
+          setMounted(true);
+          obs.disconnect();
+        }
+      },
+      { rootMargin }
+    );
+    obs.observe(el);
+    return () => obs.disconnect();
+  }, [mounted, rootMargin]);
+
+  return <div ref={ref}>{mounted ? children : fallback}</div>;
 }
 
 function SectionHeading({
@@ -285,22 +353,22 @@ const TBDR_CARDS: { icon: LucideIcon; title: string; note: string }[] = [
   },
 ];
 
+/** PARAM_TABLE grouped by `group`, preserving declaration order. */
+const PARAM_GROUPS: [string, ParamRow[]][] = (() => {
+  const map = new Map<string, ParamRow[]>();
+  for (const row of PARAM_TABLE) {
+    const arr = map.get(row.group);
+    if (arr) arr.push(row);
+    else map.set(row.group, [row]);
+  }
+  return Array.from(map.entries());
+})();
+
 /* -- page -------------------------------------------------------------------- */
 
 export default function Home() {
   const { seed, seedText, onSeedChange, randomizeSeed } = useSeedState(DEFAULT_SEED);
   const [preset, setPreset] = useState<PresetId>('med');
-
-  /** PARAM_TABLE grouped by `group`, preserving declaration order. */
-  const paramGroups = useMemo(() => {
-    const map = new Map<string, ParamRow[]>();
-    for (const row of PARAM_TABLE) {
-      const arr = map.get(row.group);
-      if (arr) arr.push(row);
-      else map.set(row.group, [row]);
-    }
-    return Array.from(map.entries());
-  }, []);
 
   const engineChips = [
     { k: 'chunk', v: `${CHUNK_SIZE} (2^${Math.round(Math.log2(CHUNK_SIZE))})` },
@@ -395,12 +463,12 @@ export default function Home() {
               a millimetre.
             </p>
             <div className="mt-6 flex flex-wrap items-center gap-3">
-              <a
+              <Link
                 href="/game"
                 className="flex items-center gap-2 px-5 py-2.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-stone-950 font-mono text-xs font-bold transition-all shadow-lg hover:shadow-emerald-500/25 active:scale-95"
               >
                 🎮 Play Fullscreen in Browser
-              </a>
+              </Link>
               <a
                 href="#demo"
                 className="flex items-center gap-1.5 px-4 py-2.5 rounded-lg border border-stone-800 bg-stone-900/60 hover:bg-stone-800 text-stone-300 font-mono text-xs transition-colors"
@@ -528,7 +596,19 @@ export default function Home() {
             </div>
 
             <div className="mt-4">
-              <TerrainDemo seed={seed} preset={preset} />
+              <LazyMount
+                fallback={
+                  <div className="relative w-full h-[46vh] min-h-[320px] sm:h-[56vh] rounded-xl border border-stone-800 bg-stone-950 flex flex-col items-center justify-center gap-2">
+                    <div className="font-mono text-xs text-stone-400 animate-pulse flex items-center gap-2">
+                      <span className="size-2 rounded-full bg-emerald-500"></span>
+                      Loading WebGL2 Procedural Terrain Engine...
+                    </div>
+                    <span className="font-mono text-[10px] text-stone-600">Initializing shader pipeline</span>
+                  </div>
+                }
+              >
+                <TerrainDemo seed={seed} preset={preset} />
+              </LazyMount>
             </div>
 
             <div className="mt-4 grid gap-3 sm:grid-cols-3">
@@ -580,7 +660,15 @@ export default function Home() {
           {/* overflow-x-auto contains the instrumented table's min-content
               width on narrow viewports (WorkedExample is off-limits to edit) */}
           <div className="mt-8 overflow-x-auto">
-            <WorkedExample />
+            <LazyMount
+              fallback={
+                <div className="h-64 rounded-xl border border-stone-800 bg-stone-950/50 animate-pulse flex items-center justify-center">
+                  <span className="font-mono text-xs text-stone-500">Loading instrumented march table...</span>
+                </div>
+              }
+            >
+              <WorkedExample />
+            </LazyMount>
           </div>
         </div>
       </FadeIn>
@@ -683,7 +771,7 @@ export default function Home() {
           <SectionHeading
             eyebrow="§29 · auditable constants"
             title="Parameter table (§29) — CPU/GPU auditable"
-            description={`${PARAM_TABLE.length} constants across ${paramGroups.length} groups. The cpu and gpu columns name the exact symbol in the TypeScript twin and the shader, so every value is checkable against the sources in the file browser below.`}
+            description={`${PARAM_TABLE.length} constants across ${PARAM_GROUPS.length} groups. The cpu and gpu columns name the exact symbol in the TypeScript twin and the shader, so every value is checkable against the sources in the file browser below.`}
           />
           <div
             className={`mt-8 max-h-[480px] overflow-auto rounded-xl border border-stone-800 bg-stone-950 ${THIN_SCROLL}`}
@@ -700,7 +788,7 @@ export default function Home() {
                 </tr>
               </thead>
               <tbody>
-                {paramGroups.map(([group, rows]) => (
+                {PARAM_GROUPS.map(([group, rows]) => (
                   <Fragment key={group}>
                     <tr className="bg-stone-900/60">
                       <td
@@ -851,7 +939,15 @@ export default function Home() {
             description="Every file below is real and served straight from src/ — the WebGL2 raymarch shader, the TypeScript procedural mathematics engine, and the first-person locomotion controller."
           />
           <div className="mt-8">
-            <FileBrowser />
+            <LazyMount
+              fallback={
+                <div className="h-96 rounded-xl border border-stone-800 bg-stone-900/30 animate-pulse flex items-center justify-center">
+                  <span className="font-mono text-xs text-stone-500">Loading engine sources...</span>
+                </div>
+              }
+            >
+              <FileBrowser />
+            </LazyMount>
           </div>
         </div>
       </FadeIn>
