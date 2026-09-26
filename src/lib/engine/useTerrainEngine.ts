@@ -104,7 +104,39 @@ export function useTerrainEngine({
 
     let raf = 0;
     let ro: ResizeObserver | null = null;
-    const keys = new Set<string>();
+    let keyMask = 0;
+    const KEY_W = 1 << 0;
+    const KEY_S = 1 << 1;
+    const KEY_A = 1 << 2;
+    const KEY_D = 1 << 3;
+    const KEY_UP = 1 << 4;
+    const KEY_DOWN = 1 << 5;
+    const KEY_LEFT = 1 << 6;
+    const KEY_RIGHT = 1 << 7;
+    const KEY_SHIFT = 1 << 8;
+    const KEY_SPACE = 1 << 9;
+    const KEY_C = 1 << 10;
+    const KEY_CTRL = 1 << 11;
+
+    const keyCodeToBit = (code: string): number => {
+      switch (code) {
+        case 'KeyW': return KEY_W;
+        case 'KeyS': return KEY_S;
+        case 'KeyA': return KEY_A;
+        case 'KeyD': return KEY_D;
+        case 'ArrowUp': return KEY_UP;
+        case 'ArrowDown': return KEY_DOWN;
+        case 'ArrowLeft': return KEY_LEFT;
+        case 'ArrowRight': return KEY_RIGHT;
+        case 'ShiftLeft':
+        case 'ShiftRight': return KEY_SHIFT;
+        case 'Space': return KEY_SPACE;
+        case 'KeyC': return KEY_C;
+        case 'ControlLeft':
+        case 'ControlRight': return KEY_CTRL;
+        default: return 0;
+      }
+    };
 
     let gl: WebGL2RenderingContext | null = null;
     let vs: WebGLShader | null = null;
@@ -243,8 +275,9 @@ export function useTerrainEngine({
           return;
         }
 
-        if (down) keys.add(e.code);
-        else keys.delete(e.code);
+        const bit = keyCodeToBit(e.code);
+        if (down) keyMask |= bit;
+        else keyMask &= ~bit;
 
         const isInteracting =
           enablePointerLock ||
@@ -282,7 +315,7 @@ export function useTerrainEngine({
         }
       };
 
-      const clearKeys = () => keys.clear();
+      const clearKeys = () => { keyMask = 0; };
 
       const pm = (e: PointerEvent | MouseEvent) => {
         const sens = sensitivityRef.current;
@@ -367,6 +400,14 @@ export function useTerrainEngine({
       let fpsEma = 60;
       let statsAt = 0;
       const basis = new Float32Array(9);
+      let lastW = -1, lastH = -1;
+      let lastFov = -1;
+      let lastTanHalf = 0;
+      let lastSeed = -999999;
+      let lastMarch = -1;
+      let lastShadow = -1;
+      let lastYaw = -9999, lastPitch = -9999;
+      let fx = 0, fy = 0, fz = 1, rx = 1, rz = 0;
 
       const frame = (now: number) => {
         raf = requestAnimationFrame(frame);
@@ -381,23 +422,28 @@ export function useTerrainEngine({
         const s = seedRef.current;
         const p = PRESET_MAP[presetRef.current] ?? PRESET_MAP.med;
 
-        // Locomotion update
-        const fwdKey = (keys.has('KeyW') || keys.has('ArrowUp') ? 1 : 0) - (keys.has('KeyS') || keys.has('ArrowDown') ? 1 : 0);
-        const strKey = (keys.has('KeyD') || keys.has('ArrowRight') ? 1 : 0) - (keys.has('KeyA') || keys.has('ArrowLeft') ? 1 : 0);
-        const sprint = keys.has('ShiftLeft') || keys.has('ShiftRight');
-        const jump = keys.has('Space');
+        // Locomotion update via zero-allocation bitmask
+        const fwdKey = ((keyMask & (KEY_W | KEY_UP)) ? 1 : 0) - ((keyMask & (KEY_S | KEY_DOWN)) ? 1 : 0);
+        const strKey = ((keyMask & (KEY_D | KEY_RIGHT)) ? 1 : 0) - ((keyMask & (KEY_A | KEY_LEFT)) ? 1 : 0);
+        const sprint = (keyMask & KEY_SHIFT) !== 0;
+        const jump = (keyMask & KEY_SPACE) !== 0;
+        const descend = (keyMask & (KEY_C | KEY_CTRL)) !== 0;
 
-        const cy = Math.cos(cam.yaw), sy = Math.sin(cam.yaw);
-        const cp = Math.cos(cam.pitch), sp = Math.sin(cam.pitch);
-        const fx = sy * cp, fy = sp, fz = cy * cp;
-        const rx = cy, rz = -sy;
-        const upx = fy * rz;
-        const upy = fz * rx - fx * rz;
-        const upz = -fy * rx;
+        if (cam.yaw !== lastYaw || cam.pitch !== lastPitch) {
+          lastYaw = cam.yaw;
+          lastPitch = cam.pitch;
+          const cy = Math.cos(cam.yaw), sy = Math.sin(cam.yaw);
+          const cp = Math.cos(cam.pitch), sp = Math.sin(cam.pitch);
+          fx = sy * cp; fy = sp; fz = cy * cp;
+          rx = cy; rz = -sy;
+          const upx = fy * rz;
+          const upy = fz * rx - fx * rz;
+          const upz = -fy * rx;
 
-        basis[0] = rx;   basis[1] = 0;   basis[2] = rz;
-        basis[3] = upx;  basis[4] = upy; basis[5] = upz;
-        basis[6] = fx;   basis[7] = fy;  basis[8] = fz;
+          basis[0] = rx;   basis[1] = 0;   basis[2] = rz;
+          basis[3] = upx;  basis[4] = upy; basis[5] = upz;
+          basis[6] = fx;   basis[7] = fy;  basis[8] = fz;
+        }
 
         let px: number, py: number, pz: number, grounded = false;
 
@@ -416,7 +462,7 @@ export function useTerrainEngine({
           const boost = sprint ? 2.5 : 1;
           const speed = PLAYER.flySpeed * boost * speedMultiplierRef.current;
           const wx = (fx * fwdKey + rx * strKey) * speed;
-          const wy = fy * fwdKey * speed + (keys.has('Space') ? speed : 0) - (keys.has('KeyC') || keys.has('ControlLeft') ? speed : 0);
+          const wy = fy * fwdKey * speed + (jump ? speed : 0) - (descend ? speed : 0);
           const wz = (fz * fwdKey + rz * strKey) * speed;
 
           const k = 1 - Math.exp(-8 * dt);
@@ -427,13 +473,8 @@ export function useTerrainEngine({
           cam.fly.y += cam.flyVel.y * dt;
           cam.fly.z += cam.flyVel.z * dt;
 
-          if (cam.fly.y < 950) {
-            const minY = elevation(cam.fly.x, cam.fly.z, s, 0) + 1.9;
-            if (cam.fly.y < minY) {
-              cam.fly.y = minY;
-              cam.flyVel.y = Math.max(cam.flyVel.y, 0);
-            }
-          }
+          // Free-fly mode (§IV.K.1): disable physics calculations entirely
+          // (no gravity, no ground clamp, no slope sliding). Zero CPU elevation overhead.
           cam.fly.y = Math.min(cam.fly.y, 1150);
           px = cam.fly.x;
           py = cam.fly.y;
@@ -467,18 +508,50 @@ export function useTerrainEngine({
           return;
         }
 
-        gl.viewport(0, 0, canvas.width, canvas.height);
-        gl.uniform2f(u.res, canvas.width, canvas.height);
-        gl.uniform1f(u.time, (now - t0) / 1000);
+        const marchTarget = software ? Math.min(p.marchSteps, 48) : p.marchSteps;
+        const shadowTarget = software ? Math.min(p.shadowSteps, 10) : p.shadowSteps;
+        const currentFov = fovRef.current;
+        let tanHalf = lastTanHalf;
+        let fovChanged = false;
+        if (currentFov !== lastFov) {
+          lastFov = currentFov;
+          tanHalf = Math.tan((currentFov * Math.PI / 180) * 0.5);
+          lastTanHalf = tanHalf;
+          gl.uniform1f(u.tan, tanHalf);
+          fovChanged = true;
+        }
+
+        const sizeChanged = canvas.width !== lastW || canvas.height !== lastH;
+        if (sizeChanged) {
+          lastW = canvas.width;
+          lastH = canvas.height;
+          gl.viewport(0, 0, lastW, lastH);
+          gl.uniform2f(u.res, lastW, lastH);
+        }
+
+        if (sizeChanged || fovChanged) {
+          gl.uniform1f(u.foot, (2 * tanHalf) / Math.max(lastH, 2));
+        }
+
+        if (s !== lastSeed) {
+          lastSeed = s;
+          gl.uniform1i(u.seed, s | 0);
+        }
+
+        if (marchTarget !== lastMarch) {
+          lastMarch = marchTarget;
+          gl.uniform1i(u.march, marchTarget);
+        }
+
+        if (shadowTarget !== lastShadow) {
+          lastShadow = shadowTarget;
+          gl.uniform1i(u.shadow, shadowTarget);
+        }
+
+        gl.uniform1f(u.time, (now - t0) * 0.001);
         gl.uniform3f(u.cam, lx, py, lz);
         gl.uniform2f(u.origin, ox, oz);
         gl.uniformMatrix3fv(u.basis, false, basis);
-        const tanHalf = Math.tan((fovRef.current * Math.PI / 180) * 0.5);
-        gl.uniform1f(u.tan, tanHalf);
-        gl.uniform1i(u.seed, s | 0);
-        gl.uniform1i(u.march, software ? Math.min(p.marchSteps, 48) : p.marchSteps);
-        gl.uniform1i(u.shadow, software ? Math.min(p.shadowSteps, 10) : p.shadowSteps);
-        gl.uniform1f(u.foot, (2 * tanHalf) / Math.max(canvas.height, 2));
         gl.drawArrays(gl.TRIANGLES, 0, 3);
 
         if (fence) gl.deleteSync(fence);

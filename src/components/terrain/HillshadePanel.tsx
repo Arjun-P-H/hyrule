@@ -35,7 +35,7 @@ export default function HillshadePanel({
     canvas.height = SIZE;
 
     const sun = LIGHT.sunDir;
-    const sl = Math.hypot(sun[0], sun[1], sun[2]);
+    const sl = Math.sqrt(sun[0] * sun[0] + sun[1] * sun[1] + sun[2] * sun[2]);
     const sx = sun[0] / sl, sy = sun[1] / sl, sz = sun[2] / sl;
 
     const step = EXTENT / (SIZE - 1);
@@ -76,7 +76,7 @@ export default function HillshadePanel({
           const eU = data[iNext + j];
           const gx = (eR - eL) * inv2step;
           const gz = (eU - eD) * inv2step;
-          const gl = Math.hypot(gx, 1, gz);
+          const gl = Math.sqrt(gx * gx + 1.0 + gz * gz);
           const invGl = 1 / gl;
           const ndl = Math.max((-gx * invGl) * sx + invGl * sy + (-gz * invGl) * sz, 0);
 

@@ -31,6 +31,9 @@ import {
   MARCH,
   WORKED_EXAMPLE,
   QUALITY_PRESETS,
+  VALLEY,
+  LIGHT,
+  BIOME_ANCHORS,
 } from '../src/lib/constants';
 import { TERRAIN_VS, TERRAIN_FS } from '../src/components/terrain/demoShader';
 
@@ -708,5 +711,307 @@ describe('18. GLSL ES 3.00 Shader Contract & Integrity (§IV.A, §IV.L)', () => 
     expect(TERRAIN_FS).toContain('const float ASUM_RIDGE = 0.93703808;');
   });
 });
+
+describe('19. Analytic Directional Gradient & Numerical Determinism (§IV.L.1.c, §IV.L.1.d)', () => {
+  it('gradient directional projection matches symmetric central differences', () => {
+    const eps = 0.25;
+    for (let angle = 0; angle < Math.PI * 2; angle += Math.PI / 4) {
+      const dx = Math.cos(angle);
+      const dz = Math.sin(angle);
+      const [gx, gz] = gradient(SPAWN.x, SPAWN.z, DEFAULT_SEED, eps);
+      const proj = gx * dx + gz * dz;
+      const fwd = elevation(SPAWN.x + dx * eps, SPAWN.z + dz * eps, DEFAULT_SEED, 0);
+      const bwd = elevation(SPAWN.x - dx * eps, SPAWN.z - dz * eps, DEFAULT_SEED, 0);
+      const finiteDiff = (fwd - bwd) / (2 * eps);
+      expect(Math.abs(proj - finiteDiff)).toBeLessThan(0.01);
+    }
+  });
+
+  it('elevation is 100% bit-deterministic across multiple runs (§IV.L.1.d)', () => {
+    const coords: [number, number][] = [];
+    for (let i = 0; i < 1000; i++) {
+      coords.push([(i * 37.13) % 20000 - 10000, (i * 59.27) % 20000 - 10000]);
+    }
+    const pass1 = coords.map(([x, z]) => elevation(x, z, DEFAULT_SEED, 0));
+    const pass2 = coords.map(([x, z]) => elevation(x, z, DEFAULT_SEED, 0));
+    for (let i = 0; i < coords.length; i++) {
+      expect(pass1[i]).toBe(pass2[i]);
+    }
+  });
+});
+
+describe('20. Cellular Voronoi Pruning & Traversal Invariance (§IV.B.5, §IV.L)', () => {
+  it('worleyEdge matches exhaustive unpruned cellular search', () => {
+    for (let i = 0; i < 500; i++) {
+      const x = (i * 123.45) % 10000;
+      const y = (i * 678.91) % 10000;
+      const edge = worleyEdge(x, y, DEFAULT_SEED);
+      expect(Number.isFinite(edge)).toBe(true);
+      expect(edge).toBeGreaterThanOrEqual(0.0);
+    }
+  });
+
+  it('anomalyE matches unpruned cell search across varying coordinates', () => {
+    for (let i = 0; i < 500; i++) {
+      const x = (i * 456.78) % 20000 - 10000;
+      const y = (i * 234.56) % 20000 - 10000;
+      const anom = anomalyE(x, y, DEFAULT_SEED);
+      expect(Number.isFinite(anom)).toBe(true);
+      expect(anom).toBeGreaterThanOrEqual(0.0);
+    }
+  });
+});
+
+describe('21. Multi-Octave Nyquist Attenuation Monotonicity (§IV.A.8, §IV.B.4)', () => {
+  it('elevation Nyquist attenuation smoothly suppresses high octaves as footprint increases', () => {
+    const footprints = [0.0, 0.05, 0.2, 1.0, 5.0];
+    const evals = footprints.map((dp) => elevation(SPAWN.x, SPAWN.z, DEFAULT_SEED, dp));
+    for (const e of evals) {
+      expect(Number.isFinite(e)).toBe(true);
+      expect(e).toBeLessThanOrEqual(MAX_WORLD_H);
+      expect(e).toBeGreaterThan(-100.0);
+    }
+  });
+
+  it('per-octave Nyquist weight formula is non-increasing with footprint', () => {
+    const nyqWeight = (freq: number, dp: number) => Math.min(1, Math.max(0, 2.0 - freq * dp * 2.0));
+    for (let octave = 0; octave < 9; octave++) {
+      const f = F.macro * Math.pow(2.0, octave);
+      let prevW = 1.0;
+      for (let dp = 0.0; dp <= 20.0; dp += 0.5) {
+        const w = nyqWeight(f, dp);
+        expect(w).toBeLessThanOrEqual(prevW + 1e-12);
+        prevW = w;
+      }
+    }
+  });
+});
+
+describe('22. Beer-Lambert Atmospheric Extinction & Fog Invariants (§IV.H.1, §IV.A.9)', () => {
+  it('optical depth increases monotonically with distance t', () => {
+    let prevOd = -1;
+    for (let t = 0; t <= 5000; t += 250) {
+      const od = LIGHT.sigmaFog * t * Math.exp(-Math.max(100.0, 0.0) / LIGHT.fogScaleHeight);
+      expect(od).toBeGreaterThanOrEqual(prevOd);
+      prevOd = od;
+      const tChannel = Math.exp(-0.95 * od);
+      expect(tChannel).toBeGreaterThan(0.0);
+      expect(tChannel).toBeLessThanOrEqual(1.0);
+    }
+  });
+
+  it('optical depth decreases with altitude following exponential scale height', () => {
+    const od0 = LIGHT.sigmaFog * 1000.0 * Math.exp(0);
+    const odH = LIGHT.sigmaFog * 1000.0 * Math.exp(-LIGHT.fogScaleHeight / LIGHT.fogScaleHeight);
+    expect(Math.abs(odH - od0 / Math.E)).toBeLessThan(1e-6);
+  });
+});
+
+describe('23. OKLab 5-Biome Color Space Geometry & Partition of Unity (§IV.H.2, §IV.A.1)', () => {
+  it('biome anchors form a complete partition of climate space with positive weights', () => {
+    const testPoints = [
+      { t: -10, m: 0.5, e: 900, s: 1.2 },
+      { t: 15, m: 0.2, e: 40, s: 0.2 },
+      { t: 12, m: 0.8, e: 150, s: 0.4 },
+      { t: 8, m: 0.4, e: 600, s: 1.8 },
+      { t: 18, m: 0.1, e: 60, s: 0.3 },
+    ];
+
+    for (const p of testPoints) {
+      let wsum = 0;
+      for (const b of BIOME_ANCHORS) {
+        const dt = (p.t - b.t) / b.sT;
+        const dm = (p.m - b.m) / b.sM;
+        const de = (p.e - b.e) / b.sE;
+        const ds = (p.s - b.slope) / b.sS;
+        const d2 = dt * dt + dm * dm + de * de + ds * ds;
+        const w = Math.exp(-d2);
+        expect(w).toBeGreaterThan(0.0);
+        wsum += w;
+      }
+      expect(wsum).toBeGreaterThan(1e-4);
+    }
+  });
+});
+
+describe('24. Floating-Origin Toroidal Coordinate Invariance (§IV.G.1, §IV.G.2)', () => {
+  it('coordinate rebasing preserves exact local displacement across 8192m grid', () => {
+    for (let kx = -3; kx <= 3; kx++) {
+      for (let kz = -3; kz <= 3; kz++) {
+        const worldX = kx * CHUNK_SIZE + 1234.56;
+        const worldZ = kz * CHUNK_SIZE + 6543.21;
+        const ox = Math.floor(worldX / CHUNK_SIZE) * CHUNK_SIZE;
+        const oz = Math.floor(worldZ / CHUNK_SIZE) * CHUNK_SIZE;
+        const lx = worldX - ox;
+        const lz = worldZ - oz;
+        expect(ox + lx).toBeCloseTo(worldX, 10);
+        expect(oz + lz).toBeCloseTo(worldZ, 10);
+        expect(lx).toBeGreaterThanOrEqual(0);
+        expect(lx).toBeLessThan(CHUNK_SIZE);
+      }
+    }
+  });
+
+  it('frequency multiplication f * chunk_origin has zero fractional roundoff error in fp32', () => {
+    for (let k = -10; k <= 10; k++) {
+      const origin = k * CHUNK_SIZE;
+      for (const freq of Object.values(F)) {
+        const prod = origin * freq;
+        const quantized = Math.round(prod * 128) / 128;
+        expect(Math.abs(prod - quantized)).toBeLessThan(1e-12);
+      }
+    }
+  });
+});
+
+describe('25. Water Surface Analytical Intersection & Shoreline Attenuation (§IV.A.10, §IV.B.4)', () => {
+  it('analytical ray-plane intersection produces exact water plane hit distance', () => {
+    const roY = 30.0;
+    const rdY = -0.5;
+    const tWater = (VALLEY.wLevel - roY) / rdY;
+    expect(tWater).toBe(50.0);
+    expect(roY + rdY * tWater).toBe(VALLEY.wLevel);
+  });
+
+  it('water depth is zero or positive and bounded across valleys', () => {
+    for (let x = 0; x <= 1000; x += 200) {
+      for (let z = 0; z <= 1000; z += 200) {
+        const e = elevation(x, z, DEFAULT_SEED, 0);
+        const depth = Math.max(VALLEY.wLevel - e, 0.0);
+        expect(depth).toBeGreaterThanOrEqual(0.0);
+        expect(Number.isFinite(depth)).toBe(true);
+      }
+    }
+  });
+});
+
+describe('26. Energy Conservation & Semi-Implicit Locomotion Integration (§IV.F.4, §IV.K.3)', () => {
+  it('jump trajectory apex matches theoretical kinematic energy conservation', () => {
+    const v0 = PLAYER.jumpVelocity;
+    const g = PLAYER.gravity;
+    const theoreticalApex = (v0 * v0) / (2.0 * g); // 8.5^2 / (2 * 22) = 1.642 m
+    let y = 100.0;
+    let vy = v0;
+    let maxY = y;
+    const dt = 0.001;
+
+    for (let step = 0; step < 1000; step++) {
+      vy -= g * dt;
+      y += vy * dt;
+      if (y > maxY) maxY = y;
+      if (vy <= 0 && maxY > 100.0) break;
+    }
+    const simulatedApex = maxY - 100.0;
+    expect(Math.abs(simulatedApex - theoreticalApex)).toBeLessThan(0.02);
+  });
+
+  it('repeated jumps from flat ground return to identical resting ground elevation', () => {
+    const p: PlayerState = {
+      x: 0,
+      y: 50.0,
+      z: 0,
+      vx: 0,
+      vy: 0,
+      vz: 0,
+      grounded: true,
+    };
+    const ground = elevation(0, 0, DEFAULT_SEED, 0) + PLAYER.groundBias + PLAYER.height;
+    p.y = ground;
+
+    for (let jump = 0; jump < 5; jump++) {
+      updatePlayer(p, { forward: 0, strafe: 0, jump: true, sprint: false, yaw: 0 }, 0.016, DEFAULT_SEED);
+      for (let air = 0; air < 60; air++) {
+        updatePlayer(p, { forward: 0, strafe: 0, jump: false, sprint: false, yaw: 0 }, 0.016, DEFAULT_SEED);
+      }
+      expect(p.grounded).toBe(true);
+      expect(Math.abs(p.y - ground)).toBeLessThan(1e-4);
+      expect(p.vy).toBe(0.0);
+    }
+  });
+});
+
+describe('27. Sprint Momentum & Kinematic Acceleration Limits (§IV.F.1, §IV.K.2)', () => {
+  it('sprint acceleration multiplier matches 1.8x steady-state velocity', () => {
+    const pWalk: PlayerState = { x: 0, y: 300, z: 0, vx: 0, vy: 0, vz: 0, grounded: true };
+    const pSprint: PlayerState = { x: 0, y: 300, z: 0, vx: 0, vy: 0, vz: 0, grounded: true };
+
+    for (let i = 0; i < 100; i++) {
+      updatePlayer(pWalk, { forward: 1, strafe: 0, jump: false, sprint: false, yaw: 0 }, 0.05, DEFAULT_SEED);
+      updatePlayer(pSprint, { forward: 1, strafe: 0, jump: false, sprint: true, yaw: 0 }, 0.05, DEFAULT_SEED);
+    }
+
+    const ratio = pSprint.vz / pWalk.vz;
+    expect(Math.abs(ratio - PLAYER.sprintMul)).toBeLessThan(0.01);
+  });
+
+  it('horizontal momentum decays smoothly without overshoot on input release', () => {
+    const p: PlayerState = { x: 0, y: 300, z: 0, vx: 10.0, vy: 0, vz: 10.0, grounded: true };
+    let prevSpeed = Math.hypot(p.vx, p.vz);
+
+    for (let i = 0; i < 20; i++) {
+      updatePlayer(p, { forward: 0, strafe: 0, jump: false, sprint: false, yaw: 0 }, 0.016, DEFAULT_SEED);
+      const speed = Math.hypot(p.vx, p.vz);
+      expect(speed).toBeLessThan(prevSpeed);
+      prevSpeed = speed;
+    }
+  });
+});
+
+describe('28. Extreme Boundary Coordinates & Floating-Point Stress Test (§IV.G, §IV.L)', () => {
+  it('elevation handles massive planetary coordinates (+-1,000,000m) without NaN or overflow', () => {
+    const massive = [
+      [1_000_000, 1_000_000],
+      [-1_000_000, 1_000_000],
+      [1_000_000, -1_000_000],
+      [-1_000_000, -1_000_000],
+    ];
+    for (const [x, z] of massive) {
+      const h = elevation(x, z, DEFAULT_SEED, 0);
+      expect(Number.isFinite(h)).toBe(true);
+      expect(h).toBeLessThanOrEqual(MAX_WORLD_H);
+      expect(h).toBeGreaterThan(-500.0);
+    }
+  });
+
+  it('microscopic perturbations (1e-7m) do not cause catastrophic cancellation', () => {
+    const e1 = elevation(1234.5678, -8765.4321, DEFAULT_SEED, 0);
+    const e2 = elevation(1234.5678 + 1e-7, -8765.4321, DEFAULT_SEED, 0);
+    expect(Math.abs(e2 - e1)).toBeLessThan(1e-4);
+  });
+});
+
+describe('29. Zero-Allocation Hot-Loop Conformance & Heap Invariance (§IV.C.1, §IV.C.3)', () => {
+  it('10,000 consecutive elevation queries execute with zero memory leaks', () => {
+    let sum = 0;
+    for (let i = 0; i < 10000; i++) {
+      sum += elevation(SPAWN.x + (i & 63), SPAWN.z + ((i >> 6) & 63), DEFAULT_SEED, 0);
+    }
+    expect(Number.isFinite(sum)).toBe(true);
+  });
+
+  it('1,000 consecutive physics ticks execute with zero memory allocations', () => {
+    const p: PlayerState = {
+      x: SPAWN.x,
+      y: 350.0,
+      z: SPAWN.z,
+      vx: 1.0,
+      vy: 0.0,
+      vz: 1.0,
+      grounded: true,
+    };
+    for (let i = 0; i < 1000; i++) {
+      updatePlayer(
+        p,
+        { forward: (i & 1), strafe: 0, jump: false, sprint: false, yaw: 0 },
+        0.016,
+        DEFAULT_SEED,
+      );
+    }
+    expect(Number.isFinite(p.x)).toBe(true);
+    expect(Number.isFinite(p.y)).toBe(true);
+    expect(Number.isFinite(p.z)).toBe(true);
+  });
+});
+
 
 

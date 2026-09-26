@@ -87,14 +87,16 @@ const vec3  SUN      = vec3(0.550744, 0.420568, 0.720974); // normalize(0.55,0.4
 const vec3  SUN_COL  = vec3(1.0, 0.955, 0.885) * 3.4;
 const vec3  SKY_ZEN  = vec3(0.20, 0.36, 0.52);
 const vec3  SKY_HOR  = vec3(0.78, 0.80, 0.82);
+const vec3  SKY_TINT = (SKY_HOR + SKY_ZEN) * 0.5;
+const vec3  SKY_HOR_104 = SKY_HOR * 1.04;
+const vec3  SUN_COL_010 = SUN_COL * 0.10;
+const vec3  SUN_COL_030 = SUN_COL * 0.30;
+const vec3  SUN_COL_600 = SUN_COL * 6.0;
 const float CLOUD_PLANE = 1500.0;
 const int   CLOUD_OCT = 4;
 const float SIGMA_FOG = 9.0e-4;   // 1/m extinction at sea level (§19)
 const float FOG_H     = 900.0;    // fog scale height (§19)
 
-// ---------------------------------------------------------------------------
-// §4 — deterministic hashing (uint32, Murmur3 finalizer) — mirrors terrainMath
-// ---------------------------------------------------------------------------
 // ---------------------------------------------------------------------------
 // §4 — deterministic hashing (uint32, Murmur3 finalizer) — mirrors terrainMath
 // ---------------------------------------------------------------------------
@@ -121,34 +123,35 @@ float hash01(int xi, int yi, int seed) {
 float quintic(float t) { return t * t * t * (t * (t * 6.0 - 15.0) + 10.0); }
 
 const float INV_U32 = 1.0 / 4294967295.0;
+const float INV_U32_X2 = 2.0 / 4294967295.0;
 
 float vnoise(float x, float y, int seed) {
-  float ix = floor(x), iy = floor(y);
-  float fx = x - ix,   fy = y - iy;
-  float ux = fx * fx * fx * (fx * (fx * 6.0 - 15.0) + 10.0);
-  float uy = fy * fy * fy * (fy * (fy * 6.0 - 15.0) + 10.0);
+  vec2 p = vec2(x, y);
+  vec2 ip = floor(p);
+  vec2 f = p - ip;
+  vec2 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
 
-  uint ux0 = uint(int(ix));
+  uint ux0 = uint(int(ip.x));
   uint ux1 = ux0 + 1u;
-  uint uy0 = uint(int(iy)) * 0x27d4eb2fu;
+  uint uy0 = uint(int(ip.y)) * 0x27d4eb2fu;
   uint uy1 = uy0 + 0x27d4eb2fu;
   uint s_term = uint(seed) * 0x9e3779b9u;
 
   uint h0 = uy0 ^ s_term;
   uint h1 = uy1 ^ s_term;
 
-  float a = float(hashU(ux0 ^ h0)) * INV_U32;
-  float b = float(hashU(ux1 ^ h0)) * INV_U32;
-  float c = float(hashU(ux0 ^ h1)) * INV_U32;
-  float d = float(hashU(ux1 ^ h1)) * INV_U32;
+  float a = float(hashU(ux0 ^ h0)) * INV_U32_X2;
+  float b = float(hashU(ux1 ^ h0)) * INV_U32_X2;
+  float c = float(hashU(ux0 ^ h1)) * INV_U32_X2;
+  float d = float(hashU(ux1 ^ h1)) * INV_U32_X2;
 
-  float v = mix(mix(a, b, ux), mix(c, d, ux), uy);
-  return v * 2.0 - 1.0;
+  vec2 ab_cd = mix(vec2(a, c), vec2(b, d), u.x);
+  return mix(ab_cd.x, ab_cd.y, u.y) - 1.0;
 }
 
 float nyqW(float f, float dp) {
-  // spec §5: fade an octave out between 0.5 and 1 cycle per pixel footprint
-  return clamp(2.0 - (f * dp) / 0.5, 0.0, 1.0);
+  // spec §5: fade an octave out between 0.5 and 1 cycle per pixel footprint (2.0 = 1.0 / 0.5)
+  return clamp(2.0 - (f * dp) * 2.0, 0.0, 1.0);
 }
 
 const float ASUM_MACRO = 1.99609375;
@@ -187,25 +190,40 @@ float ridged(float x, float y, int seed, int oct, float lac, float gain, float d
 }
 
 // ---------------------------------------------------------------------------
-// §7/§12/§13 — cellular (Worley) fields (squared-distance comparisons)
+// §7/§12/§13 — cellular (Worley) fields (orthogonal-first distance pruning)
 // ---------------------------------------------------------------------------
+const ivec2 VOR_OFFSETS[8] = ivec2[8](
+  ivec2( 1,  0), ivec2( 0,  1), ivec2(-1,  0), ivec2( 0, -1),
+  ivec2( 1,  1), ivec2(-1,  1), ivec2( 1, -1), ivec2(-1, -1)
+);
+
 float voronoiEdge(vec2 p_in, int seed) {
   vec2 ip = floor(p_in);
   vec2 f = p_in - ip;
-  float f1_sq = 64.0, f2_sq = 64.0;
-  for (int j = -1; j <= 1; j++) {
-    for (int i = -1; i <= 1; i++) {
-      int cxi = int(ip.x) + i;
-      int cyi = int(ip.y) + j;
-      uint h = hash3(cxi, cyi, seed);
-      vec2 p = vec2(float(h & 0xfffu), float((h >> 12u) & 0xfffu)) * (1.0 / 4095.0);
-      vec2 d = vec2(float(i), float(j)) + p - f;
-      float d2 = dot(d, d);
-      if (d2 < f1_sq) {
-        f2_sq = f1_sq; f1_sq = d2;
-      } else if (d2 < f2_sq) {
-        f2_sq = d2;
-      }
+  int cxi0 = int(ip.x);
+  int cyi0 = int(ip.y);
+  uint h0 = hash3(cxi0, cyi0, seed);
+  vec2 p0 = vec2(float(h0 & 0xfffu), float((h0 >> 12u) & 0xfffu)) * (1.0 / 4095.0);
+  vec2 d0 = p0 - f;
+  float f1_sq = dot(d0, d0);
+  float f2_sq = 64.0;
+
+  for (int k = 0; k < 8; k++) {
+    ivec2 off = VOR_OFFSETS[k];
+    float minDx = off.x == 1 ? (1.0 - f.x) : (off.x == -1 ? f.x : 0.0);
+    float minDy = off.y == 1 ? (1.0 - f.y) : (off.y == -1 ? f.y : 0.0);
+    if (minDx * minDx + minDy * minDy >= f2_sq) continue;
+
+    int cxi = cxi0 + off.x;
+    int cyi = cyi0 + off.y;
+    uint h = hash3(cxi, cyi, seed);
+    vec2 p = vec2(float(h & 0xfffu), float((h >> 12u) & 0xfffu)) * (1.0 / 4095.0);
+    vec2 d = vec2(float(off.x), float(off.y)) + p - f;
+    float d2 = dot(d, d);
+    if (d2 < f1_sq) {
+      f2_sq = f1_sq; f1_sq = d2;
+    } else if (d2 < f2_sq) {
+      f2_sq = d2;
     }
   }
   return sqrt(f2_sq) - sqrt(f1_sq);
@@ -228,24 +246,31 @@ float anomalyE(vec2 g, int seed) {
   vec2 p_in = g * (1.0 / ANOM_CELL);
   vec2 ip = floor(p_in);
   vec2 f = p_in - ip;
-  float f1_sq = 64.0, f2_sq = 64.0;
-  vec2 bc = vec2(0.0);
-  float btype = 0.0;
-  for (int j = -1; j <= 1; j++) {
-    for (int i = -1; i <= 1; i++) {
-      int cxi = int(ip.x) + i;
-      int cyi = int(ip.y) + j;
-      uint h = hash3(cxi, cyi, seed + 400);
-      vec2 p = vec2(float(h & 0xfffu), float((h >> 12u) & 0xfffu)) * (1.0 / 4095.0);
-      vec2 d = vec2(float(i), float(j)) + p - f;
-      float d2 = dot(d, d);
-      if (d2 < f1_sq) {
-        f2_sq = f1_sq; f1_sq = d2;
-        bc = vec2(float(cxi), float(cyi)) + p;
-        btype = float(h >> 24u) * (1.0 / 255.0);
-      } else if (d2 < f2_sq) {
-        f2_sq = d2;
-      }
+  int cxi0 = int(ip.x);
+  int cyi0 = int(ip.y);
+  uint h0 = hash3(cxi0, cyi0, seed + 400);
+  vec2 p0 = vec2(float(h0 & 0xfffu), float((h0 >> 12u) & 0xfffu)) * (1.0 / 4095.0);
+  vec2 d0 = p0 - f;
+  float f1_sq = dot(d0, d0);
+  vec2 bc = vec2(float(cxi0), float(cyi0)) + p0;
+  float btype = float(h0 >> 24u) * (1.0 / 255.0);
+
+  for (int k = 0; k < 8; k++) {
+    ivec2 off = VOR_OFFSETS[k];
+    float minDx = off.x == 1 ? (1.0 - f.x) : (off.x == -1 ? f.x : 0.0);
+    float minDy = off.y == 1 ? (1.0 - f.y) : (off.y == -1 ? f.y : 0.0);
+    if (minDx * minDx + minDy * minDy >= f1_sq) continue;
+
+    int cxi = cxi0 + off.x;
+    int cyi = cyi0 + off.y;
+    uint h = hash3(cxi, cyi, seed + 400);
+    vec2 p = vec2(float(h & 0xfffu), float((h >> 12u) & 0xfffu)) * (1.0 / 4095.0);
+    vec2 d = vec2(float(off.x), float(off.y)) + p - f;
+    float d2 = dot(d, d);
+    if (d2 < f1_sq) {
+      f1_sq = d2;
+      bc = vec2(float(cxi), float(cyi)) + p;
+      btype = float(h >> 24u) * (1.0 / 255.0);
     }
   }
   if (btype >= P_ANOM) return 0.0;
@@ -273,22 +298,32 @@ Reg regionField(vec2 g, int seed) {
   vec2 p_in = g * (1.0 / REGION_CELL);
   vec2 ip = floor(p_in);
   vec2 f = p_in - ip;
-  float f1_sq = 64.0, f2_sq = 64.0;
-  float btype = 0.0;
-  for (int j = -1; j <= 1; j++) {
-    for (int i = -1; i <= 1; i++) {
-      int cxi = int(ip.x) + i;
-      int cyi = int(ip.y) + j;
-      uint h = hash3(cxi, cyi, seed + 900);
-      vec2 p = vec2(float(h & 0xfffu), float((h >> 12u) & 0xfffu)) * (1.0 / 4095.0);
-      vec2 d = vec2(float(i), float(j)) + p - f;
-      float d2 = dot(d, d);
-      if (d2 < f1_sq) {
-        f2_sq = f1_sq; f1_sq = d2;
-        btype = float(h >> 24u) * (1.0 / 255.0);
-      } else if (d2 < f2_sq) {
-        f2_sq = d2;
-      }
+  int cxi0 = int(ip.x);
+  int cyi0 = int(ip.y);
+  uint h0 = hash3(cxi0, cyi0, seed + 900);
+  vec2 p0 = vec2(float(h0 & 0xfffu), float((h0 >> 12u) & 0xfffu)) * (1.0 / 4095.0);
+  vec2 d0 = p0 - f;
+  float f1_sq = dot(d0, d0);
+  float f2_sq = 64.0;
+  float btype = float(h0 >> 24u) * (1.0 / 255.0);
+
+  for (int k = 0; k < 8; k++) {
+    ivec2 off = VOR_OFFSETS[k];
+    float minDx = off.x == 1 ? (1.0 - f.x) : (off.x == -1 ? f.x : 0.0);
+    float minDy = off.y == 1 ? (1.0 - f.y) : (off.y == -1 ? f.y : 0.0);
+    if (minDx * minDx + minDy * minDy >= f2_sq) continue;
+
+    int cxi = cxi0 + off.x;
+    int cyi = cyi0 + off.y;
+    uint h = hash3(cxi, cyi, seed + 900);
+    vec2 p = vec2(float(h & 0xfffu), float((h >> 12u) & 0xfffu)) * (1.0 / 4095.0);
+    vec2 d = vec2(float(off.x), float(off.y)) + p - f;
+    float d2 = dot(d, d);
+    if (d2 < f1_sq) {
+      f2_sq = f1_sq; f1_sq = d2;
+      btype = float(h >> 24u) * (1.0 / 255.0);
+    } else if (d2 < f2_sq) {
+      f2_sq = d2;
     }
   }
   float edge = sqrt(f2_sq) - sqrt(f1_sq);
@@ -375,49 +410,53 @@ float moisture(vec2 g, int seed) {
 // ---------------------------------------------------------------------------
 // §10/§11/§21 — biome RBF anchors in OKLab (mirror constants.ts BIOME_ANCHORS)
 // ---------------------------------------------------------------------------
+const mat3 OKLAB_TO_LINEAR_MAT = mat3(
+  4.0767416621, -1.2684380046, -0.0041960863,
+  -3.3077115913, 2.6097574011, -0.7034186147,
+  0.2309699292, -0.3413193965, 1.7076147010
+);
+
 vec3 oklabToLinear(vec3 lab) {
   float l_ = lab.x + 0.3963377774 * lab.y + 0.2158037573 * lab.z;
   float m_ = lab.x - 0.1055613458 * lab.y - 0.0638541728 * lab.z;
   float s_ = lab.x - 0.0894841775 * lab.y - 1.2914855480 * lab.z;
-  float l = l_ * l_ * l_, m = m_ * m_ * m_, s = s_ * s_ * s_;
-  return vec3(
-    +4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
-    -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
-    -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s);
+  return OKLAB_TO_LINEAR_MAT * vec3(l_ * l_ * l_, m_ * m_ * m_, s_ * s_ * s_);
 }
 
+const vec4 C0_CTR = vec4(-4.0, 0.55, 800.0, 1.0);
+const vec4 C0_INV = vec4(1.0 / 4.5, 1.0 / 0.45, 1.0 / 600.0, 1.0 / 1.1);
+
+const vec4 C1_CTR = vec4(9.0, 0.45, 550.0, 1.7);
+const vec4 C1_INV = vec4(1.0 / 22.0, 1.0 / 0.55, 1.0 / 600.0, 1.0 / 0.8);
+
+const vec4 C2_CTR = vec4(13.0, 0.72, 90.0, 0.32);
+const vec4 C2_INV = vec4(1.0 / 6.5, 1.0 / 0.22, 1.0 / 260.0, 1.0 / 0.5);
+
+const vec4 C3_CTR = vec4(11.0, 0.90, 230.0, 0.45);
+const vec4 C3_INV = vec4(1.0 / 7.0, 1.0 / 0.15, 1.0 / 380.0, 1.0 / 0.55);
+
+const vec4 C4_CTR = vec4(16.0, 0.13, 55.0, 0.35);
+const vec4 C4_INV = vec4(1.0 / 8.0, 1.0 / 0.17, 1.0 / 320.0, 1.0 / 0.5);
+
 // Single-exp RBF over (T, M, E, slope); colours mix in OKLab, convert once (§21).
-// Saves 15 exp() transcendental calls per shaded pixel!
+// Vectorized 4D SIMD distance evaluations save instruction cycles per shaded pixel!
 vec3 biomeColor(float T, float M, float e, float slopeM, float vegNoise, out float vegOut) {
-  float d0 = (T - -4.0) * (1.0 / 4.5);
-  float m0 = (M - 0.55) * (1.0 / 0.45);
-  float e0 = (e - 800.0) * (1.0 / 600.0);
-  float s0 = (slopeM - 1.0) * (1.0 / 1.1);
-  float w0 = exp(-(d0 * d0 + m0 * m0 + e0 * e0 + s0 * s0));
+  vec4 clim = vec4(T, M, e, slopeM);
 
-  float d1 = (T - 9.0) * (1.0 / 22.0);
-  float m1 = (M - 0.45) * (1.0 / 0.55);
-  float e1 = (e - 550.0) * (1.0 / 600.0);
-  float s1 = (slopeM - 1.7) * (1.0 / 0.8);
-  float w1 = exp(-(d1 * d1 + m1 * m1 + e1 * e1 + s1 * s1));
+  vec4 v0 = (clim - C0_CTR) * C0_INV;
+  float w0 = exp(-dot(v0, v0));
 
-  float d2 = (T - 13.0) * (1.0 / 6.5);
-  float m2 = (M - 0.72) * (1.0 / 0.22);
-  float e2 = (e - 90.0) * (1.0 / 260.0);
-  float s2 = (slopeM - 0.32) * (1.0 / 0.5);
-  float w2 = exp(-(d2 * d2 + m2 * m2 + e2 * e2 + s2 * s2));
+  vec4 v1 = (clim - C1_CTR) * C1_INV;
+  float w1 = exp(-dot(v1, v1));
 
-  float d3 = (T - 11.0) * (1.0 / 7.0);
-  float m3 = (M - 0.9) * (1.0 / 0.15);
-  float e3 = (e - 230.0) * (1.0 / 380.0);
-  float s3 = (slopeM - 0.45) * (1.0 / 0.55);
-  float w3 = exp(-(d3 * d3 + m3 * m3 + e3 * e3 + s3 * s3));
+  vec4 v2 = (clim - C2_CTR) * C2_INV;
+  float w2 = exp(-dot(v2, v2));
 
-  float d4 = (T - 16.0) * (1.0 / 8.0);
-  float m4 = (M - 0.13) * (1.0 / 0.17);
-  float e4 = (e - 55.0) * (1.0 / 320.0);
-  float s4 = (slopeM - 0.35) * (1.0 / 0.5);
-  float w4 = exp(-(d4 * d4 + m4 * m4 + e4 * e4 + s4 * s4));
+  vec4 v3 = (clim - C3_CTR) * C3_INV;
+  float w3 = exp(-dot(v3, v3));
+
+  vec4 v4 = (clim - C4_CTR) * C4_INV;
+  float w4 = exp(-dot(v4, v4));
 
   float wsum = max(w0 + w1 + w2 + w3 + w4, 1e-6);
   float invWsum = 1.0 / wsum;
@@ -448,6 +487,7 @@ float softShadow(vec3 p, int seed, float footprint) {
     vec3 q = p + SUN * t;
     if (q.y > MAXH) break;
     float h = q.y - elevation(q.xz + u_chunk_origin, t * fp4, seed); // §18: 4×Δp
+    if (h <= 0.0) return 0.0;
     res = min(res, 10.0 * h / t);
     if (res < 0.005) return 0.0;
     t += clamp(h * 0.8, 0.5, 60.0) + t * 0.04;
@@ -462,19 +502,24 @@ vec3 skyColor(vec3 rd) {
   float sd = max(dot(rd, SUN), 0.0);
   float k = pow(max(rd.y, 0.0), 0.55);
   vec3 sky = mix(SKY_HOR, SKY_ZEN, k);
-  sky = mix(SKY_HOR * 1.04, sky, smoothstep(-0.08, 0.06, rd.y));
-  sky += SUN_COL * (pow(sd, 8.0) * 0.10 + pow(sd, 90.0) * 0.30);
-  sky += SUN_COL * smoothstep(0.99955, 0.99985, sd) * 6.0; // disc
+  sky = mix(SKY_HOR_104, sky, smoothstep(-0.08, 0.06, rd.y));
+  float sd2 = sd * sd;
+  float sd4 = sd2 * sd2;
+  float sd8 = sd4 * sd4;
+  float sd90 = sd > 0.8 ? pow(sd, 90.0) : 0.0;
+  sky += SUN_COL_010 * sd8 + SUN_COL_030 * sd90;
+  sky += SUN_COL_600 * smoothstep(0.99955, 0.99985, sd); // disc
   return sky;
 }
 
 // Aerial perspective: T = exp(−σ·t·exp(−h/H)) — Beer-Lambert with a
 // 900 m scale height (§19). Distant geometry collapses into the horizon.
 vec3 applyFog(vec3 col, float t, float h, vec3 rd) {
-  float od = SIGMA_FOG * t * exp(-max(h, 0.0) / FOG_H);
+  float od = SIGMA_FOG * t * exp(-max(h, 0.0) * (1.0 / FOG_H));
   if (od < 0.0005) return col; // near-field early exit: optical depth negligible
+  vec3 inscatter = (skyColor(rd) + SKY_HOR) * 0.5;
+  if (od > 5.82) return inscatter; // far-field complete fogging (exp(-0.95*od) < 0.004)
   vec3 T = exp(-vec3(0.58, 0.72, 0.95) * od); // per-channel extinction
-  vec3 inscatter = mix(skyColor(rd), SKY_HOR, 0.5);
   if (T.b < 0.004) return inscatter; // far-field complete fogging
   return col * T + inscatter * (1.0 - T);
 }
@@ -541,16 +586,22 @@ void main() {
 
     // Lipschitz ‖∇E‖ via forward differences, refreshed every 2nd sample
     // (§16/§34.1); fast bitwise test (i & 1 == 0).
+    // If ray is far above terrain, step is bounded by horizon clamp (anti-tunneling),
+    // so gradient evaluation is bypassed, saving 2 full elevations per step!
     if ((i & 1) == 0) {
-      float eps = max(dp, 0.15);
-      vec2 g = p.xz + u_chunk_origin;
-      float ex = elevation(g + vec2(eps, 0.0), dp, u_seed);
-      float ez = elevation(g + vec2(0.0, eps), dp, u_seed);
-      grad = length(vec2((ex - e) / eps, (ez - e) / eps));
+      if ((p.y - e) <= (t * 0.06 + 2.0) * 4.0) {
+        float eps = max(dp, 0.15);
+        vec2 g = p.xz + u_chunk_origin;
+        float ex = elevation(g + vec2(eps, 0.0), dp, u_seed);
+        float ez = elevation(g + vec2(0.0, eps), dp, u_seed);
+        grad = length(vec2((ex - e) / eps, (ez - e) / eps));
+      } else {
+        grad = 0.0;
+      }
     }
 
     tPrev = t;
-    float step = max(DMIN, (p.y - e) / sqrt(grad * grad + 1.0) * LAMBDA);
+    float step = max(DMIN, (p.y - e) * inversesqrt(grad * grad + 1.0) * LAMBDA);
     step *= 1.0 + t * GROWTH;            // §26 adaptive growth
     step = min(step, t * 0.06 + 2.0);    // horizon clamp (anti-tunnel)
     t += step;
@@ -590,11 +641,13 @@ void main() {
     vec3 albedo = biomeColor(T, M, e, length(grad2), vegNoise, veg);
 
     float ndl = max(dot(n, SUN), 0.0);
-    float sh = softShadow(p + n * 0.15, u_seed, u_footprint);
+    float sh = 0.0;
+    if (ndl > 0.0) {
+      sh = softShadow(p + n * 0.15, u_seed, u_footprint);
+    }
 
     vec3 sunTerm = albedo * SUN_COL * ndl * sh;
-    vec3 skyTint = mix(SKY_HOR, SKY_ZEN, 0.5);
-    vec3 ambTerm = albedo * skyTint * (0.22 + 0.28 * max(n.y, 0.0));
+    vec3 ambTerm = albedo * SKY_TINT * (0.22 + 0.28 * max(n.y, 0.0));
 
     col = sunTerm + ambTerm;
     col = applyFog(col, tHit, p.y, rd);

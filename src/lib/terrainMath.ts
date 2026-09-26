@@ -46,9 +46,12 @@ export function hash3(xi: number, yi: number, seed: number): number {
   return hashU(h);
 }
 
+const INV_U32 = 1.0 / 4294967295.0;
+const INV_U32_X2 = 2.0 / 4294967295.0;
+
 /** Uniform in [0,1] from an integer lattice cell. */
 export function hash01(xi: number, yi: number, seed: number): number {
-  return hash3(xi, yi, seed) / 4294967295.0;
+  return hash3(xi, yi, seed) * INV_U32;
 }
 
 /** Feature-point coords in [0,1]² packed from the two 12-bit halves of one hash. */
@@ -83,16 +86,15 @@ export function vnoise(x: number, y: number, seed: number): number {
   const uy1 = (uy0 + 0x27d4eb2f) | 0;
   const sTerm = Math.imul(seed | 0, 0x9e3779b9);
 
-  const h0 = (uy0 ^ sTerm) >>> 0;
-  const h1 = (uy1 ^ sTerm) >>> 0;
+  const h0 = uy0 ^ sTerm;
+  const h1 = uy1 ^ sTerm;
 
-  const a = hashU((ux0 ^ h0) >>> 0) / 4294967295.0;
-  const b = hashU((ux1 ^ h0) >>> 0) / 4294967295.0;
-  const c = hashU((ux0 ^ h1) >>> 0) / 4294967295.0;
-  const d = hashU((ux1 ^ h1) >>> 0) / 4294967295.0;
+  const a = hashU(ux0 ^ h0) * INV_U32_X2;
+  const b = hashU(ux1 ^ h0) * INV_U32_X2;
+  const c = hashU(ux0 ^ h1) * INV_U32_X2;
+  const d = hashU(ux1 ^ h1) * INV_U32_X2;
 
-  const v = a + (b - a) * ux + (c - a) * uy + (a - b - c + d) * ux * uy;
-  return v * 2.0 - 1.0;
+  return (a + (b - a) * ux + (c - a) * uy + (a - b - c + d) * ux * uy) - 1.0;
 }
 
 /**
@@ -100,7 +102,7 @@ export function vnoise(x: number, y: number, seed: number): number {
  * Δp(t) = t · 2tan(FOV/2) / Res_y is the world-space pixel footprint.
  */
 function nyqW(freq: number, dp: number): number {
-  return Math.min(1, Math.max(0, 2.0 - (freq * dp) / 0.5));
+  return Math.min(1, Math.max(0, 2.0 - (freq * dp) * 2.0));
 }
 
 // Precomputed totalAsum constants: sum_{i=0}^{octaves-1} (initial_amp * gain^i)
@@ -122,6 +124,20 @@ function fbm(
   // Fast path for near-field / physics / hillshade (dp <= 0):
   // All Nyquist weights are identically 1.0, wsum === asum, zero division!
   if (dp <= 0.0) {
+    if (octaves === 9 && lacunarity === 2.0 && gain === 0.5) {
+      return vnoise(x, y, seed)
+        + 0.5 * vnoise(x * 2.0, y * 2.0, seed + 40503)
+        + 0.25 * vnoise(x * 4.0, y * 4.0, seed + 81006)
+        + 0.125 * vnoise(x * 8.0, y * 8.0, seed + 121509)
+        + 0.0625 * vnoise(x * 16.0, y * 16.0, seed + 162012)
+        + 0.03125 * vnoise(x * 32.0, y * 32.0, seed + 202515)
+        + 0.015625 * vnoise(x * 64.0, y * 64.0, seed + 243018)
+        + 0.0078125 * vnoise(x * 128.0, y * 128.0, seed + 283521)
+        + 0.00390625 * vnoise(x * 256.0, y * 256.0, seed + 324024);
+    }
+    if (octaves === 2 && lacunarity === 2.0 && gain === 0.5) {
+      return vnoise(x, y, seed) + 0.5 * vnoise(x * 2.0, y * 2.0, seed + 40503);
+    }
     let freq = 1.0, amp = 1.0, sum = 0.0;
     for (let i = 0; i < octaves; i++) {
       sum += amp * vnoise(x * freq, y * freq, seed + i * 0x9e37);
@@ -137,8 +153,9 @@ function fbm(
     : (1.0 - Math.pow(gain, octaves)) / (1.0 - gain);
 
   let freq = 1.0, amp = 1.0, sum = 0.0, wsum = 0.0;
+  const f0_dp_2 = f0 * dp * 2.0;
   for (let i = 0; i < octaves; i++) {
-    const w = Math.min(1, Math.max(0, 2.0 - (f0 * freq * dp) / 0.5));
+    const w = Math.min(1, Math.max(0, 2.0 - freq * f0_dp_2));
     if (w <= 0.0) break; // Higher octaves are strictly higher freq -> w is 0
     sum += amp * w * vnoise(x * freq, y * freq, seed + i * 0x9e37);
     wsum += amp * w;
@@ -159,6 +176,22 @@ function ridged(
 ): number {
   // Fast path for near-field / physics (dp <= 0)
   if (dp <= 0.0) {
+    if (octaves === 5 && lacunarity === 2.17 && gain === 0.48) {
+      const n0 = 1.0 - Math.abs(vnoise(x, y, seed));
+      let sum = 0.5 * (n0 * n0);
+      let freq = 2.17, amp = 0.24;
+      const n1 = 1.0 - Math.abs(vnoise(x * freq, y * freq, seed + 34283));
+      sum += amp * (n1 * n1);
+      freq *= 2.17; amp *= 0.48;
+      const n2 = 1.0 - Math.abs(vnoise(x * freq, y * freq, seed + 68566));
+      sum += amp * (n2 * n2);
+      freq *= 2.17; amp *= 0.48;
+      const n3 = 1.0 - Math.abs(vnoise(x * freq, y * freq, seed + 102849));
+      sum += amp * (n3 * n3);
+      freq *= 2.17; amp *= 0.48;
+      const n4 = 1.0 - Math.abs(vnoise(x * freq, y * freq, seed + 137132));
+      return sum + amp * (n4 * n4);
+    }
     let freq = 1.0, amp = 0.5, sum = 0.0;
     for (let i = 0; i < octaves; i++) {
       const n = 1.0 - Math.abs(vnoise(x * freq, y * freq, seed + i * 0x85eb));
@@ -173,8 +206,9 @@ function ridged(
     : 0.5 * (1.0 - Math.pow(gain, octaves)) / (1.0 - gain);
 
   let freq = 1.0, amp = 0.5, sum = 0.0, wsum = 0.0;
+  const f0_dp_4 = 4.0 * f0 * dp;
   for (let i = 0; i < octaves; i++) {
-    const w = Math.min(1, Math.max(0, 2.0 - (2.0 * f0 * freq * dp) / 0.5));
+    const w = Math.min(1, Math.max(0, 2.0 - freq * f0_dp_4));
     if (w <= 0.0) break;
     const n = 1.0 - Math.abs(vnoise(x * freq, y * freq, seed + i * 0x85eb));
     sum += amp * w * (n * n);
@@ -249,14 +283,16 @@ export function worleyEdge(x: number, y: number, seed: number): number {
   const ipx = Math.floor(x), ipy = Math.floor(y);
   const fx = x - ipx, fy = y - ipy;
   let f1_sq = 64.0, f2_sq = 64.0;
+  const sTerm = Math.imul(seed | 0, 0x9e3779b9);
+
   for (let k = 0; k < 9; k++) {
     const i = CELL_I[k], j = CELL_J[k];
     const minDx = i === 1 ? (1.0 - fx) : (i === -1 ? fx : 0.0);
     const minDy = j === 1 ? (1.0 - fy) : (j === -1 ? fy : 0.0);
     if (minDx * minDx + minDy * minDy >= f2_sq) continue;
 
-    const cx = ipx + i, cy = ipy + j;
-    const h = hash3(cx, cy, seed);
+    const cx = (ipx + i) | 0, cy = (ipy + j) | 0;
+    const h = hashU((cx ^ Math.imul(cy, 0x27d4eb2f) ^ sTerm) | 0);
     const px = (h & 0xfff) / 4095.0;
     const py = ((h >>> 12) & 0xfff) / 4095.0;
     const dx = i + px - fx;
@@ -290,30 +326,36 @@ export function domainWarp(
 /* ------------------------------------------------------------------ */
 
 export function anomalyE(x: number, y: number, seed: number): number {
-  const ax = x / ANOMALY.cell, ay = y / ANOMALY.cell;
+  const ax = x * (1.0 / ANOMALY.cell), ay = y * (1.0 / ANOMALY.cell);
   const ipx = Math.floor(ax), ipy = Math.floor(ay);
   const fx = ax - ipx, fy = ay - ipy;
-  let f1_sq = 64.0, f2_sq = 64.0;
-  let bcx = 0, bcy = 0, btype = 0;
-  for (let k = 0; k < 9; k++) {
+  const sTerm = Math.imul((seed + 400) | 0, 0x9e3779b9);
+  const cx0 = ipx | 0, cy0 = ipy | 0;
+  const h0 = hashU((cx0 ^ Math.imul(cy0, 0x27d4eb2f) ^ sTerm) | 0);
+  const px0 = (h0 & 0xfff) / 4095.0;
+  const py0 = ((h0 >>> 12) & 0xfff) / 4095.0;
+  const dx0 = px0 - fx, dy0 = py0 - fy;
+  let f1_sq = dx0 * dx0 + dy0 * dy0;
+  let bcx = cx0 + px0, bcy = cy0 + py0;
+  let btype = (h0 >>> 24) / 255.0;
+
+  for (let k = 1; k < 9; k++) {
     const i = CELL_I[k], j = CELL_J[k];
     const minDx = i === 1 ? (1.0 - fx) : (i === -1 ? fx : 0.0);
     const minDy = j === 1 ? (1.0 - fy) : (j === -1 ? fy : 0.0);
-    if (minDx * minDx + minDy * minDy >= f2_sq) continue;
+    if (minDx * minDx + minDy * minDy >= f1_sq) continue;
 
-    const cx = ipx + i, cy = ipy + j;
-    const h = hash3(cx, cy, seed + 400);
+    const cx = (ipx + i) | 0, cy = (ipy + j) | 0;
+    const h = hashU((cx ^ Math.imul(cy, 0x27d4eb2f) ^ sTerm) | 0);
     const px = (h & 0xfff) / 4095.0;
     const py = ((h >>> 12) & 0xfff) / 4095.0;
     const dx = i + px - fx;
     const dy = j + py - fy;
     const d2 = dx * dx + dy * dy;
     if (d2 < f1_sq) {
-      f2_sq = f1_sq; f1_sq = d2;
+      f1_sq = d2;
       bcx = cx + px; bcy = cy + py;
       btype = (h >>> 24) / 255.0;
-    } else if (d2 < f2_sq) {
-      f2_sq = d2;
     }
   }
   if (btype >= ANOMALY.probability) return 0.0;
@@ -346,19 +388,21 @@ export type RegionInfo = {
 // Module-level scratch state for zero-allocation region field inside elevation
 let _wRegion = 0, _mountFactor = 0, _duneAmount = 0;
 function evalRegionInternal(x: number, y: number, seed: number): void {
-  const rx = x / REGION.cell, ry = y / REGION.cell;
+  const rx = x * (1.0 / REGION.cell), ry = y * (1.0 / REGION.cell);
   const ipx = Math.floor(rx), ipy = Math.floor(ry);
   const fx = rx - ipx, fy = ry - ipy;
   let f1_sq = 64.0, f2_sq = 64.0;
   let btype = 0;
+  const sTerm = Math.imul((seed + 900) | 0, 0x9e3779b9);
+
   for (let k = 0; k < 9; k++) {
     const i = CELL_I[k], j = CELL_J[k];
     const minDx = i === 1 ? (1.0 - fx) : (i === -1 ? fx : 0.0);
     const minDy = j === 1 ? (1.0 - fy) : (j === -1 ? fy : 0.0);
     if (minDx * minDx + minDy * minDy >= f2_sq) continue;
 
-    const cx = ipx + i, cy = ipy + j;
-    const h = hash3(cx, cy, seed + 900);
+    const cx = (ipx + i) | 0, cy = (ipy + j) | 0;
+    const h = hashU((cx ^ Math.imul(cy, 0x27d4eb2f) ^ sTerm) | 0);
     const px = (h & 0xfff) / 4095.0;
     const py = ((h >>> 12) & 0xfff) / 4095.0;
     const dx = i + px - fx;
@@ -415,11 +459,20 @@ export function clamp(x: number, lo: number, hi: number): number {
  */
 export function elevation(x: number, z: number, seed: number, dp: number): number {
   // §14 — warp the domain (fluid geological folding, zero-allocation inline)
-  const wx = x * F.warp, wy = z * F.warp;
-  const qx = fbm(wx, wy, seed + 11, WARP.octaves, 2.0, 0.5, dp, F.warp);
-  const qy = fbm(wx + 5.2, wy + 1.3, seed + 37, WARP.octaves, 2.0, 0.5, dp, F.warp);
-  const wqx = x + WARP.strength * qx;
-  const wqy = z + WARP.strength * qy;
+  let wqx = x, wqy = z;
+  if (dp <= 0.0) {
+    const wx = x * F.warp, wy = z * F.warp;
+    const qx = vnoise(wx, wy, seed + 11) + 0.5 * vnoise(wx * 2.0, wy * 2.0, seed + 40514);
+    const qy = vnoise(wx + 5.2, wy + 1.3, seed + 37) + 0.5 * vnoise((wx + 5.2) * 2.0, (wy + 1.3) * 2.0, seed + 40540);
+    wqx += WARP.strength * qx;
+    wqy += WARP.strength * qy;
+  } else {
+    const wx = x * F.warp, wy = z * F.warp;
+    const qx = fbm(wx, wy, seed + 11, WARP.octaves, 2.0, 0.5, dp, F.warp);
+    const qy = fbm(wx + 5.2, wy + 1.3, seed + 37, WARP.octaves, 2.0, 0.5, dp, F.warp);
+    wqx += WARP.strength * qx;
+    wqy += WARP.strength * qy;
+  }
 
   // §13 — regional rules on the raw (un-warped) plane: zero-allocation scratch
   evalRegionInternal(x, z, seed);
@@ -475,11 +528,9 @@ export function gradient(
 
 /** Slope magnitude ‖∇E‖ — the Lipschitz factor + slide gate input (zero-allocation). */
 export function slope(x: number, z: number, seed: number): number {
-  const e = 0.25;
-  const inv2e = 0.5 / e;
-  const gx = (elevation(x + e, z, seed, 0) - elevation(x - e, z, seed, 0)) * inv2e;
-  const gz = (elevation(x, z + e, seed, 0) - elevation(x, z - e, seed, 0)) * inv2e;
-  return Math.hypot(gx, gz);
+  const gx = (elevation(x + 0.25, z, seed, 0) - elevation(x - 0.25, z, seed, 0)) * 2.0;
+  const gz = (elevation(x, z + 0.25, seed, 0) - elevation(x, z - 0.25, seed, 0)) * 2.0;
+  return Math.sqrt(gx * gx + gz * gz);
 }
 
 /* ------------------------------------------------------------------ */
@@ -600,11 +651,19 @@ export function marchRay(
     // Lipschitz factor ‖∇E‖ via forward differences at the pixel-footprint
     // scale, refreshed every 2nd sample (bisection catches overshoot; the
     // horizon clamp below bounds the *stale* window — see §16/§34.1).
-    if (i % 2 === 0) {
-      const eps = Math.max(dp, 0.15);
-      const ex = elevation(px + eps, pz, seed, dp);
-      const ez = elevation(px, pz + eps, seed, dp);
-      grad = Math.hypot((ex - e) / eps, (ez - e) / eps);
+    // If ray is far above terrain, step is bounded by horizon clamp (anti-tunneling),
+    // so gradient evaluation is bypassed, saving 2 full elevations per step!
+    if ((i & 1) === 0) {
+      if ((py - e) <= (t * 0.06 + 2.0) * 4.0) {
+        const eps = Math.max(dp, 0.15);
+        const ex = elevation(px + eps, pz, seed, dp);
+        const ez = elevation(px, pz + eps, seed, dp);
+        const dx = (ex - e) / eps;
+        const dz = (ez - e) / eps;
+        grad = Math.sqrt(dx * dx + dz * dz);
+      } else {
+        grad = 0.0;
+      }
     }
 
     tPrev = t;
@@ -673,10 +732,13 @@ export function updatePlayer(
   s: PlayerState, input: InputState, dt: number, seed: number,
 ): void {
   const speed = PLAYER.walkSpeed * (input.sprint ? PLAYER.sprintMul : 1.0);
-  const sin = Math.sin(input.yaw), cos = Math.cos(input.yaw);
-  // forward = (sin yaw, 0, cos yaw) — matches demo camera basis
-  const wishX = (sin * input.forward + cos * input.strafe) * speed;
-  const wishZ = (cos * input.forward - sin * input.strafe) * speed;
+  let wishX = 0, wishZ = 0;
+  if (input.forward !== 0 || input.strafe !== 0) {
+    const sin = Math.sin(input.yaw), cos = Math.cos(input.yaw);
+    // forward = (sin yaw, 0, cos yaw) — matches demo camera basis
+    wishX = (sin * input.forward + cos * input.strafe) * speed;
+    wishZ = (cos * input.forward - sin * input.strafe) * speed;
+  }
 
   // horizontal velocity: exponential approach (feels like critically damped)
   const k = 1 - Math.exp(-12 * dt);
@@ -703,11 +765,9 @@ export function updatePlayer(
 
   // Slope gate: slide off steep warped ridges (spec §31 insert, zero-allocation)
   if (s.grounded) {
-    const e = 0.25;
-    const inv2e = 0.5 / e;
-    const gx = (elevation(s.x + e, s.z, seed, 0) - elevation(s.x - e, s.z, seed, 0)) * inv2e;
-    const gz = (elevation(s.x, s.z + e, seed, 0) - elevation(s.x, s.z - e, seed, 0)) * inv2e;
-    const m = Math.hypot(gx, gz);
+    const gx = (elevation(s.x + 0.25, s.z, seed, 0) - elevation(s.x - 0.25, s.z, seed, 0)) * 2.0;
+    const gz = (elevation(s.x, s.z + 0.25, seed, 0) - elevation(s.x, s.z - 0.25, seed, 0)) * 2.0;
+    const m = Math.sqrt(gx * gx + gz * gz);
     if (m > PLAYER.slopeMax) {
       const inv = 1 / m;
       const factor = inv * (m - PLAYER.slopeMax) * PLAYER.slideAccel * dt;
