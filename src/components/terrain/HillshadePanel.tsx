@@ -47,8 +47,8 @@ export default function HillshadePanel({
     const sample = () => {
       if (cancelled) return;
       if (row >= SIZE) { paint(); return; }
-      // sample 25 rows per frame (~8 ms budget for fast, responsive display)
-      for (let r = 0; r < 25 && row < SIZE; r++, row++) {
+      // sample 8 rows per frame (~2.5 ms budget for silky smooth, non-blocking display)
+      for (let r = 0; r < 8 && row < SIZE; r++, row++) {
         const z = SPAWN.z - EXTENT / 2 + row * step;
         for (let j = 0; j < SIZE; j++) {
           const x = SPAWN.x - EXTENT / 2 + j * step;
@@ -113,9 +113,30 @@ export default function HillshadePanel({
       ctx.beginPath(); ctx.moveTo(6, 16); ctx.lineTo(6, 26); ctx.stroke();
     };
 
-    rafId = requestAnimationFrame(sample);
+    let idleId: number | null = null;
+    let timerId: ReturnType<typeof setTimeout> | null = null;
+
+    const startSampling = () => {
+      if (!cancelled) {
+        rafId = requestAnimationFrame(sample);
+      }
+    };
+
+    if (typeof window !== 'undefined' && 'requestIdleCallback' in window) {
+      idleId = (window as unknown as { requestIdleCallback: (cb: () => void, opts?: { timeout: number }) => number }).requestIdleCallback(
+        startSampling,
+        { timeout: 200 }
+      );
+    } else {
+      timerId = setTimeout(startSampling, 50);
+    }
+
     return () => {
       cancelled = true;
+      if (idleId !== null && typeof window !== 'undefined' && 'cancelIdleCallback' in window) {
+        (window as unknown as { cancelIdleCallback: (id: number) => void }).cancelIdleCallback(idleId);
+      }
+      if (timerId !== null) clearTimeout(timerId);
       cancelAnimationFrame(rafId);
     };
   }, [seed]);
@@ -123,8 +144,10 @@ export default function HillshadePanel({
   return (
     <canvas
       ref={ref}
-      className={`block h-auto w-full rounded-lg border border-stone-800 image-rendering-pixelated ${className}`}
-      style={{ imageRendering: 'pixelated' }}
+      width={SIZE}
+      height={SIZE}
+      className={`block aspect-square h-auto w-full rounded-lg border border-stone-800 bg-stone-900/40 image-rendering-pixelated ${className}`}
+      style={{ imageRendering: 'pixelated', aspectRatio: '1 / 1' }}
       role="img"
       aria-label="Hillshade relief map of the terrain field around the spawn point, computed live by the CPU twin"
     />

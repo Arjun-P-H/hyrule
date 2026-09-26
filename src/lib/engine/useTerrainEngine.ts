@@ -335,6 +335,24 @@ export function useTerrainEngine({
       ro.observe(canvas);
       applySize();
 
+      let isIntersecting = true;
+      let isTabVisible = typeof document !== 'undefined' ? !document.hidden : true;
+      let io: IntersectionObserver | null = null;
+      if (typeof IntersectionObserver !== 'undefined') {
+        io = new IntersectionObserver(
+          ([entry]) => {
+            isIntersecting = entry.isIntersecting;
+          },
+          { threshold: 0.01 }
+        );
+        io.observe(canvas);
+      }
+
+      const handleVisibilityChange = () => {
+        isTabVisible = typeof document !== 'undefined' ? !document.hidden : true;
+      };
+      document.addEventListener('visibilitychange', handleVisibilityChange);
+
       const t0 = performance.now();
       let last = t0;
       let lastRender = t0;
@@ -344,9 +362,13 @@ export function useTerrainEngine({
 
       const frame = (now: number) => {
         raf = requestAnimationFrame(frame);
+        const active = isIntersecting && isTabVisible && runRef.current;
         const dt = Math.min((now - last) / 1000, 0.05);
         last = now;
-        if (!runRef.current || !gl || !prog) return;
+        if (!active || !gl || !prog) {
+          lastRender = now;
+          return;
+        }
 
         const s = seedRef.current;
         const p = QUALITY_PRESETS.find((q) => q.id === presetRef.current) ?? QUALITY_PRESETS[1];
@@ -472,6 +494,8 @@ export function useTerrainEngine({
       return () => {
         cancelAnimationFrame(raf);
         ro?.disconnect();
+        io?.disconnect();
+        document.removeEventListener('visibilitychange', handleVisibilityChange);
         if (fence && gl) gl.deleteSync(fence);
 
         if (enablePointerLock) {
