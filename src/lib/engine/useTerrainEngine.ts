@@ -114,12 +114,14 @@ export function useTerrainEngine({
 
     try {
       gl = canvas.getContext('webgl2', {
+        powerPreference: 'high-performance',
         antialias: false,
-        alpha: false,
         depth: false,
         stencil: false,
+        alpha: false,
+        premultipliedAlpha: false,
         preserveDrawingBuffer: false,
-        powerPreference: 'high-performance',
+        desynchronized: true,
       });
       if (!gl) throw new Error('WebGL2 is unavailable in this environment');
 
@@ -318,9 +320,15 @@ export function useTerrainEngine({
       window.addEventListener('pointermove', pm);
       canvas.addEventListener('pointercancel', pu);
 
+      const PRESET_MAP: Record<PresetId, (typeof QUALITY_PRESETS)[number]> = {
+        low: QUALITY_PRESETS[0],
+        med: QUALITY_PRESETS[1],
+        high: QUALITY_PRESETS[2],
+      };
+
       const applySize = () => {
         if (!gl || !canvas) return;
-        const p = QUALITY_PRESETS.find((q) => q.id === presetRef.current) ?? QUALITY_PRESETS[1];
+        const p = PRESET_MAP[presetRef.current] ?? PRESET_MAP.med;
         const dpr = software ? 1 : Math.min(window.devicePixelRatio || 1, 2);
         const s = p.resScale * auto.scale;
         const w = Math.max(2, Math.round(canvas.clientWidth * dpr * s));
@@ -371,7 +379,7 @@ export function useTerrainEngine({
         }
 
         const s = seedRef.current;
-        const p = QUALITY_PRESETS.find((q) => q.id === presetRef.current) ?? QUALITY_PRESETS[1];
+        const p = PRESET_MAP[presetRef.current] ?? PRESET_MAP.med;
 
         // Locomotion update
         const fwdKey = (keys.has('KeyW') || keys.has('ArrowUp') ? 1 : 0) - (keys.has('KeyS') || keys.has('ArrowDown') ? 1 : 0);
@@ -419,10 +427,12 @@ export function useTerrainEngine({
           cam.fly.y += cam.flyVel.y * dt;
           cam.fly.z += cam.flyVel.z * dt;
 
-          const minY = elevation(cam.fly.x, cam.fly.z, s, 0) + 1.9;
-          if (cam.fly.y < minY) {
-            cam.fly.y = minY;
-            cam.flyVel.y = Math.max(cam.flyVel.y, 0);
+          if (cam.fly.y < 950) {
+            const minY = elevation(cam.fly.x, cam.fly.z, s, 0) + 1.9;
+            if (cam.fly.y < minY) {
+              cam.fly.y = minY;
+              cam.flyVel.y = Math.max(cam.flyVel.y, 0);
+            }
           }
           cam.fly.y = Math.min(cam.fly.y, 1150);
           px = cam.fly.x;
@@ -458,7 +468,6 @@ export function useTerrainEngine({
         }
 
         gl.viewport(0, 0, canvas.width, canvas.height);
-        gl.useProgram(prog);
         gl.uniform2f(u.res, canvas.width, canvas.height);
         gl.uniform1f(u.time, (now - t0) / 1000);
         gl.uniform3f(u.cam, lx, py, lz);

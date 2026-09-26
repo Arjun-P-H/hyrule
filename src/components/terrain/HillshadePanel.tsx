@@ -60,18 +60,25 @@ export default function HillshadePanel({
 
     const paint = () => {
       const img = ctx.createImageData(SIZE, SIZE);
+      const buf32 = new Uint32Array(img.data.buffer);
+      const inv2step = 0.5 / step;
       for (let i = 0; i < SIZE; i++) {
+        const rowOffset = i * SIZE;
+        const iPrev = Math.max(i - 1, 0) * SIZE;
+        const iNext = Math.min(i + 1, SIZE - 1) * SIZE;
         for (let j = 0; j < SIZE; j++) {
-          const e = data[i * SIZE + j];
+          const idx = rowOffset + j;
+          const e = data[idx];
           // §17 gradient from the sampled grid (cell step = 18.09 m)
-          const eL = data[i * SIZE + Math.max(j - 1, 0)];
-          const eR = data[i * SIZE + Math.min(j + 1, SIZE - 1)];
-          const eD = data[Math.max(i - 1, 0) * SIZE + j];
-          const eU = data[Math.min(i + 1, SIZE - 1) * SIZE + j];
-          const gx = (eR - eL) / (2 * step);
-          const gz = (eU - eD) / (2 * step);
+          const eL = data[rowOffset + Math.max(j - 1, 0)];
+          const eR = data[rowOffset + Math.min(j + 1, SIZE - 1)];
+          const eD = data[iPrev + j];
+          const eU = data[iNext + j];
+          const gx = (eR - eL) * inv2step;
+          const gz = (eU - eD) * inv2step;
           const gl = Math.hypot(gx, 1, gz);
-          const ndl = Math.max((-gx / gl) * sx + (1 / gl) * sy + (-gz / gl) * sz, 0);
+          const invGl = 1 / gl;
+          const ndl = Math.max((-gx * invGl) * sx + invGl * sy + (-gz * invGl) * sz, 0);
 
           let r: number, g: number, b: number;
           if (e < VALLEY.wLevel) {
@@ -91,11 +98,10 @@ export default function HillshadePanel({
             const shade = 0.30 + 0.70 * ndl;
             r = tr * shade; g = tg * shade; b = tb * shade;
           }
-          const o = (i * SIZE + j) * 4;
-          img.data[o] = Math.round(Math.min(255, r * 255));
-          img.data[o + 1] = Math.round(Math.min(255, g * 255));
-          img.data[o + 2] = Math.round(Math.min(255, b * 255));
-          img.data[o + 3] = 255;
+          const ir = Math.min(255, (r * 255 + 0.5) | 0);
+          const ig = Math.min(255, (g * 255 + 0.5) | 0);
+          const ib = Math.min(255, (b * 255 + 0.5) | 0);
+          buf32[idx] = (255 << 24) | (ib << 16) | (ig << 8) | ir;
         }
       }
       ctx.putImageData(img, 0, 0);
