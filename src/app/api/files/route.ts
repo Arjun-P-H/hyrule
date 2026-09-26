@@ -54,7 +54,14 @@ export async function GET(request: Request) {
     if (!want) {
       const now = Date.now();
       if (cachedTree && (process.env.NODE_ENV === "production" || now - lastCacheTime < 60000)) {
-        return NextResponse.json({ root: "src", tree: cachedTree });
+        return NextResponse.json(
+          { root: "src", tree: cachedTree },
+          {
+            headers: {
+              "Cache-Control": "public, max-age=60, stale-while-revalidate=300",
+            },
+          }
+        );
       }
 
       const files = (await walk(ROOT)).sort();
@@ -74,7 +81,14 @@ export async function GET(request: Request) {
       );
       cachedTree = tree;
       lastCacheTime = now;
-      return NextResponse.json({ root: "src", tree });
+      return NextResponse.json(
+        { root: "src", tree },
+        {
+          headers: {
+            "Cache-Control": "public, max-age=60, stale-while-revalidate=300",
+          },
+        }
+      );
     }
 
     // sanitize: resolve inside ROOT only
@@ -84,12 +98,19 @@ export async function GET(request: Request) {
     }
     const content = await fs.readFile(target, "utf-8");
     const stat = await fs.stat(target);
-    return NextResponse.json({
-      path: want,
-      content,
-      lines: content.split("\n").length,
-      size: stat.size,
-    });
+    return NextResponse.json(
+      {
+        path: want,
+        content,
+        lines: content.split("\n").length,
+        size: stat.size,
+      },
+      {
+        headers: {
+          "Cache-Control": "public, max-age=60, stale-while-revalidate=300",
+        },
+      }
+    );
   } catch {
     return NextResponse.json({ error: "not found" }, { status: 404 });
   }
