@@ -82,7 +82,7 @@ export default function GamePage() {
         />
 
         {/* Top Left Navigation & HUD */}
-        <div className="absolute top-4 left-4 z-20 flex flex-col gap-2 pointer-events-auto">
+        <div className="absolute top-4 left-4 z-20 flex flex-col gap-2 pointer-events-auto max-w-[calc(100vw-32px)]">
           <div className="flex items-center gap-2">
             <Link href="/" passHref>
               <Button
@@ -93,13 +93,13 @@ export default function GamePage() {
                 <ArrowLeft className="mr-1.5 size-3.5" /> Spec Console
               </Button>
             </Link>
-            <span className="flex h-8 items-center px-2.5 rounded-md bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 font-mono text-xs font-semibold">
+            <span className="hidden sm:flex h-8 items-center px-2.5 rounded-md bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 font-mono text-xs font-semibold">
               <Sparkles className="mr-1.5 size-3.5" /> 120-240 FPS WebGL2 Engine
             </span>
           </div>
 
           {showHud && stats && (
-            <div className="flex flex-col gap-1.5 p-3 rounded-lg border border-stone-800/80 bg-stone-950/85 backdrop-blur-md font-mono text-xs text-stone-200 shadow-2xl min-w-[280px]">
+            <div className="flex flex-col gap-1.5 p-3 rounded-lg border border-stone-800/80 bg-stone-950/85 backdrop-blur-md font-mono text-xs text-stone-200 shadow-2xl w-[280px] max-w-[calc(100vw-32px)]">
               <div className="flex items-center justify-between border-b border-stone-800 pb-1.5">
                 <span className="text-emerald-400 font-bold text-sm">
                   {stats.fps} <span className="text-[10px] text-stone-400 font-normal">FPS</span>
@@ -129,7 +129,7 @@ export default function GamePage() {
         </div>
 
         {/* Top Right Quick Controls */}
-        <div className="absolute top-4 right-4 z-20 flex items-center gap-2 pointer-events-auto">
+        <div className="absolute top-4 right-4 z-20 flex items-center gap-1.5 sm:gap-2 pointer-events-auto">
           {/* Preset Buttons */}
           <div className="flex bg-stone-950/80 backdrop-blur-md border border-stone-800 rounded-md p-0.5">
             {QUALITY_PRESETS.map((p) => {
