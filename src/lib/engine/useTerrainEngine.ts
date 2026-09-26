@@ -400,6 +400,7 @@ export function useTerrainEngine({
       let fpsEma = 60;
       let statsAt = 0;
       const basis = new Float32Array(9);
+      let basisDirty = true;
       let lastW = -1, lastH = -1;
       let lastFov = -1;
       let lastTanHalf = 0;
@@ -407,6 +408,8 @@ export function useTerrainEngine({
       let lastMarch = -1;
       let lastShadow = -1;
       let lastYaw = -9999, lastPitch = -9999;
+      let lastCamX = NaN, lastCamY = NaN, lastCamZ = NaN;
+      let lastOx = NaN, lastOz = NaN;
       let fx = 0, fy = 0, fz = 1, rx = 1, rz = 0;
 
       const frame = (now: number) => {
@@ -443,6 +446,7 @@ export function useTerrainEngine({
           basis[0] = rx;   basis[1] = 0;   basis[2] = rz;
           basis[3] = upx;  basis[4] = upy; basis[5] = upz;
           basis[6] = fx;   basis[7] = fy;  basis[8] = fz;
+          basisDirty = true;
         }
 
         let px: number, py: number, pz: number, grounded = false;
@@ -549,9 +553,25 @@ export function useTerrainEngine({
         }
 
         gl.uniform1f(u.time, (now - t0) * 0.001);
-        gl.uniform3f(u.cam, lx, py, lz);
-        gl.uniform2f(u.origin, ox, oz);
-        gl.uniformMatrix3fv(u.basis, false, basis);
+
+        if (lx !== lastCamX || py !== lastCamY || lz !== lastCamZ) {
+          lastCamX = lx;
+          lastCamY = py;
+          lastCamZ = lz;
+          gl.uniform3f(u.cam, lx, py, lz);
+        }
+
+        if (ox !== lastOx || oz !== lastOz) {
+          lastOx = ox;
+          lastOz = oz;
+          gl.uniform2f(u.origin, ox, oz);
+        }
+
+        if (basisDirty) {
+          basisDirty = false;
+          gl.uniformMatrix3fv(u.basis, false, basis);
+        }
+
         gl.drawArrays(gl.TRIANGLES, 0, 3);
 
         if (fence) gl.deleteSync(fence);
