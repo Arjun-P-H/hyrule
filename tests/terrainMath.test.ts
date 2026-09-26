@@ -32,6 +32,7 @@ import {
   WORKED_EXAMPLE,
   QUALITY_PRESETS,
 } from '../src/lib/constants';
+import { TERRAIN_VS, TERRAIN_FS } from '../src/components/terrain/demoShader';
 
 describe('1. MurmurHash3 & Integer Determinism', () => {
   it('hashU produces deterministic 32-bit unsigned integers', () => {
@@ -467,3 +468,245 @@ describe('13. Worked-Example Raymarch Convergence (Spec §30)', () => {
     expect(result.bisectRows.length).toBeGreaterThanOrEqual(MARCH.bisectSteps);
   });
 });
+
+describe('14. Large-Scale Parity & Numerical Determinism (§IV.L.1.a)', () => {
+  it('10,000 pseudo-random points verify elevation stability and range bounds', () => {
+    let seedState = 42;
+    // Simple LCG PRNG for determinism across platforms
+    const lcg = () => {
+      seedState = (Math.imul(1664525, seedState) + 1013904223) | 0;
+      return (seedState >>> 0) / 4294967295.0;
+    };
+
+    let nanCount = 0;
+    let minH = Infinity;
+    let maxH = -Infinity;
+
+    for (let i = 0; i < 10000; i++) {
+      const rx = (lcg() - 0.5) * 100000;
+      const rz = (lcg() - 0.5) * 100000;
+      const rSeed = (lcg() * 10000) | 0;
+      const h = elevation(rx, rz, rSeed, 0);
+
+      if (!Number.isFinite(h)) nanCount++;
+      if (h < minH) minH = h;
+      if (h > maxH) maxH = h;
+    }
+
+    expect(nanCount).toBe(0);
+    expect(maxH).toBeLessThanOrEqual(MAX_WORLD_H);
+    expect(minH).toBeGreaterThan(-500.0);
+  });
+});
+
+describe('15. Chunk Boundary Continuity & Seam Invariance (§IV.L.1.b)', () => {
+  it('elevation is continuous across chunk boundaries at k * 8192 m', () => {
+    const boundaries = [-16384, -8192, 0, 8192, 16384];
+    const eps = 1e-4;
+
+    for (const b of boundaries) {
+      // Test crossing boundary in X
+      const eLeftX = elevation(b - eps, 2500, DEFAULT_SEED, 0);
+      const eExactX = elevation(b, 2500, DEFAULT_SEED, 0);
+      const eRightX = elevation(b + eps, 2500, DEFAULT_SEED, 0);
+
+      expect(Math.abs(eLeftX - eExactX)).toBeLessThan(0.01);
+      expect(Math.abs(eRightX - eExactX)).toBeLessThan(0.01);
+
+      // Test crossing boundary in Z
+      const eLeftZ = elevation(2500, b - eps, DEFAULT_SEED, 0);
+      const eExactZ = elevation(2500, b, DEFAULT_SEED, 0);
+      const eRightZ = elevation(2500, b + eps, DEFAULT_SEED, 0);
+
+      expect(Math.abs(eLeftZ - eExactZ)).toBeLessThan(0.01);
+      expect(Math.abs(eRightZ - eExactZ)).toBeLessThan(0.01);
+    }
+  });
+});
+
+describe('16. Physics Determinism (§IV.L.1.e)', () => {
+  it('1,000-step physics simulation produces deterministic final state from initial state', () => {
+    const runSimulation = () => {
+      const p: PlayerState = {
+        x: SPAWN.x,
+        y: 400.0,
+        z: SPAWN.z,
+        vx: 1.0,
+        vy: 0.0,
+        vz: 2.0,
+        grounded: false,
+      };
+
+      for (let step = 0; step < 1000; step++) {
+        updatePlayer(
+          p,
+          {
+            forward: (step % 120 < 60) ? 1.0 : -0.5,
+            strafe: (step % 80 < 40) ? 0.5 : -0.5,
+            jump: (step % 50 === 0),
+            sprint: (step % 200 < 100),
+            yaw: (step * 0.01) % (2 * Math.PI),
+          },
+          0.016666666666666666, // 60 Hz dt
+          DEFAULT_SEED,
+        );
+      }
+      return p;
+    };
+
+    const run1 = runSimulation();
+    const run2 = runSimulation();
+
+    expect(run1.x).toBe(run2.x);
+    expect(run1.y).toBe(run2.y);
+    expect(run1.z).toBe(run2.z);
+    expect(run1.vx).toBe(run2.vx);
+    expect(run1.vy).toBe(run2.vy);
+    expect(run1.vz).toBe(run2.vz);
+    expect(run1.grounded).toBe(run2.grounded);
+  });
+});
+
+describe('17. Performance Benchmark Thresholds (§VII Benchmark Standard)', () => {
+  it('elevation function evaluates in < 0.002 ms per point', () => {
+    const N = 20000;
+    const t0 = performance.now();
+    let sum = 0;
+    for (let i = 0; i < N; i++) {
+      sum += elevation(SPAWN.x + (i & 127), SPAWN.z + ((i >> 7) & 127), DEFAULT_SEED, 0);
+    }
+    const t1 = performance.now();
+    const msPerPoint = (t1 - t0) / N;
+
+    expect(Number.isFinite(sum)).toBe(true);
+    expect(msPerPoint).toBeLessThan(0.002); // 2 microseconds target
+  });
+
+  it('physics loop tick executes in < 0.005 ms per tick', () => {
+    const N = 10000;
+    const p: PlayerState = {
+      x: SPAWN.x,
+      y: 350.0,
+      z: SPAWN.z,
+      vx: 2.0,
+      vy: 0.0,
+      vz: 1.0,
+      grounded: true,
+    };
+    const t0 = performance.now();
+    for (let i = 0; i < N; i++) {
+      updatePlayer(
+        p,
+        { forward: 1, strafe: 0, jump: false, sprint: true, yaw: 1.0 },
+        0.016,
+        DEFAULT_SEED,
+      );
+    }
+    const t1 = performance.now();
+    const msPerTick = (t1 - t0) / N;
+
+    expect(msPerTick).toBeLessThan(0.005); // 5 microseconds target
+  });
+});
+
+describe('18. GLSL ES 3.00 Shader Contract & Integrity (§IV.A, §IV.L)', () => {
+  it('TERRAIN_VS and TERRAIN_FS declare #version 300 es and precision qualifiers', () => {
+    expect(TERRAIN_VS.trim().startsWith('#version 300 es')).toBe(true);
+    expect(TERRAIN_FS.trim().startsWith('#version 300 es')).toBe(true);
+    expect(TERRAIN_FS).toContain('precision highp float;');
+    expect(TERRAIN_FS).toContain('out vec4 fragColor;');
+  });
+
+  it('all contractual uniforms from useTerrainEngine are declared in TERRAIN_FS', () => {
+    const requiredUniforms = [
+      'uniform vec2  u_res',
+      'uniform float u_time',
+      'uniform vec3  u_cam_pos',
+      'uniform vec2  u_chunk_origin',
+      'uniform mat3  u_basis',
+      'uniform float u_tan_half',
+      'uniform int   u_seed',
+      'uniform int   u_march_steps',
+      'uniform int   u_shadow_steps',
+      'uniform float u_footprint',
+    ];
+    for (const u of requiredUniforms) {
+      expect(TERRAIN_FS).toContain(u);
+    }
+  });
+
+  it('all fbm and ridged invocations in TERRAIN_FS strictly match parameter signatures', () => {
+    function parseCalls(source: string, fnName: string) {
+      const calls: { call: string; args: string[] }[] = [];
+      let idx = 0;
+      while ((idx = source.indexOf(fnName + '(', idx)) !== -1) {
+        const before = source.slice(Math.max(0, idx - 10), idx);
+        if (/float\s+$/.test(before)) {
+          idx += fnName.length + 1;
+          continue;
+        }
+        let depth = 0;
+        let currentArg = '';
+        const args: string[] = [];
+        for (let i = idx + fnName.length; i < source.length; i++) {
+          const c = source[i];
+          if (c === '(') {
+            depth++;
+            if (depth > 1) currentArg += c;
+          } else if (c === ')') {
+            depth--;
+            if (depth === 0) {
+              args.push(currentArg.trim());
+              calls.push({ call: source.slice(idx, i + 1), args });
+              idx = i + 1;
+              break;
+            } else {
+              currentArg += c;
+            }
+          } else if (c === ',' && depth === 1) {
+            args.push(currentArg.trim());
+            currentArg = '';
+          } else if (depth >= 1) {
+            currentArg += c;
+          }
+        }
+      }
+      return calls;
+    }
+
+    const fbmCalls = parseCalls(TERRAIN_FS, 'fbm');
+    expect(fbmCalls.length).toBe(6);
+    for (const call of fbmCalls) {
+      expect(call.args.length).toBe(9);
+    }
+
+    const ridgedCalls = parseCalls(TERRAIN_FS, 'ridged');
+    expect(ridgedCalls.length).toBe(1);
+    for (const call of ridgedCalls) {
+      expect(call.args.length).toBe(9);
+    }
+  });
+
+  it('dyadic frequency constants in GLSL match CPU constants exactly', () => {
+    expect(TERRAIN_FS).toContain('const float F_MACRO   = 512.0  / 1048576.0;');
+    expect(TERRAIN_FS).toContain('const float F_RIDGE   = 341.0  / 1048576.0;');
+    expect(TERRAIN_FS).toContain('const float F_MASK    = 128.0  / 1048576.0;');
+    expect(TERRAIN_FS).toContain('const float F_WARP    = 655.0  / 1048576.0;');
+    expect(TERRAIN_FS).toContain('const float F_VALLEY  = 1942.0 / 1048576.0;');
+    expect(TERRAIN_FS).toContain('const float F_CONT    = 64.0   / 1048576.0;');
+    expect(TERRAIN_FS).toContain('const float F_MOIST   = 512.0  / 1048576.0;');
+    expect(TERRAIN_FS).toContain('const float F_DUNE    = 23.0   / 1048576.0;');
+    expect(TERRAIN_FS).toContain('const float F_CLOUD   = 403.0  / 1048576.0;');
+  });
+
+  it('amplitude and geometric contracts in GLSL match CPU contracts', () => {
+    expect(TERRAIN_FS).toContain('const float MAXH      = 1300.0;');
+    expect(TERRAIN_FS).toContain('H_BASE  = 90.0;');
+    expect(TERRAIN_FS).toContain('H_MOUNT = 880.0;');
+    expect(TERRAIN_FS).toContain('C_DEPTH  = 48.0');
+    expect(TERRAIN_FS).toContain('W_LEVEL = 5.0');
+    expect(TERRAIN_FS).toContain('const float ASUM_RIDGE = 0.93703808;');
+  });
+});
+
+
