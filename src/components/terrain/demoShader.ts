@@ -95,6 +95,9 @@ const float FOG_H     = 900.0;    // fog scale height (§19)
 // ---------------------------------------------------------------------------
 // §4 — deterministic hashing (uint32, Murmur3 finalizer) — mirrors terrainMath
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// §4 — deterministic hashing (uint32, Murmur3 finalizer) — mirrors terrainMath
+// ---------------------------------------------------------------------------
 uint hashU(uint x) {
   x ^= x >> 16; x *= 0x85ebca6bu;
   x ^= x >> 13; x *= 0xc2b2ae35u;
@@ -109,21 +112,15 @@ uint hash3(int xi, int yi, int seed) {
 float hash01(int xi, int yi, int seed) {
   // GPU note: float(uint) rounds beyond 2^24 — quantisation ≤ 6e-8, absorbed
   // by GROUND_BIAS (see header). CPU twin divides in double.
-  return float(hash3(xi, yi, seed)) / 4294967295.0;
-}
-// Feature point + cell type packed from ONE hash (GPU budget — see worklog).
-void cellPoint(int ix, int iy, int seed, out vec2 p) {
-  uint h = hash3(ix, iy, seed);
-  p = vec2(float(h & 0xfffu), float((h >> 12) & 0xfffu)) / 4095.0;
-}
-float cellType(int ix, int iy, int seed) {
-  return float(hash3(ix, iy, seed) >> 24) / 255.0;
+  return float(hash3(xi, yi, seed)) * (1.0 / 4294967295.0);
 }
 
 // ---------------------------------------------------------------------------
 // §5 — quintic value noise (C²) + Nyquist weights
 // ---------------------------------------------------------------------------
 float quintic(float t) { return t * t * t * (t * (t * 6.0 - 15.0) + 10.0); }
+
+const float INV_U32 = 1.0 / 4294967295.0;
 
 float vnoise(float x, float y, int seed) {
   float ix = floor(x), iy = floor(y);
@@ -134,18 +131,18 @@ float vnoise(float x, float y, int seed) {
   uint ux0 = uint(int(ix));
   uint ux1 = ux0 + 1u;
   uint uy0 = uint(int(iy)) * 0x27d4eb2fu;
-  uint uy1 = uint(int(iy) + 1) * 0x27d4eb2fu;
+  uint uy1 = uy0 + 0x27d4eb2fu;
   uint s_term = uint(seed) * 0x9e3779b9u;
 
   uint h0 = uy0 ^ s_term;
   uint h1 = uy1 ^ s_term;
 
-  float a = float(hashU(ux0 ^ h0)) / 4294967295.0;
-  float b = float(hashU(ux1 ^ h0)) / 4294967295.0;
-  float c = float(hashU(ux0 ^ h1)) / 4294967295.0;
-  float d = float(hashU(ux1 ^ h1)) / 4294967295.0;
+  float a = float(hashU(ux0 ^ h0)) * INV_U32;
+  float b = float(hashU(ux1 ^ h0)) * INV_U32;
+  float c = float(hashU(ux0 ^ h1)) * INV_U32;
+  float d = float(hashU(ux1 ^ h1)) * INV_U32;
 
-  float v = a + (b - a) * ux + (c - a) * uy + (a - b - c + d) * ux * uy;
+  float v = mix(mix(a, b, ux), mix(c, d, ux), uy);
   return v * 2.0 - 1.0;
 }
 
@@ -154,75 +151,64 @@ float nyqW(float f, float dp) {
   return clamp(2.0 - (f * dp) / 0.5, 0.0, 1.0);
 }
 
-float fbm(float x, float y, int seed, int oct, float lac, float gain, float dp, float f0) {
-  float freq = 1.0, amp = 1.0, sum = 0.0, wsum = 0.0, asum = 0.0;
-  for (int i = 0; i < oct; i++) {
+const float ASUM_MACRO = 1.99609375;
+const float ASUM_RIDGE = 0.93703808;
+const float ASUM_WARP  = 1.5;
+const float ASUM_CLOUD = 1.875;
+
+float fbm(float x, float y, int seed, int oct, float lac, float gain, float dp, float f0, float totalAsum) {
+  float freq = 1.0, amp = 1.0, sum = 0.0, wsum = 0.0;
+  for (int i = 0; i < 9; i++) {
+    if (i >= oct) break;
     float w = nyqW(f0 * freq, dp);
-    if (w > 0.0) {
-      sum  += amp * w * vnoise(x * freq, y * freq, seed + i * 0x9e37);
-      wsum += amp * w;
-    }
-    asum += amp;
+    if (w <= 0.0) break;
+    sum  += amp * w * vnoise(x * freq, y * freq, seed + i * 0x9e37);
+    wsum += amp * w;
     freq *= lac;
     amp  *= gain;
   }
-  return sum * (asum / max(wsum, 1e-6)); // amplitude renormalisation (§5)
+  return sum * (totalAsum / max(wsum, 1e-6)); // amplitude renormalisation (§5)
 }
 
-float ridged(float x, float y, int seed, int oct, float lac, float gain, float dp, float f0) {
+float ridged(float x, float y, int seed, int oct, float lac, float gain, float dp, float f0, float totalAsum) {
   // (1 − |N|)² octaves; ridged features double bandwidth → Nyquist uses 2f (§5n)
-  float freq = 1.0, amp = 0.5, sum = 0.0, wsum = 0.0, asum = 0.0;
-  for (int i = 0; i < oct; i++) {
+  float freq = 1.0, amp = 0.5, sum = 0.0, wsum = 0.0;
+  for (int i = 0; i < 5; i++) {
+    if (i >= oct) break;
     float w = nyqW(2.0 * f0 * freq, dp);
-    if (w > 0.0) {
-      float n = 1.0 - abs(vnoise(x * freq, y * freq, seed + i * 0x85eb));
-      float r = n * n;
-      sum  += amp * w * r;
-      wsum += amp * w;
-    }
-    asum += amp;
+    if (w <= 0.0) break;
+    float n = 1.0 - abs(vnoise(x * freq, y * freq, seed + i * 0x85eb));
+    sum  += amp * w * (n * n);
+    wsum += amp * w;
     freq *= lac;
     amp  *= gain;
   }
-  return sum * (asum / max(wsum, 1e-6));
+  return sum * (totalAsum / max(wsum, 1e-6));
 }
 
 // ---------------------------------------------------------------------------
-// §7/§12/§13 — cellular (Worley) fields
+// §7/§12/§13 — cellular (Worley) fields (squared-distance comparisons)
 // ---------------------------------------------------------------------------
-struct Vor {
-  float f1;    float f2;    float edge;
-  float cx;    float cy;    float type;
-};
-
-Vor voronoi(float x, float y, int seed) {
-  float ipx = floor(x);
-  float ipy = floor(y);
-  float fx = x - ipx;
-  float fy = y - ipy;
-  Vor v = Vor(8.0, 8.0, 0.0, 0.0, 0.0, 0.0);
+float voronoiEdge(vec2 p_in, int seed) {
+  vec2 ip = floor(p_in);
+  vec2 f = p_in - ip;
+  float f1_sq = 64.0, f2_sq = 64.0;
   for (int j = -1; j <= 1; j++) {
     for (int i = -1; i <= 1; i++) {
-      int cxi = int(ipx) + i;
-      int cyi = int(ipy) + j;
-      vec2 p;
-      cellPoint(cxi, cyi, seed, p);
-      float dx = float(i) + p.x - fx;
-      float dy = float(j) + p.y - fy;
-      float d = sqrt(dx * dx + dy * dy);
-      if (d < v.f1) {
-        v.f2 = v.f1;
-        v.f1 = d;
-        v.cx = float(cxi) + p.x;
-        v.cy = float(cyi) + p.y;
-        v.type = cellType(cxi, cyi, seed);
-      } else if (d < v.f2) {
-        v.f2 = d;
+      int cxi = int(ip.x) + i;
+      int cyi = int(ip.y) + j;
+      uint h = hash3(cxi, cyi, seed);
+      vec2 p = vec2(float(h & 0xfffu), float((h >> 12u) & 0xfffu)) * (1.0 / 4095.0);
+      vec2 d = vec2(float(i), float(j)) + p - f;
+      float d2 = dot(d, d);
+      if (d2 < f1_sq) {
+        f2_sq = f1_sq; f1_sq = d2;
+      } else if (d2 < f2_sq) {
+        f2_sq = d2;
       }
     }
   }
-  v.edge = v.f2 - v.f1;
-  return v;
+  return sqrt(f2_sq) - sqrt(f1_sq);
 }
 
 // ---------------------------------------------------------------------------
@@ -230,28 +216,50 @@ Vor voronoi(float x, float y, int seed) {
 // ---------------------------------------------------------------------------
 void domainWarp(float x, float y, int seed, float dp, out vec2 q) {
   float wx = x * F_WARP, wy = y * F_WARP;
-  float qx = fbm(wx, wy,         seed + 11, OCT_WARP, 2.0, 0.5, dp, F_WARP);
-  float qy = fbm(wx + 5.2, wy + 1.3, seed + 37, OCT_WARP, 2.0, 0.5, dp, F_WARP);
+  float qx = fbm(wx, wy,         seed + 11, OCT_WARP, 2.0, 0.5, dp, F_WARP, ASUM_WARP);
+  float qy = fbm(wx + 5.2, wy + 1.3, seed + 37, OCT_WARP, 2.0, 0.5, dp, F_WARP, ASUM_WARP);
   q = vec2(x + S_WARP * qx, y + S_WARP * qy);
 }
 
 // ---------------------------------------------------------------------------
 // §12 — geological anomalies (Zonai terraces + spire + spiral)
 // ---------------------------------------------------------------------------
-float anomalyE(float x, float y, int seed) {
-  Vor v = voronoi(x / ANOM_CELL, y / ANOM_CELL, seed + 400);
-  if (v.type >= P_ANOM) return 0.0;
-  float cx = v.cx * ANOM_CELL;
-  float cy = v.cy * ANOM_CELL;
-  float dx = x - cx, dy = y - cy;
-  float r = sqrt(dx * dx + dy * dy);
-  if (r >= ANOM_R_OUT) return 0.0;
-  float theta = atan(dy, dx);
+float anomalyE(vec2 g, int seed) {
+  vec2 p_in = g * (1.0 / ANOM_CELL);
+  vec2 ip = floor(p_in);
+  vec2 f = p_in - ip;
+  float f1_sq = 64.0, f2_sq = 64.0;
+  vec2 bc = vec2(0.0);
+  float btype = 0.0;
+  for (int j = -1; j <= 1; j++) {
+    for (int i = -1; i <= 1; i++) {
+      int cxi = int(ip.x) + i;
+      int cyi = int(ip.y) + j;
+      uint h = hash3(cxi, cyi, seed + 400);
+      vec2 p = vec2(float(h & 0xfffu), float((h >> 12u) & 0xfffu)) * (1.0 / 4095.0);
+      vec2 d = vec2(float(i), float(j)) + p - f;
+      float d2 = dot(d, d);
+      if (d2 < f1_sq) {
+        f2_sq = f1_sq; f1_sq = d2;
+        bc = vec2(float(cxi), float(cyi)) + p;
+        btype = float(h >> 24u) * (1.0 / 255.0);
+      } else if (d2 < f2_sq) {
+        f2_sq = d2;
+      }
+    }
+  }
+  if (btype >= P_ANOM) return 0.0;
+  vec2 c = bc * ANOM_CELL;
+  vec2 delta = g - c;
+  float r2 = dot(delta, delta);
+  if (r2 >= ANOM_R_OUT * ANOM_R_OUT) return 0.0;
+  float r = sqrt(r2);
+  float theta = atan(delta.y, delta.x);
   float fall = 1.0 - smoothstep(ANOM_R_IN, ANOM_R_OUT, r);
-  float t = r / TERRACE_STEP;
-  float ft = t - floor(t);
+  float t = r * (1.0 / TERRACE_STEP);
+  float ft = fract(t);
   float steps = (floor(t) + smoothstep(0.3, 0.7, ft)) * TERRACE_H;
-  float spire = SPIRE_H * exp(-(r / SPIRE_R) * (r / SPIRE_R));
+  float spire = SPIRE_H * exp(-r2 * (1.0 / (SPIRE_R * SPIRE_R)));
   float spiral = SPIRAL_AMP * sin(SPIRAL_TURNS * theta + SPIRAL_RAD * r);
   return fall * (steps + spire + spiral);
 }
@@ -261,20 +269,40 @@ float anomalyE(float x, float y, int seed) {
 // ---------------------------------------------------------------------------
 struct Reg { float wRegion; float mountFactor; float duneAmount; };
 
-Reg regionField(float x, float y, int seed) {
-  Vor v = voronoi(x / REGION_CELL, y / REGION_CELL, seed + 900);
+Reg regionField(vec2 g, int seed) {
+  vec2 p_in = g * (1.0 / REGION_CELL);
+  vec2 ip = floor(p_in);
+  vec2 f = p_in - ip;
+  float f1_sq = 64.0, f2_sq = 64.0;
+  float btype = 0.0;
+  for (int j = -1; j <= 1; j++) {
+    for (int i = -1; i <= 1; i++) {
+      int cxi = int(ip.x) + i;
+      int cyi = int(ip.y) + j;
+      uint h = hash3(cxi, cyi, seed + 900);
+      vec2 p = vec2(float(h & 0xfffu), float((h >> 12u) & 0xfffu)) * (1.0 / 4095.0);
+      vec2 d = vec2(float(i), float(j)) + p - f;
+      float d2 = dot(d, d);
+      if (d2 < f1_sq) {
+        f2_sq = f1_sq; f1_sq = d2;
+        btype = float(h >> 24u) * (1.0 / 255.0);
+      } else if (d2 < f2_sq) {
+        f2_sq = d2;
+      }
+    }
+  }
+  float edge = sqrt(f2_sq) - sqrt(f1_sq);
   Reg r;
-  r.wRegion = smoothstep(REG_BLEND_LO, REG_BLEND_HI, v.edge);
-  float h = v.type;
-  r.mountFactor = h < 0.33 ? REG_HILLS : (h < 0.66 ? REG_MTN : REG_DUNE);
-  r.duneAmount = smoothstep(0.66, 0.8, h) * r.wRegion;
+  r.wRegion = smoothstep(REG_BLEND_LO, REG_BLEND_HI, edge);
+  r.mountFactor = btype < 0.33 ? REG_HILLS : (btype < 0.66 ? REG_MTN : REG_DUNE);
+  r.duneAmount = smoothstep(0.66, 0.8, btype) * r.wRegion;
   return r;
 }
 
 float dunesE(float x, float y, int seed, float dp, float amount) {
   if (amount <= 0.0) return 0.0;
   float phase = x * F_DUNE * 6.28318530718
-    + 3.0 * fbm(x * F_WARP, y * F_WARP, seed + 301, 2, 2.0, 0.5, dp, F_WARP);
+    + 3.0 * fbm(x * F_WARP, y * F_WARP, seed + 301, 2, 2.0, 0.5, dp, F_WARP, ASUM_WARP);
   float c = 1.0 - abs(sin(phase));
   return DUNE_H * amount * c * c * c; // crescent (barchan) profile
 }
@@ -287,14 +315,14 @@ float elevation(vec2 g, float dp, int seed) {
   vec2 wq;
   domainWarp(g.x, g.y, seed, dp, wq);          // §14 warp
 
-  Reg reg = regionField(g.x, g.y, seed);       // §13 on the RAW plane
+  Reg reg = regionField(g, seed);             // §13 on the RAW plane
 
   float cont = smoothstep(CONT_LO, CONT_HI,    // §9 continent field
     0.5 + 0.5 * vnoise(g.x * F_CONT, g.y * F_CONT, seed + 801));
 
   float base = H_BASE * (0.5 + 0.5 * fbm(      // §5 macro hills (warped)
     wq.x * F_MACRO, wq.y * F_MACRO, seed + 1,
-    OCT_MACRO, LAC_MACRO, GAIN_MACRO, dp, F_MACRO));
+    OCT_MACRO, LAC_MACRO, GAIN_MACRO, dp, F_MACRO, ASUM_MACRO));
 
   float maskVal = 0.5 + 0.5 * vnoise(wq.x * F_MASK, wq.y * F_MASK, seed + 77);
   float mask = smoothstep(MASK_LO, MASK_HI, maskVal);
@@ -303,15 +331,15 @@ float elevation(vec2 g, float dp, int seed) {
   float ridge = 0.0;
   if (mask > 0.0) {
     ridge = ridged(wq.x * F_RIDGE, wq.y * F_RIDGE, seed + 5,
-      OCT_RIDGE, LAC_RIDGE, GAIN_RIDGE, dp, F_RIDGE);
+      OCT_RIDGE, LAC_RIDGE, GAIN_RIDGE, dp, F_RIDGE, ASUM_RIDGE);
   }
 
-  Vor vv = voronoi(wq.x * F_VALLEY, wq.y * F_VALLEY, seed + 21); // §7 carve
-  float sv = 1.0 - smoothstep(0.0, W_VALLEY, vv.edge);
+  float de = voronoiEdge(wq * F_VALLEY, seed + 21); // §7 carve
+  float sv = 1.0 - smoothstep(0.0, W_VALLEY, de);
   float valley = C_DEPTH * sv * sv;
 
   float dune = dunesE(g.x, g.y, seed, dp, reg.duneAmount); // §13 dunes (raw)
-  float anom = anomalyE(g.x, g.y, seed);                  // §12 (raw)
+  float anom = anomalyE(g, seed);                         // §12 (raw)
 
   return base * (CONT_MIN + (1.0 - CONT_MIN) * cont)
        + hMount * mask * ridge
@@ -325,8 +353,9 @@ float elevation(vec2 g, float dp, int seed) {
 // (Nyquist-consistent normals); the CPU twin queries near-field with ε = 0.25.
 vec2 gradient(vec2 g, float eps, float dp, int seed) {
   float e = max(eps, 0.05);
-  float gx = (elevation(g + vec2(e, 0.0), dp, seed) - elevation(g - vec2(e, 0.0), dp, seed)) / (2.0 * e);
-  float gz = (elevation(g + vec2(0.0, e), dp, seed) - elevation(g - vec2(0.0, e), dp, seed)) / (2.0 * e);
+  float inv2e = 0.5 / e;
+  float gx = (elevation(g + vec2(e, 0.0), dp, seed) - elevation(g - vec2(e, 0.0), dp, seed)) * inv2e;
+  float gz = (elevation(g + vec2(0.0, e), dp, seed) - elevation(g - vec2(0.0, e), dp, seed)) * inv2e;
   return vec2(gx, gz);
 }
 
@@ -337,7 +366,7 @@ float temperature(vec2 g, float e, int seed) {
   return T_BASE - L_LAT * abs(g.y) - L_ALT * max(e, 0.0);
 }
 float moisture(vec2 g, int seed) {
-  float n = fbm(g.x * F_MOIST, g.y * F_MOIST, seed + 61, 2, 2.0, 0.5, 0.0, F_MOIST);
+  float n = fbm(g.x * F_MOIST, g.y * F_MOIST, seed + 61, 2, 2.0, 0.5, 0.0, F_MOIST, ASUM_WARP);
   float cont = smoothstep(CONT_LO, CONT_HI,
     0.5 + 0.5 * vnoise(g.x * F_CONT, g.y * F_CONT, seed + 801));
   return M_BASE + M_AMP * n + M_OCEAN * (1.0 - cont);
@@ -357,29 +386,49 @@ vec3 oklabToLinear(vec3 lab) {
     -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s);
 }
 
-float rbf(float x, float c, float s) {
-  float d = (x - c) / s;
-  return exp(-d * d);
-}
-
-// Weights over (T, M, E, slope); colours mix in OKLab, convert once (§21).
+// Single-exp RBF over (T, M, E, slope); colours mix in OKLab, convert once (§21).
+// Saves 15 exp() transcendental calls per shaded pixel!
 vec3 biomeColor(float T, float M, float e, float slopeM, float vegNoise, out float vegOut) {
-  float w0 = rbf(T, -4.0, 4.5)  * rbf(M, 0.55, 0.45) * rbf(e, 800.0, 600.0) * rbf(slopeM, 1.0, 1.1);
-  float w1 = rbf(T, 9.0, 22.0)  * rbf(M, 0.45, 0.55) * rbf(e, 550.0, 600.0) * rbf(slopeM, 1.7, 0.8);
-  float w2 = rbf(T, 13.0, 6.5)  * rbf(M, 0.72, 0.22) * rbf(e, 90.0, 260.0)  * rbf(slopeM, 0.32, 0.5);
-  float w3 = rbf(T, 11.0, 7.0)  * rbf(M, 0.9, 0.15)  * rbf(e, 230.0, 380.0) * rbf(slopeM, 0.45, 0.55);
-  float w4 = rbf(T, 16.0, 8.0)  * rbf(M, 0.13, 0.17) * rbf(e, 55.0, 320.0)  * rbf(slopeM, 0.35, 0.5);
+  float d0 = (T - -4.0) * (1.0 / 4.5);
+  float m0 = (M - 0.55) * (1.0 / 0.45);
+  float e0 = (e - 800.0) * (1.0 / 600.0);
+  float s0 = (slopeM - 1.0) * (1.0 / 1.1);
+  float w0 = exp(-(d0 * d0 + m0 * m0 + e0 * e0 + s0 * s0));
 
-  float wsum = w0 + w1 + w2 + w3 + w4;
-  wsum = max(wsum, 1e-6);
+  float d1 = (T - 9.0) * (1.0 / 22.0);
+  float m1 = (M - 0.45) * (1.0 / 0.55);
+  float e1 = (e - 550.0) * (1.0 / 600.0);
+  float s1 = (slopeM - 1.7) * (1.0 / 0.8);
+  float w1 = exp(-(d1 * d1 + m1 * m1 + e1 * e1 + s1 * s1));
+
+  float d2 = (T - 13.0) * (1.0 / 6.5);
+  float m2 = (M - 0.72) * (1.0 / 0.22);
+  float e2 = (e - 90.0) * (1.0 / 260.0);
+  float s2 = (slopeM - 0.32) * (1.0 / 0.5);
+  float w2 = exp(-(d2 * d2 + m2 * m2 + e2 * e2 + s2 * s2));
+
+  float d3 = (T - 11.0) * (1.0 / 7.0);
+  float m3 = (M - 0.9) * (1.0 / 0.15);
+  float e3 = (e - 230.0) * (1.0 / 380.0);
+  float s3 = (slopeM - 0.45) * (1.0 / 0.55);
+  float w3 = exp(-(d3 * d3 + m3 * m3 + e3 * e3 + s3 * s3));
+
+  float d4 = (T - 16.0) * (1.0 / 8.0);
+  float m4 = (M - 0.13) * (1.0 / 0.17);
+  float e4 = (e - 55.0) * (1.0 / 320.0);
+  float s4 = (slopeM - 0.35) * (1.0 / 0.5);
+  float w4 = exp(-(d4 * d4 + m4 * m4 + e4 * e4 + s4 * s4));
+
+  float wsum = max(w0 + w1 + w2 + w3 + w4, 1e-6);
+  float invWsum = 1.0 / wsum;
   vec3 lab = (
     w0 * vec3(0.93,  0.0,    -0.015) +
     w1 * vec3(0.44,  0.004,   0.008) +
     w2 * vec3(0.52, -0.058,   0.048) +
     w3 * vec3(0.32, -0.072,   0.032) +
-    w4 * vec3(0.79,  0.012,   0.072)) / wsum;
+    w4 * vec3(0.79,  0.012,   0.072)) * invWsum;
 
-  vegOut = (w2 * 0.92 + w3 * 1.0 + w1 * 0.06 + w4 * 0.05) / wsum;
+  vegOut = (w2 * 0.92 + w3 * 1.0 + w1 * 0.06 + w4 * 0.05) * invWsum;
 
   // §11 vegetation clumps: canopy darkening modulated at the 14 m wavelength
   float clump = smoothstep(0.2, 0.8, 0.5 + 0.5 * vegNoise);
@@ -393,13 +442,14 @@ vec3 biomeColor(float T, float M, float e, float slopeM, float vegNoise, out flo
 float softShadow(vec3 p, int seed, float footprint) {
   float res = 1.0;
   float t = 0.6;
+  float fp4 = 4.0 * footprint;
   for (int i = 0; i < 40; i++) {
     if (i >= u_shadow_steps) break;
     vec3 q = p + SUN * t;
     if (q.y > MAXH) break;
-    float h = q.y - elevation(q.xz + u_chunk_origin, 4.0 * t * footprint, seed); // §18: 4×Δp
+    float h = q.y - elevation(q.xz + u_chunk_origin, t * fp4, seed); // §18: 4×Δp
     res = min(res, 10.0 * h / t);
-    if (res < 0.005) break;
+    if (res < 0.005) return 0.0;
     t += clamp(h * 0.8, 0.5, 60.0) + t * 0.04;
   }
   return clamp(res, 0.0, 1.0);
@@ -422,8 +472,10 @@ vec3 skyColor(vec3 rd) {
 // 900 m scale height (§19). Distant geometry collapses into the horizon.
 vec3 applyFog(vec3 col, float t, float h, vec3 rd) {
   float od = SIGMA_FOG * t * exp(-max(h, 0.0) / FOG_H);
+  if (od < 0.0005) return col; // near-field early exit: optical depth negligible
   vec3 T = exp(-vec3(0.58, 0.72, 0.95) * od); // per-channel extinction
   vec3 inscatter = mix(skyColor(rd), SKY_HOR, 0.5);
+  if (T.b < 0.004) return inscatter; // far-field complete fogging
   return col * T + inscatter * (1.0 - T);
 }
 
@@ -451,10 +503,13 @@ void main() {
     return;
   }
 
+  // Analytical water-plane intersection distance
+  float tWaterPlane = (rd.y < -1e-5 && ro.y > W_LEVEL) ? (W_LEVEL - ro.y) / rd.y : -1.0;
+  bool waterChecked = false;
+
   float t = START_T;
   float tPrev = t;
   float grad = 0.0;
-  float prevY = ro.y;
   float tWater = -1.0;
   float eWater = 0.0;
   bool hit = false;
@@ -469,25 +524,24 @@ void main() {
     float dp = max(t * u_footprint, 1e-4);
     float e = elevation(p.xz + u_chunk_origin, dp, u_seed);
 
-    // water plane crossing (§8): accept only over a submerged column
-    if (tWater < 0.0 && prevY > W_LEVEL && p.y <= W_LEVEL) {
-      float f = (W_LEVEL - prevY) / (p.y - prevY);
-      float tw = tPrev + (t - tPrev) * f;
-      vec2 cw = ro.xz + rd.xz * tw + u_chunk_origin;
-      float ew = elevation(cw, dp, u_seed);
+    // Analytical water plane crossing (§8): test at most ONCE when crossing plane
+    if (!waterChecked && tWaterPlane > 0.0 && t >= tWaterPlane) {
+      waterChecked = true;
+      vec2 cw = ro.xz + rd.xz * tWaterPlane + u_chunk_origin;
+      float dpw = max(tWaterPlane * u_footprint, 1e-4);
+      float ew = elevation(cw, dpw, u_seed);
       if (ew < W_LEVEL - 0.25) {
-        tWater = tw;
+        tWater = tWaterPlane;
         eWater = ew;
         break; // water is above any later terrain hit — nothing closer exists
       }
     }
-    prevY = p.y;
 
     if (p.y < e) { hit = true; break; }
 
     // Lipschitz ‖∇E‖ via forward differences, refreshed every 2nd sample
-    // (§16/§34.1); the horizon clamp below bounds the stale window.
-    if (i - (i / 2) * 2 == 0) {
+    // (§16/§34.1); fast bitwise test (i & 1 == 0).
+    if ((i & 1) == 0) {
       float eps = max(dp, 0.15);
       vec2 g = p.xz + u_chunk_origin;
       float ex = elevation(g + vec2(eps, 0.0), dp, u_seed);
@@ -527,7 +581,7 @@ void main() {
     vec2 grad2 = gradient(g, dp, dp, u_seed);   // §17: ε = pixel footprint
     vec3 n = normalize(vec3(-grad2.x, 1.0, -grad2.y));
 
-    float e = elevation(g, dp, u_seed);
+    float e = p.y; // bisection-converged surface hit point elevation (§16/§30)
     float T = temperature(g, e, u_seed);
     float M = moisture(g, u_seed);
 
@@ -580,7 +634,7 @@ void main() {
         + vec2(u_time * 6.0, u_time * 2.0); // slow drift
       float dpc = max(tc * u_footprint, 0.02);
       float c = fbm(cp.x * F_CLOUD, cp.y * F_CLOUD, u_seed + 501,
-        CLOUD_OCT, 2.0, 0.5, dpc, F_CLOUD);
+        CLOUD_OCT, 2.0, 0.5, dpc, F_CLOUD, ASUM_CLOUD);
       float cov = smoothstep(0.42, 0.78, 0.5 + 0.5 * c);
       float shade = 0.85 + 0.30 * (1.0 - smoothstep(0.2, 0.9, c));
       vec3 cloudCol = vec3(shade) * (0.62 + 0.38 * max(SUN.y, 0.0));
