@@ -1,0 +1,62 @@
+{
+  "timestamp": "2026-09-27T06:50:20.177Z",
+  "commit": "e1dc7c6",
+  "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M1, Unspecified Version)",
+  "vendor": "Google Inc. (Apple)",
+  "splineFrameCount": 15,
+  "presets": {
+    "low": {
+      "preset": "Low",
+      "resScale": 0.35,
+      "marchSteps": 64,
+      "shadowSteps": 12,
+      "width": 448,
+      "height": 252,
+      "samples": 15,
+      "p50": 28.045,
+      "p95": 45.552,
+      "p99": 45.552,
+      "mean": 23.591,
+      "min": 4.804,
+      "max": 45.552
+    },
+    "med": {
+      "preset": "Medium",
+      "resScale": 0.5,
+      "marchSteps": 96,
+      "shadowSteps": 20,
+      "width": 640,
+      "height": 360,
+      "samples": 15,
+      "p50": 66.364,
+      "p95": 204.815,
+      "p99": 204.815,
+      "mean": 63.886,
+      "min": 9.668,
+      "max": 204.815
+    },
+    "high": {
+      "preset": "High",
+      "resScale": 0.75,
+      "marchSteps": 128,
+      "shadowSteps": 28,
+      "width": 960,
+      "height": 540,
+      "samples": 15,
+      "p50": 140.817,
+      "p95": 484.355,
+      "p99": 484.355,
+      "mean": 144.698,
+      "min": 21.587,
+      "max": 484.355
+    }
+  },
+  "spectorSnapshot": {
+    "drawCallCount": 1,
+    "primitiveType": "TRIANGLES",
+    "vertexCount": 3,
+    "texturesCount": 0,
+    "meshCount": 0,
+    "uniformsCount": 10
+  }
+}
