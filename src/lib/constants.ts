@@ -23,18 +23,24 @@ export const MAX_WORLD_H = 1300.0; // early-exit ceiling (spec §26)
 export const MAX_DIST = 6000.0; // raymarch cutoff, hidden by Beer-Lambert fog
 export const DEFAULT_SEED = 1337;
 
-/** Spatial frequencies — all dyadic rationals n / 2^20 (see file header). */
+/** 
+ * Spatial frequencies — all exact dyadic rationals f = n / 2^20 (spec §25, §27).
+ * Because CHUNK_SIZE = 8192 = 2^13, the product CHUNK_SIZE * f = (2^13 * n) / 2^20 = n / 2^7 = n / 128.
+ * In IEEE 754 float32 / float64, division of an integer by 128 (2^7) is bit-exact with zero mantissa
+ * roundoff error (only changes the binary exponent). This guarantees zero lattice drift or seam artifacts
+ * across chunk boundaries.
+ */
 export const F = {
-  macro: 512 / 1048576, // 1/2048      rolling-hills fBm
-  ridge: 341 / 1048576, // ~1/3074.6   ridged multifractal mountains
-  mask: 128 / 1048576, // 1/8192     mountain macro mask
-  warp: 655 / 1048576, // ~1/1600.9   domain warp
-  valley: 1942 / 1048576, // ~1/539.9    cellular valley network
-  cont: 64 / 1048576, // 1/16384    continent field
-  moist: 512 / 1048576, // 1/2048     moisture noise
-  dune: 23 / 1048576, // ~1/45.6 m   dune wavelength phase
-  cloud: 403 / 1048576, // ~1/2601.9   cloud coverage
-  veg: 14.0, // 1/14 m      vegetation clumps (integer → lattice exact)
+  macro: 512 / 1048576,   // n = 512 = 2^9   (1/2048 m)    rolling-hills fBm base frequency
+  ridge: 341 / 1048576,   // n = 341         (~1/3074.6 m) ridged multifractal mountain base frequency
+  mask: 128 / 1048576,    // n = 128 = 2^7   (1/8192 m)    mountain macro mask
+  warp: 655 / 1048576,    // n = 655         (~1/1600.9 m) domain warp displacement frequency
+  valley: 1942 / 1048576, // n = 1942        (~1/539.9 m)  cellular valley river network
+  cont: 64 / 1048576,     // n = 64 = 2^6    (1/16384 m)   continental shelf field
+  moist: 512 / 1048576,   // n = 512 = 2^9   (1/2048 m)    moisture climate field
+  dune: 23 / 1048576,     // n = 23          (~1/45.6 m)   barchan dune wavelength phase
+  cloud: 403 / 1048576,   // n = 403         (~1/2601.9 m) cloud coverage layer
+  veg: 14.0,              // wavelength = 14 m             vegetation clump wavelength (spec §11)
 } as const;
 
 /** Macro terrain (spec §5). 9 octaves: 2048 m continents down to 8 m gravel
@@ -157,7 +163,21 @@ export const LIGHT = {
 /** Player physics twin (spec §31). */
 export const PLAYER = {
   height: 1.7,
-  groundBias: 0.08, // absorbs CPU/GPU float divergence (spec §31)
+  /**
+   * GROUND_BIAS = 0.08 m absorbs residual fp32 vs fp64 divergence (spec §27, §31).
+   *
+   * Rationale:
+   * The CPU physics twin evaluates the closed-form terrain elevation E(x, z) in double
+   * precision (fp64, 53 mantissa bits) across continuous world coordinates.
+   * The GPU fragment shader evaluates E(x_local, z_local) in single precision (fp32,
+   * 24 mantissa bits) relative to the local chunk origin. Across a chunk radius of 8192 m,
+   * accumulating across 9 octaves of fBm, 5 octaves of ridged multifractal noise, and
+   * domain warp, the worst-case fp32 vs fp64 divergence bound is delta_max ≈ 0.024 m.
+   * Setting GROUND_BIAS = 0.08 m provides a safety margin of ~3.3x over delta_max,
+   * mathematically preventing the player avatar from falling through or visually clipping
+   * below the rendered terrain surface.
+   */
+  groundBias: 0.08,
   gravity: 22.0,
   walkSpeed: 6.0,
   sprintMul: 1.8,

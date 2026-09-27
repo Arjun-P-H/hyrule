@@ -62,12 +62,17 @@ describe('2. Dyadic Frequencies & Chunk Invariance', () => {
   });
 
   it('chunk origin * f is exact in fp32 without residual seam', () => {
-    const origin = CHUNK_SIZE; // 8192 = 2^13
-    for (const freq of Object.values(F)) {
-      const prod = origin * freq;
-      // 8192 / 1048576 = 1/128
-      const n = prod * 128;
-      expect(Math.round(n)).toBe(n);
+    for (let k = -12; k <= 12; k++) {
+      const origin = k * CHUNK_SIZE; // k * 8192 = k * 2^13
+      for (const [key, freq] of Object.entries(F)) {
+        if (key === 'veg') continue;
+        const prod = origin * freq;
+        // Exact dyadic rational: (k * 2^13 * n) / 2^20 = (k * n) / 128
+        const n = prod * 128;
+        expect(Math.round(n)).toBe(n);
+        // Bit-exact in single precision fp32: Math.fround must equal double value
+        expect(Math.fround(prod)).toBe(prod);
+      }
     }
   });
 });
@@ -523,6 +528,34 @@ describe('15. Chunk Boundary Continuity & Seam Invariance (§IV.L.1.b)', () => {
 
       expect(Math.abs(eLeftZ - eExactZ)).toBeLessThan(0.01);
       expect(Math.abs(eRightZ - eExactZ)).toBeLessThan(0.01);
+    }
+  });
+
+  it('distant chunk boundaries (±100,000m) maintain C0 continuity and fp32 boundary invariance', () => {
+    // Multiples of CHUNK_SIZE (8192m) up to ±100,000m
+    const distantChunkIndices = [-12, -7, -3, 3, 7, 12];
+    for (const k of distantChunkIndices) {
+      const chunkEdge = k * CHUNK_SIZE;
+      for (const offset of [0, 1024, 4096, 7168]) {
+        const testZ = offset;
+        // Limit continuity test: e(edge+) vs e(edge-)
+        const eMinus = elevation(chunkEdge - 1e-11, testZ, DEFAULT_SEED, 0);
+        const ePlus = elevation(chunkEdge + 1e-11, testZ, DEFAULT_SEED, 0);
+        expect(Math.abs(ePlus - eMinus)).toBeLessThan(1e-7);
+
+        // Simulated fp32 chunk-relative rebasing continuity across edge
+        // In chunk k-1, local coordinate approaches CHUNK_SIZE
+        const localLeft = Math.fround(CHUNK_SIZE - 0.001);
+        const originLeft = Math.fround((k - 1) * CHUNK_SIZE);
+        const eChunkLeft = elevation(originLeft + localLeft, testZ, DEFAULT_SEED, 0);
+
+        // In chunk k, local coordinate starts at 0
+        const localRight = Math.fround(0.001);
+        const originRight = Math.fround(k * CHUNK_SIZE);
+        const eChunkRight = elevation(originRight + localRight, testZ, DEFAULT_SEED, 0);
+
+        expect(Math.abs(eChunkRight - eChunkLeft)).toBeLessThan(0.01);
+      }
     }
   });
 });
