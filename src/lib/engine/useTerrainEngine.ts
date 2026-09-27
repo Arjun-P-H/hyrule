@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState, type RefObject } from 'react';
-import { TERRAIN_FS, TERRAIN_VS } from '@/components/terrain/demoShader';
+import { TERRAIN_FS, TERRAIN_VS, minifyGlsl } from '@/components/terrain/demoShader';
 import { elevation, updatePlayer, type PlayerState } from '@/lib/terrainMath';
 import {
   CHUNK_SIZE,
@@ -169,7 +169,7 @@ export function useTerrainEngine({
       const auto = { scale: software ? 0.25 : 1.0, at: 0 };
 
       vs = compileShader(gl, gl.VERTEX_SHADER, TERRAIN_VS);
-      fs = compileShader(gl, gl.FRAGMENT_SHADER, TERRAIN_FS);
+      fs = compileShader(gl, gl.FRAGMENT_SHADER, minifyGlsl(TERRAIN_FS));
       prog = gl.createProgram();
       if (!prog) throw new Error('Failed to create WebGL program');
 

@@ -47,7 +47,14 @@ import { Input } from '@/components/ui/input';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import dynamic from 'next/dynamic';
 import Link from 'next/link';
-import HillshadePanel from '@/components/terrain/HillshadePanel';
+const HillshadePanel = dynamic(() => import('@/components/terrain/HillshadePanel'), {
+  ssr: false,
+  loading: () => (
+    <div className="h-64 rounded-xl border border-stone-800 bg-stone-950/50 animate-pulse flex items-center justify-center">
+      <span className="font-mono text-xs text-stone-500">Loading radar relief map...</span>
+    </div>
+  ),
+});
 
 const TerrainDemo = dynamic(() => import('@/components/terrain/TerrainDemo'), {
   ssr: false,
