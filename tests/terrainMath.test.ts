@@ -34,6 +34,11 @@ import {
   VALLEY,
   LIGHT,
   BIOME_ANCHORS,
+  MACRO,
+  MOUNTAIN,
+  WARP,
+  REGION,
+  ANOMALY,
 } from '../src/lib/constants';
 import { TERRAIN_VS, TERRAIN_FS } from '../src/components/terrain/demoShader';
 
@@ -783,6 +788,65 @@ describe('18. GLSL ES 3.00 Shader Contract & Integrity (§IV.A, §IV.L)', () => 
     expect(TERRAIN_FS).toContain('C_DEPTH  = 48.0');
     expect(TERRAIN_FS).toContain('W_LEVEL = 5.0');
     expect(TERRAIN_FS).toContain('const float ASUM_RIDGE = 0.93703808;');
+  });
+
+  it('programmatically parses and cross-checks all GLSL float constants against constants.ts', () => {
+    const glslConsts = new Map<string, number>();
+    const stmtRegex = /const\s+float\s+([^;]+);/g;
+    let stmtMatch;
+    while ((stmtMatch = stmtRegex.exec(TERRAIN_FS)) !== null) {
+      const decls = stmtMatch[1].split(',');
+      for (const decl of decls) {
+        const parts = decl.split('=');
+        if (parts.length === 2) {
+          const name = parts[0].trim();
+          const expr = parts[1].trim();
+          try {
+            const val = Function(`"use strict"; return (${expr});`)();
+            if (typeof val === 'number') {
+              glslConsts.set(name, val);
+            }
+          } catch {
+            // ignore
+          }
+        }
+      }
+    }
+
+    expect(glslConsts.get('MAXH')).toBe(MAX_WORLD_H);
+    expect(glslConsts.get('H_BASE')).toBe(MACRO.hBase);
+    expect(glslConsts.get('H_MOUNT')).toBe(MOUNTAIN.hMount);
+    expect(glslConsts.get('C_DEPTH')).toBe(VALLEY.cDepth);
+    expect(glslConsts.get('W_LEVEL')).toBe(VALLEY.wLevel);
+    expect(glslConsts.get('W_VALLEY')).toBe(VALLEY.wValley);
+    expect(glslConsts.get('W_WIDTH')).toBe(VALLEY.wWidth);
+    expect(glslConsts.get('S_WARP')).toBe(WARP.strength);
+    expect(glslConsts.get('DUNE_H')).toBe(REGION.duneHeight);
+    expect(glslConsts.get('ANOM_CELL')).toBe(ANOMALY.cell);
+    expect(glslConsts.get('ANOM_R_IN')).toBe(ANOMALY.rIn);
+    expect(glslConsts.get('ANOM_R_OUT')).toBe(ANOMALY.rOut);
+    expect(glslConsts.get('TERRACE_STEP')).toBe(ANOMALY.terraceStep);
+    expect(glslConsts.get('TERRACE_H')).toBe(ANOMALY.terraceHeight);
+    expect(glslConsts.get('SPIRE_H')).toBe(ANOMALY.spireHeight);
+    expect(glslConsts.get('SPIRE_R')).toBe(ANOMALY.spireRadius);
+    expect(glslConsts.get('SPIRAL_AMP')).toBe(ANOMALY.spiralAmp);
+    expect(glslConsts.get('SPIRAL_TURNS')).toBe(ANOMALY.spiralTurns);
+    expect(glslConsts.get('SPIRAL_RAD')).toBe(ANOMALY.spiralRadial);
+    expect(glslConsts.get('T_BASE')).toBe(CLIMATE.tBase);
+    expect(glslConsts.get('M_BASE')).toBe(CLIMATE.mBase);
+    expect(glslConsts.get('M_AMP')).toBe(CLIMATE.mNoiseAmp);
+    expect(glslConsts.get('M_OCEAN')).toBe(CLIMATE.mOceanLambda);
+    expect(glslConsts.get('CLOUD_PLANE')).toBe(LIGHT.cloudPlane);
+
+    expect(glslConsts.get('F_MACRO')).toBeCloseTo(F.macro, 10);
+    expect(glslConsts.get('F_RIDGE')).toBeCloseTo(F.ridge, 10);
+    expect(glslConsts.get('F_MASK')).toBeCloseTo(F.mask, 10);
+    expect(glslConsts.get('F_WARP')).toBeCloseTo(F.warp, 10);
+    expect(glslConsts.get('F_VALLEY')).toBeCloseTo(F.valley, 10);
+    expect(glslConsts.get('F_CONT')).toBeCloseTo(F.cont, 10);
+    expect(glslConsts.get('F_MOIST')).toBeCloseTo(F.moist, 10);
+    expect(glslConsts.get('F_DUNE')).toBeCloseTo(F.dune, 10);
+    expect(glslConsts.get('F_CLOUD')).toBeCloseTo(F.cloud, 10);
   });
 });
 
