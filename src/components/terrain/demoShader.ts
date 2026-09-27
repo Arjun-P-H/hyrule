@@ -679,7 +679,13 @@ vec3 skyColor(vec3 rd) {
   float sd2 = sd * sd;
   float sd4 = sd2 * sd2;
   float sd8 = sd4 * sd4;
-  float sd90 = sd > 0.8 ? pow(sd, 90.0) : 0.0;
+  float sd90 = 0.0;
+  if (sd > 0.8) {
+    float sd16 = sd8 * sd8;
+    float sd32 = sd16 * sd16;
+    float sd64 = sd32 * sd32;
+    sd90 = sd64 * sd16 * sd8 * sd2;
+  }
   sky += SUN_COL_010 * sd8 + SUN_COL_030 * sd90;
   sky += SUN_COL_600 * smoothstep(0.99955, 0.99985, sd); // disc
   return sky;
@@ -727,7 +733,7 @@ void main() {
 
   float t = START_T;
   float tPrev = t;
-  float grad = 0.0;
+  float gradSq = 0.0;
   float tWater = -1.0;
   float eWater = 0.0;
   bool hit = false;
@@ -767,14 +773,17 @@ void main() {
         vec2 g = p.xz + u_chunk_origin;
         float ex = elevation(g + vec2(eps, 0.0), dp, u_seed);
         float ez = elevation(g + vec2(0.0, eps), dp, u_seed);
-        grad = length(vec2((ex - e) / eps, (ez - e) / eps));
+        float invEps = 1.0 / eps;
+        float gx = (ex - e) * invEps;
+        float gz = (ez - e) * invEps;
+        gradSq = gx * gx + gz * gz;
       } else {
-        grad = 0.0;
+        gradSq = 0.0;
       }
     }
 
     tPrev = t;
-    float step = max(DMIN, (p.y - e) * inversesqrt(grad * grad + 1.0) * LAMBDA);
+    float step = max(DMIN, (p.y - e) * inversesqrt(gradSq + 1.0) * LAMBDA);
     step *= 1.0 + t * GROWTH;            // §26 adaptive growth
     step = min(step, t * 0.06 + 2.0);    // horizon clamp (anti-tunnel)
     t += step;
@@ -790,6 +799,7 @@ void main() {
       vec3 m = ro + rd * tm;
       float gap = m.y - elevation(m.xz + u_chunk_origin, tm * u_footprint, u_seed);
       if (gap < 0.0) hi = tm; else lo = tm;
+      if (abs(gap) < 0.01 || (hi - lo) < 0.008) break;
     }
     tHit = 0.5 * (lo + hi);
   }
@@ -803,7 +813,9 @@ void main() {
     float dp = max(tHit * u_footprint, 1e-4);
 
     vec2 grad2 = gradient(g, dp, dp, u_seed);   // §17: ε = pixel footprint
-    vec3 n = normalize(vec3(-grad2.x, 1.0, -grad2.y));
+    float gradLenSq = dot(grad2, grad2);
+    float invLen = inversesqrt(gradLenSq + 1.0);
+    vec3 n = vec3(-grad2.x, 1.0, -grad2.y) * invLen;
 
     float e = p.y; // bisection-converged surface hit point elevation (§16/§30)
     float T = temperature(g, e, u_seed);
@@ -811,7 +823,7 @@ void main() {
 
     float vegNoise = vnoise(g.x / VEG_WL, g.y / VEG_WL, u_seed + 171);
     float veg;
-    vec3 albedo = biomeColor(T, M, e, length(grad2), vegNoise, veg);
+    vec3 albedo = biomeColor(T, M, e, sqrt(gradLenSq), vegNoise, veg);
 
     float ndl = max(dot(n, SUN), 0.0);
     float sh = 0.0;
@@ -833,7 +845,9 @@ void main() {
     // ripple normal — dynamic surface, deterministic in (x, z, t)
     float r1 = vnoise(g.x / 5.5 + u_time * 0.35, g.y / 5.5 - u_time * 0.22, u_seed + 911);
     float r2 = vnoise(g.x / 9.7 - u_time * 0.20, g.y / 9.7 + u_time * 0.31, u_seed + 913);
-    vec3 n = normalize(vec3(-0.22 * r1, 1.0, -0.22 * r2));
+    vec2 wr = vec2(-0.22 * r1, -0.22 * r2);
+    float invWLen = inversesqrt(dot(wr, wr) + 1.0);
+    vec3 n = vec3(wr.x, 1.0, wr.y) * invWLen;
 
     float sh = softShadow(p + vec3(0.0, 0.15, 0.0), u_seed, u_footprint);
     vec3 shallow = vec3(0.110, 0.320, 0.300);
@@ -845,9 +859,25 @@ void main() {
     float foamN = vnoise(g.x / 3.1, g.y / 3.1, u_seed + 917);
     body += vec3(0.9) * (1.0 - smoothstep(0.05, 0.6, depth)) * (0.25 + 0.35 * foamN);
 
-    vec3 refl = skyColor(reflect(rd, n));
-    float fres = 0.02 + 0.98 * pow(1.0 - max(dot(-rd, n), 0.0), 5.0);
-    float spec = pow(max(dot(reflect(rd, n), SUN), 0.0), 240.0) * 3.0;
+    vec3 refld = reflect(rd, n);
+    vec3 refl = skyColor(refld);
+    float f1 = 1.0 - max(dot(-rd, n), 0.0);
+    float f2 = f1 * f1;
+    float f4 = f2 * f2;
+    float fres = 0.02 + 0.98 * (f4 * f1);
+
+    float sdot = max(dot(refld, SUN), 0.0);
+    float spec = 0.0;
+    if (sdot > 0.8) {
+      float sp2 = sdot * sdot;
+      float sp4 = sp2 * sp2;
+      float sp8 = sp4 * sp4;
+      float sp16 = sp8 * sp8;
+      float sp32 = sp16 * sp16;
+      float sp64 = sp32 * sp32;
+      float sp128 = sp64 * sp64;
+      spec = (sp128 * sp64) * (sp32 * sp16) * 3.0;
+    }
 
     col = mix(body, refl, fres) + SUN_COL * spec / 3.4;
     col = applyFog(col, tWater, W_LEVEL, rd);

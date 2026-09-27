@@ -888,6 +888,7 @@ export function marchRay(
   let t: number = MARCH.startT;
   let tPrev: number = t;
   let grad = 0;
+  let gradSq = 0;
 
   for (let i = 0; i < opts.steps; i++) {
     const px = ro[0] + rd[0] * t;
@@ -934,10 +935,13 @@ export function marchRay(
         const eps = Math.max(dp, 0.15);
         const ex = elevation(px + eps, pz, seed, dp);
         const ez = elevation(px, pz + eps, seed, dp);
-        const dx = (ex - e) / eps;
-        const dz = (ez - e) / eps;
-        grad = Math.sqrt(dx * dx + dz * dz);
+        const invEps = 1.0 / eps;
+        const dx = (ex - e) * invEps;
+        const dz = (ez - e) * invEps;
+        gradSq = dx * dx + dz * dz;
+        if (opts.record) grad = Math.sqrt(gradSq);
       } else {
+        gradSq = 0.0;
         grad = 0.0;
       }
     }
@@ -945,7 +949,7 @@ export function marchRay(
     tPrev = t;
     let step = Math.max(
       MARCH.deltaMin,
-      (py - e) / Math.sqrt(grad * grad + 1.0) * MARCH.lambdaStep,
+      (py - e) / Math.sqrt(gradSq + 1.0) * MARCH.lambdaStep,
     );
     step *= 1.0 + t * MARCH.stepGrowth; // §26 adaptive growth
     // Horizon clamp: no single step may exceed ~6% of distance travelled —
@@ -974,8 +978,9 @@ export function softShadow(
     const qz = p[2] + sunDir[2] * t;
     if (qy > MAX_WORLD_H) break;
     const h = qy - elevation(qx, qz, seed, 4.0 * t * footprint); // §18: 4×Δp
+    if (h <= 0.0) return 0.0;
     res = Math.min(res, 10.0 * h / t); // penumbra kernel
-    if (res < 0.005) break;
+    if (res < 0.005) return 0.0;
     t += clamp(h * 0.8, 0.5, 60.0) + t * 0.04;
   }
   return clamp(res, 0, 1);
