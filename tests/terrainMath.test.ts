@@ -760,6 +760,21 @@ describe('20. Cellular Voronoi Pruning & Traversal Invariance (§IV.B.5, §IV.L)
       expect(anom).toBeGreaterThanOrEqual(0.0);
     }
   });
+
+  it('regionField matches bounded cellular traversal invariants across varying coordinates', () => {
+    for (let i = 0; i < 500; i++) {
+      const x = (i * 345.67) % 30000 - 15000;
+      const y = (i * 789.12) % 30000 - 15000;
+      const reg = regionField(x, y, DEFAULT_SEED);
+      expect(Number.isFinite(reg.wRegion)).toBe(true);
+      expect(reg.wRegion).toBeGreaterThanOrEqual(0.0);
+      expect(reg.wRegion).toBeLessThanOrEqual(1.0);
+      expect(Number.isFinite(reg.mountFactor)).toBe(true);
+      expect(reg.mountFactor).toBeGreaterThan(0.0);
+      expect(Number.isFinite(reg.duneAmount)).toBe(true);
+      expect(reg.duneAmount).toBeGreaterThanOrEqual(0.0);
+    }
+  });
 });
 
 describe('21. Multi-Octave Nyquist Attenuation Monotonicity (§IV.A.8, §IV.B.4)', () => {

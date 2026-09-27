@@ -116,6 +116,13 @@ const ASUM_WARP = 1.5; // 2 octaves, gain 0.5, amp 1.0
  * frequency so the Nyquist weight uses the ABSOLUTE octave frequency
  * f_i = f0 · lac^i against the metre-space footprint Δp.
  */
+export const MACRO_FREQ = [1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0] as const;
+export const MACRO_AMP  = [1.0, 0.5, 0.25, 0.125, 0.0625, 0.03125, 0.015625, 0.0078125, 0.00390625] as const;
+export const RIDGE_FREQ = [1.0, 2.17, 4.7089, 10.218313, 22.17373921] as const;
+export const RIDGE_AMP  = [0.5, 0.24, 0.1152, 0.055296, 0.02654208] as const;
+export const WARP_FREQ  = [1.0, 2.0] as const;
+export const WARP_AMP   = [1.0, 0.5] as const;
+
 function fbm(
   x: number, y: number, seed: number,
   octaves: number, lacunarity: number, gain: number, dp: number,
@@ -152,11 +159,38 @@ function fbm(
     : (gain === 0.5 && octaves === 2) ? ASUM_WARP
     : (1.0 - Math.pow(gain, octaves)) / (1.0 - gain);
 
-  let freq = 1.0, amp = 1.0, sum = 0.0, wsum = 0.0;
   const f0_dp_2 = f0 * dp * 2.0;
+
+  if (octaves === 9 && lacunarity === 2.0 && gain === 0.5) {
+    let sum = 0.0, wsum = 0.0;
+    for (let i = 0; i < 9; i++) {
+      const freq = MACRO_FREQ[i];
+      const w = Math.min(1, Math.max(0, 2.0 - freq * f0_dp_2));
+      if (w <= 0.0) break;
+      const amp = MACRO_AMP[i];
+      sum += amp * w * vnoise(x * freq, y * freq, seed + i * 0x9e37);
+      wsum += amp * w;
+    }
+    return sum * (totalAsum / Math.max(wsum, 1e-6));
+  }
+
+  if (octaves === 2 && lacunarity === 2.0 && gain === 0.5) {
+    let sum = 0.0, wsum = 0.0;
+    for (let i = 0; i < 2; i++) {
+      const freq = WARP_FREQ[i];
+      const w = Math.min(1, Math.max(0, 2.0 - freq * f0_dp_2));
+      if (w <= 0.0) break;
+      const amp = WARP_AMP[i];
+      sum += amp * w * vnoise(x * freq, y * freq, seed + i * 0x9e37);
+      wsum += amp * w;
+    }
+    return sum * (totalAsum / Math.max(wsum, 1e-6));
+  }
+
+  let freq = 1.0, amp = 1.0, sum = 0.0, wsum = 0.0;
   for (let i = 0; i < octaves; i++) {
     const w = Math.min(1, Math.max(0, 2.0 - freq * f0_dp_2));
-    if (w <= 0.0) break; // Higher octaves are strictly higher freq -> w is 0
+    if (w <= 0.0) break;
     sum += amp * w * vnoise(x * freq, y * freq, seed + i * 0x9e37);
     wsum += amp * w;
     freq *= lacunarity;
@@ -205,8 +239,23 @@ function ridged(
   const totalAsum = (gain === 0.48 && octaves === 5) ? ASUM_RIDGE
     : 0.5 * (1.0 - Math.pow(gain, octaves)) / (1.0 - gain);
 
-  let freq = 1.0, amp = 0.5, sum = 0.0, wsum = 0.0;
   const f0_dp_4 = 4.0 * f0 * dp;
+
+  if (octaves === 5 && lacunarity === 2.17 && gain === 0.48) {
+    let sum = 0.0, wsum = 0.0;
+    for (let i = 0; i < 5; i++) {
+      const freq = RIDGE_FREQ[i];
+      const w = Math.min(1, Math.max(0, 2.0 - freq * f0_dp_4));
+      if (w <= 0.0) break;
+      const n = 1.0 - Math.abs(vnoise(x * freq, y * freq, seed + i * 0x85eb));
+      const amp = RIDGE_AMP[i];
+      sum += amp * w * (n * n);
+      wsum += amp * w;
+    }
+    return sum * (totalAsum / Math.max(wsum, 1e-6));
+  }
+
+  let freq = 1.0, amp = 0.5, sum = 0.0, wsum = 0.0;
   for (let i = 0; i < octaves; i++) {
     const w = Math.min(1, Math.max(0, 2.0 - freq * f0_dp_4));
     if (w <= 0.0) break;
@@ -279,32 +328,105 @@ export function voronoi(x: number, y: number, seed: number): VoronoiResult {
  * Skips tracking center coords and type bytes completely,
  * and skips ~32% of cells via geometric bounding.
  */
+const INV_4095 = 1.0 / 4095.0;
+const INV_255 = 1.0 / 255.0;
+
 export function worleyEdge(x: number, y: number, seed: number): number {
-  const ipx = Math.floor(x), ipy = Math.floor(y);
+  const ipx = Math.floor(x) | 0, ipy = Math.floor(y) | 0;
   const fx = x - ipx, fy = y - ipy;
-  let f1_sq = 64.0, f2_sq = 64.0;
   const sTerm = Math.imul(seed | 0, 0x9e3779b9);
 
-  for (let k = 0; k < 9; k++) {
-    const i = CELL_I[k], j = CELL_J[k];
-    const minDx = i === 1 ? (1.0 - fx) : (i === -1 ? fx : 0.0);
-    const minDy = j === 1 ? (1.0 - fy) : (j === -1 ? fy : 0.0);
-    if (minDx * minDx + minDy * minDy >= f2_sq) continue;
+  // Cell (0, 0)
+  const cy0Term = Math.imul(ipy, 0x27d4eb2f);
+  let h0 = (ipx ^ cy0Term ^ sTerm) | 0;
+  h0 ^= h0 >>> 16; h0 = Math.imul(h0, 0x85ebca6b); h0 ^= h0 >>> 13; h0 = Math.imul(h0, 0xc2b2ae35); h0 ^= h0 >>> 16;
+  const dx0 = (h0 & 0xfff) * INV_4095 - fx;
+  const dy0 = ((h0 >>> 12) & 0xfff) * INV_4095 - fy;
+  let f1_sq = dx0 * dx0 + dy0 * dy0;
+  let f2_sq = 64.0;
 
-    const cx = (ipx + i) | 0, cy = (ipy + j) | 0;
-    const h = hashU((cx ^ Math.imul(cy, 0x27d4eb2f) ^ sTerm) | 0);
-    const px = (h & 0xfff) / 4095.0;
-    const py = ((h >>> 12) & 0xfff) / 4095.0;
-    const dx = i + px - fx;
-    const dy = j + py - fy;
+  const fx0_2 = fx * fx;
+  const fx1 = 1.0 - fx;
+  const fx1_2 = fx1 * fx1;
+  const fy0_2 = fy * fy;
+  const fy1 = 1.0 - fy;
+  const fy1_2 = fy1 * fy1;
+
+  const ipx_p1 = (ipx + 1) | 0;
+  const ipx_m1 = (ipx - 1) | 0;
+  const ipy_p1 = (ipy + 1) | 0;
+  const ipy_m1 = (ipy - 1) | 0;
+  const cyp1Term = Math.imul(ipy_p1, 0x27d4eb2f);
+  const cym1Term = Math.imul(ipy_m1, 0x27d4eb2f);
+
+  // 4 Orthogonal neighbors
+  if (fx1_2 < f2_sq) {
+    let hn = (ipx_p1 ^ cy0Term ^ sTerm) | 0;
+    hn ^= hn >>> 16; hn = Math.imul(hn, 0x85ebca6b); hn ^= hn >>> 13; hn = Math.imul(hn, 0xc2b2ae35); hn ^= hn >>> 16;
+    const dx = 1.0 + (hn & 0xfff) * INV_4095 - fx;
+    const dy = ((hn >>> 12) & 0xfff) * INV_4095 - fy;
     const d2 = dx * dx + dy * dy;
-    if (d2 < f1_sq) {
-      f2_sq = f1_sq;
-      f1_sq = d2;
-    } else if (d2 < f2_sq) {
-      f2_sq = d2;
-    }
+    if (d2 < f1_sq) { f2_sq = f1_sq; f1_sq = d2; } else if (d2 < f2_sq) { f2_sq = d2; }
   }
+  if (fy1_2 < f2_sq) {
+    let hn = (ipx ^ cyp1Term ^ sTerm) | 0;
+    hn ^= hn >>> 16; hn = Math.imul(hn, 0x85ebca6b); hn ^= hn >>> 13; hn = Math.imul(hn, 0xc2b2ae35); hn ^= hn >>> 16;
+    const dx = (hn & 0xfff) * INV_4095 - fx;
+    const dy = 1.0 + ((hn >>> 12) & 0xfff) * INV_4095 - fy;
+    const d2 = dx * dx + dy * dy;
+    if (d2 < f1_sq) { f2_sq = f1_sq; f1_sq = d2; } else if (d2 < f2_sq) { f2_sq = d2; }
+  }
+  if (fx0_2 < f2_sq) {
+    let hn = (ipx_m1 ^ cy0Term ^ sTerm) | 0;
+    hn ^= hn >>> 16; hn = Math.imul(hn, 0x85ebca6b); hn ^= hn >>> 13; hn = Math.imul(hn, 0xc2b2ae35); hn ^= hn >>> 16;
+    const dx = -1.0 + (hn & 0xfff) * INV_4095 - fx;
+    const dy = ((hn >>> 12) & 0xfff) * INV_4095 - fy;
+    const d2 = dx * dx + dy * dy;
+    if (d2 < f1_sq) { f2_sq = f1_sq; f1_sq = d2; } else if (d2 < f2_sq) { f2_sq = d2; }
+  }
+  if (fy0_2 < f2_sq) {
+    let hn = (ipx ^ cym1Term ^ sTerm) | 0;
+    hn ^= hn >>> 16; hn = Math.imul(hn, 0x85ebca6b); hn ^= hn >>> 13; hn = Math.imul(hn, 0xc2b2ae35); hn ^= hn >>> 16;
+    const dx = (hn & 0xfff) * INV_4095 - fx;
+    const dy = -1.0 + ((hn >>> 12) & 0xfff) * INV_4095 - fy;
+    const d2 = dx * dx + dy * dy;
+    if (d2 < f1_sq) { f2_sq = f1_sq; f1_sq = d2; } else if (d2 < f2_sq) { f2_sq = d2; }
+  }
+
+  // 4 Diagonal corners
+  if (fx1_2 + fy1_2 < f2_sq) {
+    let hn = (ipx_p1 ^ cyp1Term ^ sTerm) | 0;
+    hn ^= hn >>> 16; hn = Math.imul(hn, 0x85ebca6b); hn ^= hn >>> 13; hn = Math.imul(hn, 0xc2b2ae35); hn ^= hn >>> 16;
+    const dx = 1.0 + (hn & 0xfff) * INV_4095 - fx;
+    const dy = 1.0 + ((hn >>> 12) & 0xfff) * INV_4095 - fy;
+    const d2 = dx * dx + dy * dy;
+    if (d2 < f1_sq) { f2_sq = f1_sq; f1_sq = d2; } else if (d2 < f2_sq) { f2_sq = d2; }
+  }
+  if (fx0_2 + fy1_2 < f2_sq) {
+    let hn = (ipx_m1 ^ cyp1Term ^ sTerm) | 0;
+    hn ^= hn >>> 16; hn = Math.imul(hn, 0x85ebca6b); hn ^= hn >>> 13; hn = Math.imul(hn, 0xc2b2ae35); hn ^= hn >>> 16;
+    const dx = -1.0 + (hn & 0xfff) * INV_4095 - fx;
+    const dy = 1.0 + ((hn >>> 12) & 0xfff) * INV_4095 - fy;
+    const d2 = dx * dx + dy * dy;
+    if (d2 < f1_sq) { f2_sq = f1_sq; f1_sq = d2; } else if (d2 < f2_sq) { f2_sq = d2; }
+  }
+  if (fx1_2 + fy0_2 < f2_sq) {
+    let hn = (ipx_p1 ^ cym1Term ^ sTerm) | 0;
+    hn ^= hn >>> 16; hn = Math.imul(hn, 0x85ebca6b); hn ^= hn >>> 13; hn = Math.imul(hn, 0xc2b2ae35); hn ^= hn >>> 16;
+    const dx = 1.0 + (hn & 0xfff) * INV_4095 - fx;
+    const dy = -1.0 + ((hn >>> 12) & 0xfff) * INV_4095 - fy;
+    const d2 = dx * dx + dy * dy;
+    if (d2 < f1_sq) { f2_sq = f1_sq; f1_sq = d2; } else if (d2 < f2_sq) { f2_sq = d2; }
+  }
+  if (fx0_2 + fy0_2 < f2_sq) {
+    let hn = (ipx_m1 ^ cym1Term ^ sTerm) | 0;
+    hn ^= hn >>> 16; hn = Math.imul(hn, 0x85ebca6b); hn ^= hn >>> 13; hn = Math.imul(hn, 0xc2b2ae35); hn ^= hn >>> 16;
+    const dx = -1.0 + (hn & 0xfff) * INV_4095 - fx;
+    const dy = -1.0 + ((hn >>> 12) & 0xfff) * INV_4095 - fy;
+    const d2 = dx * dx + dy * dy;
+    if (d2 < f1_sq) { f2_sq = f1_sq; f1_sq = d2; } else if (d2 < f2_sq) { f2_sq = d2; }
+  }
+
   return Math.sqrt(f2_sq) - Math.sqrt(f1_sq);
 }
 
@@ -327,37 +449,108 @@ export function domainWarp(
 
 export function anomalyE(x: number, y: number, seed: number): number {
   const ax = x * (1.0 / ANOMALY.cell), ay = y * (1.0 / ANOMALY.cell);
-  const ipx = Math.floor(ax), ipy = Math.floor(ay);
+  const ipx = Math.floor(ax) | 0, ipy = Math.floor(ay) | 0;
   const fx = ax - ipx, fy = ay - ipy;
   const sTerm = Math.imul((seed + 400) | 0, 0x9e3779b9);
-  const cx0 = ipx | 0, cy0 = ipy | 0;
-  const h0 = hashU((cx0 ^ Math.imul(cy0, 0x27d4eb2f) ^ sTerm) | 0);
-  const px0 = (h0 & 0xfff) / 4095.0;
-  const py0 = ((h0 >>> 12) & 0xfff) / 4095.0;
+
+  // Cell (0, 0)
+  const cy0Term = Math.imul(ipy, 0x27d4eb2f);
+  let h0 = (ipx ^ cy0Term ^ sTerm) | 0;
+  h0 ^= h0 >>> 16; h0 = Math.imul(h0, 0x85ebca6b); h0 ^= h0 >>> 13; h0 = Math.imul(h0, 0xc2b2ae35); h0 ^= h0 >>> 16;
+  const px0 = (h0 & 0xfff) * INV_4095;
+  const py0 = ((h0 >>> 12) & 0xfff) * INV_4095;
   const dx0 = px0 - fx, dy0 = py0 - fy;
   let f1_sq = dx0 * dx0 + dy0 * dy0;
-  let bcx = cx0 + px0, bcy = cy0 + py0;
-  let btype = (h0 >>> 24) / 255.0;
+  let bcx = ipx + px0, bcy = ipy + py0;
+  let btype = (h0 >>> 24) * INV_255;
 
-  for (let k = 1; k < 9; k++) {
-    const i = CELL_I[k], j = CELL_J[k];
-    const minDx = i === 1 ? (1.0 - fx) : (i === -1 ? fx : 0.0);
-    const minDy = j === 1 ? (1.0 - fy) : (j === -1 ? fy : 0.0);
-    if (minDx * minDx + minDy * minDy >= f1_sq) continue;
+  const fx0_2 = fx * fx;
+  const fx1 = 1.0 - fx;
+  const fx1_2 = fx1 * fx1;
+  const fy0_2 = fy * fy;
+  const fy1 = 1.0 - fy;
+  const fy1_2 = fy1 * fy1;
 
-    const cx = (ipx + i) | 0, cy = (ipy + j) | 0;
-    const h = hashU((cx ^ Math.imul(cy, 0x27d4eb2f) ^ sTerm) | 0);
-    const px = (h & 0xfff) / 4095.0;
-    const py = ((h >>> 12) & 0xfff) / 4095.0;
-    const dx = i + px - fx;
-    const dy = j + py - fy;
+  const ipx_p1 = (ipx + 1) | 0;
+  const ipx_m1 = (ipx - 1) | 0;
+  const ipy_p1 = (ipy + 1) | 0;
+  const ipy_m1 = (ipy - 1) | 0;
+  const cyp1Term = Math.imul(ipy_p1, 0x27d4eb2f);
+  const cym1Term = Math.imul(ipy_m1, 0x27d4eb2f);
+
+  if (fx1_2 < f1_sq) {
+    let hn = (ipx_p1 ^ cy0Term ^ sTerm) | 0;
+    hn ^= hn >>> 16; hn = Math.imul(hn, 0x85ebca6b); hn ^= hn >>> 13; hn = Math.imul(hn, 0xc2b2ae35); hn ^= hn >>> 16;
+    const px = (hn & 0xfff) * INV_4095;
+    const py = ((hn >>> 12) & 0xfff) * INV_4095;
+    const dx = 1.0 + px - fx, dy = py - fy;
     const d2 = dx * dx + dy * dy;
-    if (d2 < f1_sq) {
-      f1_sq = d2;
-      bcx = cx + px; bcy = cy + py;
-      btype = (h >>> 24) / 255.0;
-    }
+    if (d2 < f1_sq) { f1_sq = d2; bcx = ipx_p1 + px; bcy = ipy + py; btype = (hn >>> 24) * INV_255; }
   }
+  if (fy1_2 < f1_sq) {
+    let hn = (ipx ^ cyp1Term ^ sTerm) | 0;
+    hn ^= hn >>> 16; hn = Math.imul(hn, 0x85ebca6b); hn ^= hn >>> 13; hn = Math.imul(hn, 0xc2b2ae35); hn ^= hn >>> 16;
+    const px = (hn & 0xfff) * INV_4095;
+    const py = ((hn >>> 12) & 0xfff) * INV_4095;
+    const dx = px - fx, dy = 1.0 + py - fy;
+    const d2 = dx * dx + dy * dy;
+    if (d2 < f1_sq) { f1_sq = d2; bcx = ipx + px; bcy = ipy_p1 + py; btype = (hn >>> 24) * INV_255; }
+  }
+  if (fx0_2 < f1_sq) {
+    let hn = (ipx_m1 ^ cy0Term ^ sTerm) | 0;
+    hn ^= hn >>> 16; hn = Math.imul(hn, 0x85ebca6b); hn ^= hn >>> 13; hn = Math.imul(hn, 0xc2b2ae35); hn ^= hn >>> 16;
+    const px = (hn & 0xfff) * INV_4095;
+    const py = ((hn >>> 12) & 0xfff) * INV_4095;
+    const dx = -1.0 + px - fx, dy = py - fy;
+    const d2 = dx * dx + dy * dy;
+    if (d2 < f1_sq) { f1_sq = d2; bcx = ipx_m1 + px; bcy = ipy + py; btype = (hn >>> 24) * INV_255; }
+  }
+  if (fy0_2 < f1_sq) {
+    let hn = (ipx ^ cym1Term ^ sTerm) | 0;
+    hn ^= hn >>> 16; hn = Math.imul(hn, 0x85ebca6b); hn ^= hn >>> 13; hn = Math.imul(hn, 0xc2b2ae35); hn ^= hn >>> 16;
+    const px = (hn & 0xfff) * INV_4095;
+    const py = ((hn >>> 12) & 0xfff) * INV_4095;
+    const dx = px - fx, dy = -1.0 + py - fy;
+    const d2 = dx * dx + dy * dy;
+    if (d2 < f1_sq) { f1_sq = d2; bcx = ipx + px; bcy = ipy_m1 + py; btype = (hn >>> 24) * INV_255; }
+  }
+  if (fx1_2 + fy1_2 < f1_sq) {
+    let hn = (ipx_p1 ^ cyp1Term ^ sTerm) | 0;
+    hn ^= hn >>> 16; hn = Math.imul(hn, 0x85ebca6b); hn ^= hn >>> 13; hn = Math.imul(hn, 0xc2b2ae35); hn ^= hn >>> 16;
+    const px = (hn & 0xfff) * INV_4095;
+    const py = ((hn >>> 12) & 0xfff) * INV_4095;
+    const dx = 1.0 + px - fx, dy = 1.0 + py - fy;
+    const d2 = dx * dx + dy * dy;
+    if (d2 < f1_sq) { f1_sq = d2; bcx = ipx_p1 + px; bcy = ipy_p1 + py; btype = (hn >>> 24) * INV_255; }
+  }
+  if (fx0_2 + fy1_2 < f1_sq) {
+    let hn = (ipx_m1 ^ cyp1Term ^ sTerm) | 0;
+    hn ^= hn >>> 16; hn = Math.imul(hn, 0x85ebca6b); hn ^= hn >>> 13; hn = Math.imul(hn, 0xc2b2ae35); hn ^= hn >>> 16;
+    const px = (hn & 0xfff) * INV_4095;
+    const py = ((hn >>> 12) & 0xfff) * INV_4095;
+    const dx = -1.0 + px - fx, dy = 1.0 + py - fy;
+    const d2 = dx * dx + dy * dy;
+    if (d2 < f1_sq) { f1_sq = d2; bcx = ipx_m1 + px; bcy = ipy_p1 + py; btype = (hn >>> 24) * INV_255; }
+  }
+  if (fx1_2 + fy0_2 < f1_sq) {
+    let hn = (ipx_p1 ^ cym1Term ^ sTerm) | 0;
+    hn ^= hn >>> 16; hn = Math.imul(hn, 0x85ebca6b); hn ^= hn >>> 13; hn = Math.imul(hn, 0xc2b2ae35); hn ^= hn >>> 16;
+    const px = (hn & 0xfff) * INV_4095;
+    const py = ((hn >>> 12) & 0xfff) * INV_4095;
+    const dx = 1.0 + px - fx, dy = -1.0 + py - fy;
+    const d2 = dx * dx + dy * dy;
+    if (d2 < f1_sq) { f1_sq = d2; bcx = ipx_p1 + px; bcy = ipy_m1 + py; btype = (hn >>> 24) * INV_255; }
+  }
+  if (fx0_2 + fy0_2 < f1_sq) {
+    let hn = (ipx_m1 ^ cym1Term ^ sTerm) | 0;
+    hn ^= hn >>> 16; hn = Math.imul(hn, 0x85ebca6b); hn ^= hn >>> 13; hn = Math.imul(hn, 0xc2b2ae35); hn ^= hn >>> 16;
+    const px = (hn & 0xfff) * INV_4095;
+    const py = ((hn >>> 12) & 0xfff) * INV_4095;
+    const dx = -1.0 + px - fx, dy = -1.0 + py - fy;
+    const d2 = dx * dx + dy * dy;
+    if (d2 < f1_sq) { f1_sq = d2; bcx = ipx_m1 + px; bcy = ipy_m1 + py; btype = (hn >>> 24) * INV_255; }
+  }
+
   if (btype >= ANOMALY.probability) return 0.0;
   const cx = bcx * ANOMALY.cell;
   const cy = bcy * ANOMALY.cell;
@@ -395,26 +588,109 @@ function evalRegionInternal(x: number, y: number, seed: number): void {
   let btype = 0;
   const sTerm = Math.imul((seed + 900) | 0, 0x9e3779b9);
 
-  for (let k = 0; k < 9; k++) {
-    const i = CELL_I[k], j = CELL_J[k];
-    const minDx = i === 1 ? (1.0 - fx) : (i === -1 ? fx : 0.0);
-    const minDy = j === 1 ? (1.0 - fy) : (j === -1 ? fy : 0.0);
-    if (minDx * minDx + minDy * minDy >= f2_sq) continue;
+  // Center (0, 0)
+  const cyTerm = Math.imul(ipy | 0, 0x27d4eb2f);
+  let h0 = (ipx ^ cyTerm ^ sTerm) | 0;
+  h0 ^= h0 >>> 16; h0 = Math.imul(h0, 0x85ebca6b); h0 ^= h0 >>> 13; h0 = Math.imul(h0, 0xc2b2ae35); h0 ^= h0 >>> 16;
+  const px0 = (h0 & 0xfff) * INV_4095;
+  const py0 = ((h0 >>> 12) & 0xfff) * INV_4095;
+  const dx0 = px0 - fx, dy0 = py0 - fy;
+  f1_sq = dx0 * dx0 + dy0 * dy0;
+  btype = (h0 >>> 24) * INV_255;
 
-    const cx = (ipx + i) | 0, cy = (ipy + j) | 0;
-    const h = hashU((cx ^ Math.imul(cy, 0x27d4eb2f) ^ sTerm) | 0);
-    const px = (h & 0xfff) / 4095.0;
-    const py = ((h >>> 12) & 0xfff) / 4095.0;
-    const dx = i + px - fx;
-    const dy = j + py - fy;
+  const fx0_2 = fx * fx;
+  const fx1_2 = (1.0 - fx) * (1.0 - fx);
+  const fy0_2 = fy * fy;
+  const fy1_2 = (1.0 - fy) * (1.0 - fy);
+
+  const ipx_p1 = (ipx + 1) | 0;
+  const ipx_m1 = (ipx - 1) | 0;
+  const ipy_p1 = (ipy + 1) | 0;
+  const ipy_m1 = (ipy - 1) | 0;
+  const cyp1Term = Math.imul(ipy_p1, 0x27d4eb2f);
+  const cym1Term = Math.imul(ipy_m1, 0x27d4eb2f);
+
+  // (+1, 0)
+  if (fx1_2 < f2_sq) {
+    let hn = (ipx_p1 ^ cyTerm ^ sTerm) | 0;
+    hn ^= hn >>> 16; hn = Math.imul(hn, 0x85ebca6b); hn ^= hn >>> 13; hn = Math.imul(hn, 0xc2b2ae35); hn ^= hn >>> 16;
+    const px = (hn & 0xfff) * INV_4095;
+    const py = ((hn >>> 12) & 0xfff) * INV_4095;
+    const dx = 1.0 + px - fx, dy = py - fy;
     const d2 = dx * dx + dy * dy;
-    if (d2 < f1_sq) {
-      f2_sq = f1_sq; f1_sq = d2;
-      btype = (h >>> 24) / 255.0;
-    } else if (d2 < f2_sq) {
-      f2_sq = d2;
-    }
+    if (d2 < f1_sq) { f2_sq = f1_sq; f1_sq = d2; btype = (hn >>> 24) * INV_255; } else if (d2 < f2_sq) { f2_sq = d2; }
   }
+  // (0, +1)
+  if (fy1_2 < f2_sq) {
+    let hn = (ipx ^ cyp1Term ^ sTerm) | 0;
+    hn ^= hn >>> 16; hn = Math.imul(hn, 0x85ebca6b); hn ^= hn >>> 13; hn = Math.imul(hn, 0xc2b2ae35); hn ^= hn >>> 16;
+    const px = (hn & 0xfff) * INV_4095;
+    const py = ((hn >>> 12) & 0xfff) * INV_4095;
+    const dx = px - fx, dy = 1.0 + py - fy;
+    const d2 = dx * dx + dy * dy;
+    if (d2 < f1_sq) { f2_sq = f1_sq; f1_sq = d2; btype = (hn >>> 24) * INV_255; } else if (d2 < f2_sq) { f2_sq = d2; }
+  }
+  // (-1, 0)
+  if (fx0_2 < f2_sq) {
+    let hn = (ipx_m1 ^ cyTerm ^ sTerm) | 0;
+    hn ^= hn >>> 16; hn = Math.imul(hn, 0x85ebca6b); hn ^= hn >>> 13; hn = Math.imul(hn, 0xc2b2ae35); hn ^= hn >>> 16;
+    const px = (hn & 0xfff) * INV_4095;
+    const py = ((hn >>> 12) & 0xfff) * INV_4095;
+    const dx = -1.0 + px - fx, dy = py - fy;
+    const d2 = dx * dx + dy * dy;
+    if (d2 < f1_sq) { f2_sq = f1_sq; f1_sq = d2; btype = (hn >>> 24) * INV_255; } else if (d2 < f2_sq) { f2_sq = d2; }
+  }
+  // (0, -1)
+  if (fy0_2 < f2_sq) {
+    let hn = (ipx ^ cym1Term ^ sTerm) | 0;
+    hn ^= hn >>> 16; hn = Math.imul(hn, 0x85ebca6b); hn ^= hn >>> 13; hn = Math.imul(hn, 0xc2b2ae35); hn ^= hn >>> 16;
+    const px = (hn & 0xfff) * INV_4095;
+    const py = ((hn >>> 12) & 0xfff) * INV_4095;
+    const dx = px - fx, dy = -1.0 + py - fy;
+    const d2 = dx * dx + dy * dy;
+    if (d2 < f1_sq) { f2_sq = f1_sq; f1_sq = d2; btype = (hn >>> 24) * INV_255; } else if (d2 < f2_sq) { f2_sq = d2; }
+  }
+  // (+1, +1)
+  if (fx1_2 + fy1_2 < f2_sq) {
+    let hn = (ipx_p1 ^ cyp1Term ^ sTerm) | 0;
+    hn ^= hn >>> 16; hn = Math.imul(hn, 0x85ebca6b); hn ^= hn >>> 13; hn = Math.imul(hn, 0xc2b2ae35); hn ^= hn >>> 16;
+    const px = (hn & 0xfff) * INV_4095;
+    const py = ((hn >>> 12) & 0xfff) * INV_4095;
+    const dx = 1.0 + px - fx, dy = 1.0 + py - fy;
+    const d2 = dx * dx + dy * dy;
+    if (d2 < f1_sq) { f2_sq = f1_sq; f1_sq = d2; btype = (hn >>> 24) * INV_255; } else if (d2 < f2_sq) { f2_sq = d2; }
+  }
+  // (-1, +1)
+  if (fx0_2 + fy1_2 < f2_sq) {
+    let hn = (ipx_m1 ^ cyp1Term ^ sTerm) | 0;
+    hn ^= hn >>> 16; hn = Math.imul(hn, 0x85ebca6b); hn ^= hn >>> 13; hn = Math.imul(hn, 0xc2b2ae35); hn ^= hn >>> 16;
+    const px = (hn & 0xfff) * INV_4095;
+    const py = ((hn >>> 12) & 0xfff) * INV_4095;
+    const dx = -1.0 + px - fx, dy = 1.0 + py - fy;
+    const d2 = dx * dx + dy * dy;
+    if (d2 < f1_sq) { f2_sq = f1_sq; f1_sq = d2; btype = (hn >>> 24) * INV_255; } else if (d2 < f2_sq) { f2_sq = d2; }
+  }
+  // (+1, -1)
+  if (fx1_2 + fy0_2 < f2_sq) {
+    let hn = (ipx_p1 ^ cym1Term ^ sTerm) | 0;
+    hn ^= hn >>> 16; hn = Math.imul(hn, 0x85ebca6b); hn ^= hn >>> 13; hn = Math.imul(hn, 0xc2b2ae35); hn ^= hn >>> 16;
+    const px = (hn & 0xfff) * INV_4095;
+    const py = ((hn >>> 12) & 0xfff) * INV_4095;
+    const dx = 1.0 + px - fx, dy = -1.0 + py - fy;
+    const d2 = dx * dx + dy * dy;
+    if (d2 < f1_sq) { f2_sq = f1_sq; f1_sq = d2; btype = (hn >>> 24) * INV_255; } else if (d2 < f2_sq) { f2_sq = d2; }
+  }
+  // (-1, -1)
+  if (fx0_2 + fy0_2 < f2_sq) {
+    let hn = (ipx_m1 ^ cym1Term ^ sTerm) | 0;
+    hn ^= hn >>> 16; hn = Math.imul(hn, 0x85ebca6b); hn ^= hn >>> 13; hn = Math.imul(hn, 0xc2b2ae35); hn ^= hn >>> 16;
+    const px = (hn & 0xfff) * INV_4095;
+    const py = ((hn >>> 12) & 0xfff) * INV_4095;
+    const dx = -1.0 + px - fx, dy = -1.0 + py - fy;
+    const d2 = dx * dx + dy * dy;
+    if (d2 < f1_sq) { f2_sq = f1_sq; f1_sq = d2; btype = (hn >>> 24) * INV_255; } else if (d2 < f2_sq) { f2_sq = d2; }
+  }
+
   const edge = Math.sqrt(f2_sq) - Math.sqrt(f1_sq);
   _wRegion = smoothstep(REGION.blendLo, REGION.blendHi, edge);
   _mountFactor = btype < 0.33 ? REGION.hillsFactor
