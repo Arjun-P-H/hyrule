@@ -166,7 +166,11 @@ export function useTerrainEngine({
         /* renderer info unavailable — assume hardware */
       }
 
-      const auto = { scale: software ? 0.25 : 1.0, at: 0 };
+      const auto = {
+        scale: software ? 0.25 : 1.0,
+        lastDownscaleAt: 0,
+        lastUpscaleAt: 0,
+      };
 
       vs = compileShader(gl, gl.VERTEX_SHADER, TERRAIN_VS);
       fs = compileShader(gl, gl.FRAGMENT_SHADER, minifyGlsl(TERRAIN_FS));
@@ -361,7 +365,7 @@ export function useTerrainEngine({
 
       const applySize = () => {
         if (!gl || !canvas) return;
-        const p = PRESET_MAP[presetRef.current] ?? PRESET_MAP.med;
+        const p = PRESET_MAP[software ? 'low' : (presetRef.current ?? 'med')] ?? PRESET_MAP.med;
         const dpr = software ? 1 : Math.min(window.devicePixelRatio || 1, 2);
         const s = p.resScale * auto.scale;
         const w = Math.max(2, Math.round(canvas.clientWidth * dpr * s));
@@ -423,7 +427,7 @@ export function useTerrainEngine({
         }
 
         const s = seedRef.current;
-        const p = PRESET_MAP[presetRef.current] ?? PRESET_MAP.med;
+        const p = PRESET_MAP[software ? 'low' : (presetRef.current ?? 'med')] ?? PRESET_MAP.med;
 
         // Locomotion update via zero-allocation bitmask
         const fwdKey = ((keyMask & (KEY_W | KEY_UP)) ? 1 : 0) - ((keyMask & (KEY_S | KEY_DOWN)) ? 1 : 0);
@@ -581,11 +585,28 @@ export function useTerrainEngine({
         lastRender = now;
         fpsEma += (1 / Math.max(rdt, 1e-4) - fpsEma) * 0.1;
 
-        if (now - t0 > 2000 && now - auto.at > 1500 && fpsEma < 14 && auto.scale > 0.07) {
-          auto.scale *= 0.5;
-          auto.at = now;
-          fpsEma = 30;
-          applySize();
+        // Dynamic Resolution Scaling (DRS) with deadband and hysteresis (§28)
+        // Deadband: [22, 45] FPS — no adjustments to prevent thrashing
+        const minScale = software ? 0.15 : 0.35;
+        if (now - t0 > 2500) {
+          // Downscale check: sustained drop below 22 FPS, minimum 1500 ms dwell
+          if (fpsEma < 22 && now - auto.lastDownscaleAt > 1500 && auto.scale > minScale) {
+            auto.scale = Math.max(minScale, auto.scale * 0.85);
+            auto.lastDownscaleAt = now;
+            auto.lastUpscaleAt = now; // reset upscale timer to enforce asymmetric dwell
+            applySize();
+          }
+          // Upscale recovery: sustained head-room > 45 FPS, minimum 4000 ms dwell
+          else if (
+            fpsEma > 45 &&
+            now - auto.lastUpscaleAt > 4000 &&
+            now - auto.lastDownscaleAt > 5000 &&
+            auto.scale < (software ? 0.25 : 1.0)
+          ) {
+            auto.scale = Math.min(software ? 0.25 : 1.0, auto.scale * 1.15);
+            auto.lastUpscaleAt = now;
+            applySize();
+          }
         }
 
         emitStats();
