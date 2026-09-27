@@ -793,12 +793,17 @@ export function elevation(x: number, z: number, seed: number, dp: number): numbe
 
 /** Central-difference gradient at the pixel-footprint scale (spec §17). */
 export function gradient(
-  x: number, z: number, seed: number, eps: number,
+  x: number, z: number, seed: number, eps: number, out?: [number, number],
 ): [number, number] {
   const e = Math.max(eps, 0.05);
   const inv2e = 0.5 / e;
   const gx = (elevation(x + e, z, seed, 0) - elevation(x - e, z, seed, 0)) * inv2e;
   const gz = (elevation(x, z + e, seed, 0) - elevation(x, z - e, seed, 0)) * inv2e;
+  if (out) {
+    out[0] = gx;
+    out[1] = gz;
+    return out;
+  }
   return [gx, gz];
 }
 
@@ -1048,8 +1053,10 @@ export function updatePlayer(
   if (s.grounded) {
     const gx = (elevation(s.x + 0.25, s.z, seed, 0) - elevation(s.x - 0.25, s.z, seed, 0)) * 2.0;
     const gz = (elevation(s.x, s.z + 0.25, seed, 0) - elevation(s.x, s.z - 0.25, seed, 0)) * 2.0;
-    const m = Math.sqrt(gx * gx + gz * gz);
-    if (m > PLAYER.slopeMax) {
+    const mSq = gx * gx + gz * gz;
+    const slopeMaxSq = PLAYER.slopeMax * PLAYER.slopeMax;
+    if (mSq > slopeMaxSq) {
+      const m = Math.sqrt(mSq);
       const inv = 1 / m;
       const factor = inv * (m - PLAYER.slopeMax) * PLAYER.slideAccel * dt;
       s.vx -= gx * factor;

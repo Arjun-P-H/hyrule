@@ -601,6 +601,47 @@ describe('16. Physics Determinism (§IV.L.1.e)', () => {
     expect(run1.vz).toBe(run2.vz);
     expect(run1.grounded).toBe(run2.grounded);
   });
+
+  it('10,000-step physics simulation produces bit-for-bit deterministic final state across two runs', () => {
+    const runSimulation = () => {
+      const p: PlayerState = {
+        x: SPAWN.x,
+        y: 400.0,
+        z: SPAWN.z,
+        vx: 1.0,
+        vy: 0.0,
+        vz: 2.0,
+        grounded: false,
+      };
+
+      for (let step = 0; step < 10000; step++) {
+        updatePlayer(
+          p,
+          {
+            forward: (step % 120 < 60) ? 1.0 : -0.5,
+            strafe: (step % 80 < 40) ? 0.5 : -0.5,
+            jump: (step % 50 === 0),
+            sprint: (step % 200 < 100),
+            yaw: (step * 0.01) % (2 * Math.PI),
+          },
+          0.016666666666666666, // 60 Hz dt
+          DEFAULT_SEED,
+        );
+      }
+      return p;
+    };
+
+    const run1 = runSimulation();
+    const run2 = runSimulation();
+
+    expect(run1.x).toBe(run2.x);
+    expect(run1.y).toBe(run2.y);
+    expect(run1.z).toBe(run2.z);
+    expect(run1.vx).toBe(run2.vx);
+    expect(run1.vy).toBe(run2.vy);
+    expect(run1.vz).toBe(run2.vz);
+    expect(run1.grounded).toBe(run2.grounded);
+  });
 });
 
 describe('17. Performance Benchmark Thresholds (§VII Benchmark Standard)', () => {
