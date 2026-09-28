@@ -7,7 +7,18 @@
  * 3. Cellular River Valley & Water Shoreline (x=-2000, z=-1700)
  * 4. Zonai Anomaly Ruins & Terrace Spire (x=-3300, z=3900)
  * 5. Arid Desert Dunes (x=6500, z=6000)
+ *
+ * The Catmull-Rom interpolation of the keyframe heights alone passes up to
+ * 400 m *below* the terrain between keyframes (28 of 60 samples in the
+ * original harness), which renders a cheap "inside the ground" frame and
+ * skews every percentile. `generateCameraPath` lifts each sample to at least
+ * `clearance` metres above the highest terrain within ±`probe` metres, using
+ * the CPU twin. The result is frozen to bench/baseline/camera_path.json so the
+ * path stays fixed even if the math core changes.
  */
+
+import { elevation } from '../src/lib/terrainMath';
+import { DEFAULT_SEED } from '../src/lib/constants';
 
 export interface SplineKeyframe {
   x: number;
@@ -64,25 +75,31 @@ export function sampleSpline(progress: number): { x: number; y: number; z: numbe
   };
 }
 
-export function generateSplineFrames(totalFrames = 120): Array<{
+export type CameraFrame = {
   frame: number;
   x: number;
   y: number;
   z: number;
   yaw: number;
   pitch: number;
-}> {
-  const frames: Array<{
-    frame: number;
-    x: number;
-    y: number;
-    z: number;
-    yaw: number;
-    pitch: number;
-  }> = [];
+  /** Nearest keyframe label, for per-scene reporting. */
+  scene: string;
+};
+
+export function generateCameraPath(totalFrames = 60, clearance = 20, probe = 12): CameraFrame[] {
+  const n = CAMERA_SPLINE_KEYFRAMES.length - 1;
+  const frames: CameraFrame[] = [];
   for (let i = 0; i < totalFrames; i++) {
     const progress = i / (totalFrames - 1);
-    frames.push({ frame: i, ...sampleSpline(progress) });
+    const s = sampleSpline(progress);
+    let ground = -Infinity;
+    for (let dx = -probe; dx <= probe; dx += probe) {
+      for (let dz = -probe; dz <= probe; dz += probe) {
+        ground = Math.max(ground, elevation(s.x + dx, s.z + dz, DEFAULT_SEED, 0));
+      }
+    }
+    const scene = CAMERA_SPLINE_KEYFRAMES[Math.min(n, Math.round(progress * n))].label;
+    frames.push({ frame: i, ...s, y: Math.max(s.y, ground + clearance), scene });
   }
   return frames;
 }

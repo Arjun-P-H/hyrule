@@ -1,1 +1,34 @@
-null
+{
+ "capturedAt": "2026-09-28T15:33:30.277Z",
+ "rev": "b91e7c6",
+ "route": "/game",
+ "preset": "med",
+ "tool": "SpectorJS (node_modules/spectorjs) injected via CDP into the production build",
+ "capture": {
+  "spectorVersion": "n/a",
+  "commandCount": 12,
+  "drawCalls": 1,
+  "drawCommands": [
+   "drawArrays(4,0,3)"
+  ],
+  "commandHistogram": {
+   "clientWaitSync": 1,
+   "uniform1f": 1,
+   "uniform3f": 1,
+   "getQueryParameter": 2,
+   "deleteQuery": 1,
+   "createQuery": 1,
+   "beginQuery": 1,
+   "endQuery": 1,
+   "drawArrays": 1,
+   "deleteSync": 1,
+   "fenceSync": 1
+  },
+  "texturesCreated": 0,
+  "buffersCreated": 0,
+  "uniformCalls": 2,
+  "contextVersion": 2,
+  "extensionsEnabled": 14,
+  "frameDurationMs": 69.29999995231628
+ }
+}

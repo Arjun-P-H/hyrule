@@ -53,3 +53,5 @@ server.log
 # Skills directory
 /skills/
 .agents
+# benchmark run outputs (reports, frames, caches) — baselines live in bench/baseline/
+/bench/out/
