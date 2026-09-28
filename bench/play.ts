@@ -45,7 +45,7 @@ export type PlayResult = {
   /** usedSize delta / s; only meaningful when no GC ran (Chrome also collects on idle), else null. */
   heapBytesPerSec: number | null;
   allocByScript: Array<{ script: string; bytesPerSec: number; share: number }>;
-  canvas: { first: [number, number]; last: [number, number]; minW: number; maxW: number; changes: number; reversals: number };
+  canvas: { first: [number, number]; last: [number, number]; minW: number; maxW: number; changes: number; reversals: number; timeline: Array<[number, number]> };
   gpuMs?: { n: number; p50: number; p95: number; mean: number };
   hudFps?: string;
   /** ms from navigation start: first contentful paint, DOM interactive, first engine draw */
@@ -177,6 +177,8 @@ export async function runPlaySession(baseUrl: string, opts: PlayOptions): Promis
     };
     visit(profile.head);
 
+    const timeline: Array<[number, number]> = [];
+    for (let i = 0; i < end.sizes.length; i += 3) if (end.sizes[i] >= start.t) timeline.push([Math.round(end.sizes[i] - start.t), end.sizes[i + 1]]);
     const sizes: Array<[number, number, number]> = [];
     for (let i = 0; i < end.sizes.length; i += 3) if (end.sizes[i] >= start.t) sizes.push([end.sizes[i], end.sizes[i + 1], end.sizes[i + 2]]);
     let changes = 0, reversals = 0, lastDir = 0;
@@ -201,6 +203,8 @@ export async function runPlaySession(baseUrl: string, opts: PlayOptions): Promis
         maxW: Math.max(...sizes.map((s) => s[1])),
         changes,
         reversals,
+        // [ms since window start, canvas width] at each width change
+        timeline: timeline.filter((x, i) => i === 0 || x[1] !== timeline[i - 1][1]),
       },
       hudFps: end.hud,
       load,
