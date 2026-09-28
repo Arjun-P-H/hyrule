@@ -168,31 +168,82 @@ const float WARP_FREQ[2]  = float[2](1.0, 2.0);
 const float WARP_AMP[2]   = float[2](1.0, 0.5);
 
 float fbm(float x, float y, int seed, int oct, float lac, float gain, float dp, float f0, float totalAsum) {
-  float sum = 0.0, wsum = 0.0;
   float k = 2.0 * f0 * dp;
   if (oct == 9 && lac == 2.0 && gain == 0.5) {
-    for (int i = 0; i < 9; i++) {
-      float freq = MACRO_FREQ[i];
-      float amp = MACRO_AMP[i];
-      float w = clamp(2.0 - freq * k, 0.0, 1.0);
-      if (w <= 0.0) break;
-      sum  += amp * w * vnoise(x * freq, y * freq, seed + i * 0x9e37);
-      wsum += amp * w;
+    if (k <= 0.0) {
+      return vnoise(x, y, seed)
+        + 0.5 * vnoise(x * 2.0, y * 2.0, seed + 40503)
+        + 0.25 * vnoise(x * 4.0, y * 4.0, seed + 81006)
+        + 0.125 * vnoise(x * 8.0, y * 8.0, seed + 121509)
+        + 0.0625 * vnoise(x * 16.0, y * 16.0, seed + 162012)
+        + 0.03125 * vnoise(x * 32.0, y * 32.0, seed + 202515)
+        + 0.015625 * vnoise(x * 64.0, y * 64.0, seed + 243018)
+        + 0.0078125 * vnoise(x * 128.0, y * 128.0, seed + 283521)
+        + 0.00390625 * vnoise(x * 256.0, y * 256.0, seed + 324024);
+    }
+    float w0 = clamp(2.0 - k, 0.0, 1.0);
+    if (w0 <= 0.0) return 0.0;
+    float sum = w0 * vnoise(x, y, seed);
+    float wsum = w0;
+
+    float w1 = clamp(2.0 - 2.0 * k, 0.0, 1.0);
+    if (w1 > 0.0) {
+      sum += 0.5 * w1 * vnoise(x * 2.0, y * 2.0, seed + 40503);
+      wsum += 0.5 * w1;
+      float w2 = clamp(2.0 - 4.0 * k, 0.0, 1.0);
+      if (w2 > 0.0) {
+        sum += 0.25 * w2 * vnoise(x * 4.0, y * 4.0, seed + 81006);
+        wsum += 0.25 * w2;
+        float w3 = clamp(2.0 - 8.0 * k, 0.0, 1.0);
+        if (w3 > 0.0) {
+          sum += 0.125 * w3 * vnoise(x * 8.0, y * 8.0, seed + 121509);
+          wsum += 0.125 * w3;
+          float w4 = clamp(2.0 - 16.0 * k, 0.0, 1.0);
+          if (w4 > 0.0) {
+            sum += 0.0625 * w4 * vnoise(x * 16.0, y * 16.0, seed + 162012);
+            wsum += 0.0625 * w4;
+            float w5 = clamp(2.0 - 32.0 * k, 0.0, 1.0);
+            if (w5 > 0.0) {
+              sum += 0.03125 * w5 * vnoise(x * 32.0, y * 32.0, seed + 202515);
+              wsum += 0.03125 * w5;
+              float w6 = clamp(2.0 - 64.0 * k, 0.0, 1.0);
+              if (w6 > 0.0) {
+                sum += 0.015625 * w6 * vnoise(x * 64.0, y * 64.0, seed + 243018);
+                wsum += 0.015625 * w6;
+                float w7 = clamp(2.0 - 128.0 * k, 0.0, 1.0);
+                if (w7 > 0.0) {
+                  sum += 0.0078125 * w7 * vnoise(x * 128.0, y * 128.0, seed + 283521);
+                  wsum += 0.0078125 * w7;
+                  float w8 = clamp(2.0 - 256.0 * k, 0.0, 1.0);
+                  if (w8 > 0.0) {
+                    sum += 0.00390625 * w8 * vnoise(x * 256.0, y * 256.0, seed + 324024);
+                    wsum += 0.00390625 * w8;
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
     }
     return sum * (totalAsum / max(wsum, 1e-6));
   }
   if (oct == 2 && lac == 2.0 && gain == 0.5) {
-    for (int i = 0; i < 2; i++) {
-      float freq = WARP_FREQ[i];
-      float amp = WARP_AMP[i];
-      float w = clamp(2.0 - freq * k, 0.0, 1.0);
-      if (w <= 0.0) break;
-      sum  += amp * w * vnoise(x * freq, y * freq, seed + i * 0x9e37);
-      wsum += amp * w;
+    if (k <= 0.0) {
+      return vnoise(x, y, seed) + 0.5 * vnoise(x * 2.0, y * 2.0, seed + 40503);
+    }
+    float w0 = clamp(2.0 - k, 0.0, 1.0);
+    if (w0 <= 0.0) return 0.0;
+    float sum = w0 * vnoise(x, y, seed);
+    float wsum = w0;
+    float w1 = clamp(2.0 - 2.0 * k, 0.0, 1.0);
+    if (w1 > 0.0) {
+      sum += 0.5 * w1 * vnoise(x * 2.0, y * 2.0, seed + 40503);
+      wsum += 0.5 * w1;
     }
     return sum * (totalAsum / max(wsum, 1e-6));
   }
-  float freq = 1.0, amp = 1.0;
+  float freq = 1.0, amp = 1.0, sum = 0.0, wsum = 0.0;
   for (int i = 0; i < 9; i++) {
     if (i >= oct) break;
     float w = clamp(2.0 - freq * k, 0.0, 1.0);
@@ -206,21 +257,52 @@ float fbm(float x, float y, int seed, int oct, float lac, float gain, float dp, 
 }
 
 float ridged(float x, float y, int seed, int oct, float lac, float gain, float dp, float f0, float totalAsum) {
-  float sum = 0.0, wsum = 0.0;
   float k = 4.0 * f0 * dp;
   if (oct == 5 && lac == 2.17 && gain == 0.48) {
-    for (int i = 0; i < 5; i++) {
-      float freq = RIDGE_FREQ[i];
-      float amp = RIDGE_AMP[i];
-      float w = clamp(2.0 - freq * k, 0.0, 1.0);
-      if (w <= 0.0) break;
-      float n = 1.0 - abs(vnoise(x * freq, y * freq, seed + i * 0x85eb));
-      sum  += amp * w * (n * n);
-      wsum += amp * w;
+    if (k <= 0.0) {
+      float n0 = 1.0 - abs(vnoise(x, y, seed));
+      float n1 = 1.0 - abs(vnoise(x * 2.17, y * 2.17, seed + 34283));
+      float n2 = 1.0 - abs(vnoise(x * 4.7089, y * 4.7089, seed + 68566));
+      float n3 = 1.0 - abs(vnoise(x * 10.218313, y * 10.218313, seed + 102849));
+      float n4 = 1.0 - abs(vnoise(x * 22.17373921, y * 22.17373921, seed + 137132));
+      return 0.5 * (n0 * n0) + 0.24 * (n1 * n1) + 0.1152 * (n2 * n2) + 0.055296 * (n3 * n3) + 0.02654208 * (n4 * n4);
+    }
+    float w0 = clamp(2.0 - k, 0.0, 1.0);
+    if (w0 <= 0.0) return 0.0;
+    float n0 = 1.0 - abs(vnoise(x, y, seed));
+    float sum = 0.5 * w0 * (n0 * n0);
+    float wsum = 0.5 * w0;
+
+    float w1 = clamp(2.0 - 2.17 * k, 0.0, 1.0);
+    if (w1 > 0.0) {
+      float n1 = 1.0 - abs(vnoise(x * 2.17, y * 2.17, seed + 34283));
+      sum += 0.24 * w1 * (n1 * n1);
+      wsum += 0.24 * w1;
+
+      float w2 = clamp(2.0 - 4.7089 * k, 0.0, 1.0);
+      if (w2 > 0.0) {
+        float n2 = 1.0 - abs(vnoise(x * 4.7089, y * 4.7089, seed + 68566));
+        sum += 0.1152 * w2 * (n2 * n2);
+        wsum += 0.1152 * w2;
+
+        float w3 = clamp(2.0 - 10.218313 * k, 0.0, 1.0);
+        if (w3 > 0.0) {
+          float n3 = 1.0 - abs(vnoise(x * 10.218313, y * 10.218313, seed + 102849));
+          sum += 0.055296 * w3 * (n3 * n3);
+          wsum += 0.055296 * w3;
+
+          float w4 = clamp(2.0 - 22.17373921 * k, 0.0, 1.0);
+          if (w4 > 0.0) {
+            float n4 = 1.0 - abs(vnoise(x * 22.17373921, y * 22.17373921, seed + 137132));
+            sum += 0.02654208 * w4 * (n4 * n4);
+            wsum += 0.02654208 * w4;
+          }
+        }
+      }
     }
     return sum * (totalAsum / max(wsum, 1e-6));
   }
-  float freq = 1.0, amp = 0.5;
+  float freq = 1.0, amp = 0.5, sum = 0.0, wsum = 0.0;
   for (int i = 0; i < 5; i++) {
     if (i >= oct) break;
     float w = clamp(2.0 - freq * k, 0.0, 1.0);
@@ -235,82 +317,71 @@ float ridged(float x, float y, int seed, int oct, float lac, float gain, float d
 }
 
 // ---------------------------------------------------------------------------
-// §7/§12/§13 — cellular (Worley) fields (orthogonal-first distance pruning)
+// §7/§12/§13 — cellular (Worley) fields: centre + 4 orthogonal neighbours hashed as one uvec4,
+// diagonals as a second uvec4 only when a corner could hold F1/F2
 // ---------------------------------------------------------------------------
 float voronoiEdge(vec2 p_in, int seed) {
   vec2 ip = floor(p_in);
   vec2 f = p_in - ip;
-  int cxi0 = int(ip.x);
-  int cyi0 = int(ip.y);
-  uint h0 = hash3(cxi0, cyi0, seed);
+  uint s_term = uint(seed) * 0x9e3779b9u;
+  uint cy_term = uint(int(ip.y)) * 0x27d4eb2fu;
+  uint row0  = cy_term ^ s_term;
+  uint rowP1 = (cy_term + 0x27d4eb2fu) ^ s_term;
+  uint rowM1 = (cy_term - 0x27d4eb2fu) ^ s_term;
+
+  uint cx0 = uint(int(ip.x));
+  uint cxP1 = cx0 + 1u;
+  uint cxM1 = cx0 - 1u;
+
+  // Center (0, 0)
+  uint h0 = hashU(cx0 ^ row0);
   vec2 p0 = vec2(float(h0 & 0xfffu), float((h0 >> 12u) & 0xfffu)) * (1.0 / 4095.0);
   vec2 d0 = p0 - f;
   float f1_sq = dot(d0, d0);
   float f2_sq = 64.0;
 
+  // 4 Orthogonal neighbors in a single uvec4: (+1, 0), (0, +1), (-1, 0), (0, -1)
+  uvec4 h_ortho = uvec4(cxP1 ^ row0, cx0 ^ rowP1, cxM1 ^ row0, cx0 ^ rowM1);
+  h_ortho ^= h_ortho >> 16u; h_ortho *= 0x85ebca6bu;
+  h_ortho ^= h_ortho >> 13u; h_ortho *= 0xc2b2ae35u;
+  h_ortho ^= h_ortho >> 16u;
+
+  vec4 px_o = vec4(h_ortho & 0xfffu) * (1.0 / 4095.0);
+  vec4 py_o = vec4((h_ortho >> 12u) & 0xfffu) * (1.0 / 4095.0);
+  vec4 dx_o = px_o - f.x + vec4(1.0, 0.0, -1.0, 0.0);
+  vec4 dy_o = py_o - f.y + vec4(0.0, 1.0, 0.0, -1.0);
+  vec4 d2_o = dx_o * dx_o + dy_o * dy_o;
+
+  for (int k = 0; k < 4; k++) {
+    float d2 = d2_o[k];
+    if (d2 < f1_sq) { f2_sq = f1_sq; f1_sq = d2; }
+    else if (d2 < f2_sq) { f2_sq = d2; }
+  }
+
+  // 4 Diagonals: (+1, +1), (-1, +1), (+1, -1), (-1, -1)
   float fx0_2 = f.x * f.x;
   float fx1_2 = (1.0 - f.x) * (1.0 - f.x);
   float fy0_2 = f.y * f.y;
   float fy1_2 = (1.0 - f.y) * (1.0 - f.y);
+  float minDiag = min(min(fx1_2 + fy1_2, fx0_2 + fy1_2), min(fx1_2 + fy0_2, fx0_2 + fy0_2));
 
-  // 4 Orthogonal neighbors
-  if (fx1_2 < f2_sq) {
-    uint h = hash3(cxi0 + 1, cyi0, seed);
-    vec2 p = vec2(float(h & 0xfffu), float((h >> 12u) & 0xfffu)) * (1.0 / 4095.0);
-    vec2 d = vec2(1.0, 0.0) + p - f;
-    float d2 = dot(d, d);
-    if (d2 < f1_sq) { f2_sq = f1_sq; f1_sq = d2; } else if (d2 < f2_sq) { f2_sq = d2; }
-  }
-  if (fy1_2 < f2_sq) {
-    uint h = hash3(cxi0, cyi0 + 1, seed);
-    vec2 p = vec2(float(h & 0xfffu), float((h >> 12u) & 0xfffu)) * (1.0 / 4095.0);
-    vec2 d = vec2(0.0, 1.0) + p - f;
-    float d2 = dot(d, d);
-    if (d2 < f1_sq) { f2_sq = f1_sq; f1_sq = d2; } else if (d2 < f2_sq) { f2_sq = d2; }
-  }
-  if (fx0_2 < f2_sq) {
-    uint h = hash3(cxi0 - 1, cyi0, seed);
-    vec2 p = vec2(float(h & 0xfffu), float((h >> 12u) & 0xfffu)) * (1.0 / 4095.0);
-    vec2 d = vec2(-1.0, 0.0) + p - f;
-    float d2 = dot(d, d);
-    if (d2 < f1_sq) { f2_sq = f1_sq; f1_sq = d2; } else if (d2 < f2_sq) { f2_sq = d2; }
-  }
-  if (fy0_2 < f2_sq) {
-    uint h = hash3(cxi0, cyi0 - 1, seed);
-    vec2 p = vec2(float(h & 0xfffu), float((h >> 12u) & 0xfffu)) * (1.0 / 4095.0);
-    vec2 d = vec2(0.0, -1.0) + p - f;
-    float d2 = dot(d, d);
-    if (d2 < f1_sq) { f2_sq = f1_sq; f1_sq = d2; } else if (d2 < f2_sq) { f2_sq = d2; }
-  }
+  if (minDiag < f2_sq) {
+    uvec4 h_diag = uvec4(cxP1 ^ rowP1, cxM1 ^ rowP1, cxP1 ^ rowM1, cxM1 ^ rowM1);
+    h_diag ^= h_diag >> 16u; h_diag *= 0x85ebca6bu;
+    h_diag ^= h_diag >> 13u; h_diag *= 0xc2b2ae35u;
+    h_diag ^= h_diag >> 16u;
 
-  // 4 Diagonal corners
-  if (fx1_2 + fy1_2 < f2_sq) {
-    uint h = hash3(cxi0 + 1, cyi0 + 1, seed);
-    vec2 p = vec2(float(h & 0xfffu), float((h >> 12u) & 0xfffu)) * (1.0 / 4095.0);
-    vec2 d = vec2(1.0, 1.0) + p - f;
-    float d2 = dot(d, d);
-    if (d2 < f1_sq) { f2_sq = f1_sq; f1_sq = d2; } else if (d2 < f2_sq) { f2_sq = d2; }
-  }
-  if (fx0_2 + fy1_2 < f2_sq) {
-    uint h = hash3(cxi0 - 1, cyi0 + 1, seed);
-    vec2 p = vec2(float(h & 0xfffu), float((h >> 12u) & 0xfffu)) * (1.0 / 4095.0);
-    vec2 d = vec2(-1.0, 1.0) + p - f;
-    float d2 = dot(d, d);
-    if (d2 < f1_sq) { f2_sq = f1_sq; f1_sq = d2; } else if (d2 < f2_sq) { f2_sq = d2; }
-  }
-  if (fx1_2 + fy0_2 < f2_sq) {
-    uint h = hash3(cxi0 + 1, cyi0 - 1, seed);
-    vec2 p = vec2(float(h & 0xfffu), float((h >> 12u) & 0xfffu)) * (1.0 / 4095.0);
-    vec2 d = vec2(1.0, -1.0) + p - f;
-    float d2 = dot(d, d);
-    if (d2 < f1_sq) { f2_sq = f1_sq; f1_sq = d2; } else if (d2 < f2_sq) { f2_sq = d2; }
-  }
-  if (fx0_2 + fy0_2 < f2_sq) {
-    uint h = hash3(cxi0 - 1, cyi0 - 1, seed);
-    vec2 p = vec2(float(h & 0xfffu), float((h >> 12u) & 0xfffu)) * (1.0 / 4095.0);
-    vec2 d = vec2(-1.0, -1.0) + p - f;
-    float d2 = dot(d, d);
-    if (d2 < f1_sq) { f2_sq = f1_sq; f1_sq = d2; } else if (d2 < f2_sq) { f2_sq = d2; }
+    vec4 px_d = vec4(h_diag & 0xfffu) * (1.0 / 4095.0);
+    vec4 py_d = vec4((h_diag >> 12u) & 0xfffu) * (1.0 / 4095.0);
+    vec4 dx_d = px_d - f.x + vec4(1.0, -1.0, 1.0, -1.0);
+    vec4 dy_d = py_d - f.y + vec4(1.0, 1.0, -1.0, -1.0);
+    vec4 d2_d = dx_d * dx_d + dy_d * dy_d;
+
+    for (int k = 0; k < 4; k++) {
+      float d2 = d2_d[k];
+      if (d2 < f1_sq) { f2_sq = f1_sq; f1_sq = d2; }
+      else if (d2 < f2_sq) { f2_sq = d2; }
+    }
   }
 
   return sqrt(f2_sq) - sqrt(f1_sq);
@@ -342,82 +413,67 @@ float anomalyE(vec2 g, int seed) {
   vec2 bc = vec2(float(cxi0), float(cyi0)) + p0;
   float btype = float(h0 >> 24u) * (1.0 / 255.0);
 
-  float rOutCell = ANOM_R_OUT * (1.0 / ANOM_CELL);
-  float rOutCellSq = rOutCell * rOutCell;
-
-  // Cheap coarse rejection: if point is in cell interior (distance to all 4 borders >= rOutCell),
-  // no neighbor cell feature point can possibly fall within ANOM_R_OUT (620 m).
-  if (f.x >= rOutCell && f.x <= (1.0 - rOutCell) && f.y >= rOutCell && f.y <= (1.0 - rOutCell)) {
-    if (btype >= P_ANOM || f1_sq >= rOutCellSq) return 0.0;
-    vec2 c = bc * ANOM_CELL;
-    vec2 delta = g - c;
-    float r2 = dot(delta, delta);
-    float r = sqrt(r2);
-    float theta = atan(delta.y, delta.x);
-    float fall = 1.0 - smoothstep(ANOM_R_IN, ANOM_R_OUT, r);
-    float t = r * (1.0 / TERRACE_STEP);
-    float ft = fract(t);
-    float steps = (floor(t) + smoothstep(0.3, 0.7, ft)) * TERRACE_H;
-    float spire = SPIRE_H * exp(-r2 * (1.0 / (SPIRE_R * SPIRE_R)));
-    float spiral = SPIRAL_AMP * sin(SPIRAL_TURNS * theta + SPIRAL_RAD * r);
-    return fall * (steps + spire + spiral);
-  }
-
+  // A neighbour cell can only change the result if its border lies within
+  // ANOM_R_OUT (beyond it the anomaly is 0 whichever feature owns the point)
+  // and it could hold a nearer feature than the best so far. Pruning against
+  // min(F1², R_out²) visits ~1.5 of 8 neighbours on average, and subsumes the
+  // former cell-interior fast path. Mirrored in terrainMath.anomalyE.
+  const float R_OUT_CELL_SQ = (ANOM_R_OUT / ANOM_CELL) * (ANOM_R_OUT / ANOM_CELL);
   float fx0_2 = f.x * f.x;
   float fx1_2 = (1.0 - f.x) * (1.0 - f.x);
   float fy0_2 = f.y * f.y;
   float fy1_2 = (1.0 - f.y) * (1.0 - f.y);
 
-  if (fx1_2 < f1_sq) {
+  if (fx1_2 < f1_sq && fx1_2 < R_OUT_CELL_SQ) {
     uint h = hash3(cxi0 + 1, cyi0, seed + 400);
     vec2 p = vec2(float(h & 0xfffu), float((h >> 12u) & 0xfffu)) * (1.0 / 4095.0);
     vec2 d = vec2(1.0, 0.0) + p - f;
     float d2 = dot(d, d);
     if (d2 < f1_sq) { f1_sq = d2; bc = vec2(float(cxi0 + 1), float(cyi0)) + p; btype = float(h >> 24u) * (1.0 / 255.0); }
   }
-  if (fy1_2 < f1_sq) {
+  if (fy1_2 < f1_sq && fy1_2 < R_OUT_CELL_SQ) {
     uint h = hash3(cxi0, cyi0 + 1, seed + 400);
     vec2 p = vec2(float(h & 0xfffu), float((h >> 12u) & 0xfffu)) * (1.0 / 4095.0);
     vec2 d = vec2(0.0, 1.0) + p - f;
     float d2 = dot(d, d);
     if (d2 < f1_sq) { f1_sq = d2; bc = vec2(float(cxi0), float(cyi0 + 1)) + p; btype = float(h >> 24u) * (1.0 / 255.0); }
   }
-  if (fx0_2 < f1_sq) {
+  if (fx0_2 < f1_sq && fx0_2 < R_OUT_CELL_SQ) {
     uint h = hash3(cxi0 - 1, cyi0, seed + 400);
     vec2 p = vec2(float(h & 0xfffu), float((h >> 12u) & 0xfffu)) * (1.0 / 4095.0);
     vec2 d = vec2(-1.0, 0.0) + p - f;
     float d2 = dot(d, d);
     if (d2 < f1_sq) { f1_sq = d2; bc = vec2(float(cxi0 - 1), float(cyi0)) + p; btype = float(h >> 24u) * (1.0 / 255.0); }
   }
-  if (fy0_2 < f1_sq) {
+  if (fy0_2 < f1_sq && fy0_2 < R_OUT_CELL_SQ) {
     uint h = hash3(cxi0, cyi0 - 1, seed + 400);
     vec2 p = vec2(float(h & 0xfffu), float((h >> 12u) & 0xfffu)) * (1.0 / 4095.0);
     vec2 d = vec2(0.0, -1.0) + p - f;
     float d2 = dot(d, d);
     if (d2 < f1_sq) { f1_sq = d2; bc = vec2(float(cxi0), float(cyi0 - 1)) + p; btype = float(h >> 24u) * (1.0 / 255.0); }
   }
-  if (fx1_2 + fy1_2 < f1_sq) {
+  if (fx1_2 + fy1_2 < f1_sq && fx1_2 + fy1_2 < R_OUT_CELL_SQ) {
     uint h = hash3(cxi0 + 1, cyi0 + 1, seed + 400);
     vec2 p = vec2(float(h & 0xfffu), float((h >> 12u) & 0xfffu)) * (1.0 / 4095.0);
     vec2 d = vec2(1.0, 1.0) + p - f;
     float d2 = dot(d, d);
     if (d2 < f1_sq) { f1_sq = d2; bc = vec2(float(cxi0 + 1), float(cyi0 + 1)) + p; btype = float(h >> 24u) * (1.0 / 255.0); }
   }
-  if (fx0_2 + fy1_2 < f1_sq) {
+  if (fx0_2 + fy1_2 < f1_sq && fx0_2 + fy1_2 < R_OUT_CELL_SQ) {
     uint h = hash3(cxi0 - 1, cyi0 + 1, seed + 400);
     vec2 p = vec2(float(h & 0xfffu), float((h >> 12u) & 0xfffu)) * (1.0 / 4095.0);
     vec2 d = vec2(-1.0, 1.0) + p - f;
     float d2 = dot(d, d);
     if (d2 < f1_sq) { f1_sq = d2; bc = vec2(float(cxi0 - 1), float(cyi0 + 1)) + p; btype = float(h >> 24u) * (1.0 / 255.0); }
   }
-  if (fx1_2 + fy0_2 < f1_sq) {
+  if (fx1_2 + fy0_2 < f1_sq && fx1_2 + fy0_2 < R_OUT_CELL_SQ) {
     uint h = hash3(cxi0 + 1, cyi0 - 1, seed + 400);
     vec2 p = vec2(float(h & 0xfffu), float((h >> 12u) & 0xfffu)) * (1.0 / 4095.0);
     vec2 d = vec2(1.0, -1.0) + p - f;
     float d2 = dot(d, d);
     if (d2 < f1_sq) { f1_sq = d2; bc = vec2(float(cxi0 + 1), float(cyi0 - 1)) + p; btype = float(h >> 24u) * (1.0 / 255.0); }
   }
-  if (fx0_2 + fy0_2 < f1_sq) {
+  if (fx0_2 + fy0_2 < f1_sq && fx0_2 + fy0_2 < R_OUT_CELL_SQ) {
     uint h = hash3(cxi0 - 1, cyi0 - 1, seed + 400);
     vec2 p = vec2(float(h & 0xfffu), float((h >> 12u) & 0xfffu)) * (1.0 / 4095.0);
     vec2 d = vec2(-1.0, -1.0) + p - f;
@@ -452,73 +508,74 @@ Reg regionField(vec2 g, int seed) {
   vec2 f = p_in - ip;
   int cxi0 = int(ip.x);
   int cyi0 = int(ip.y);
-  uint h0 = hash3(cxi0, cyi0, seed + 900);
+  uint sTerm = uint(seed + 900) * 0x9e3779b9u;
+  uint cy_term = uint(cyi0) * 0x27d4eb2fu;
+  uint row0  = cy_term ^ sTerm;
+  uint rowP1 = (uint(cyi0 + 1) * 0x27d4eb2fu) ^ sTerm;
+  uint rowM1 = (uint(cyi0 - 1) * 0x27d4eb2fu) ^ sTerm;
+  uint cx0  = uint(cxi0);
+  uint cxP1 = uint(cxi0 + 1);
+  uint cxM1 = uint(cxi0 - 1);
+
+  uint h0 = hashU(cx0 ^ row0);
   vec2 p0 = vec2(float(h0 & 0xfffu), float((h0 >> 12u) & 0xfffu)) * (1.0 / 4095.0);
   vec2 d0 = p0 - f;
   float f1_sq = dot(d0, d0);
   float f2_sq = 64.0;
   float btype = float(h0 >> 24u) * (1.0 / 255.0);
 
+  // Vectorized 4 orthogonal neighbors: (+1, 0), (0, +1), (-1, 0), (0, -1)
+  uvec4 h_ortho = uvec4(cxP1 ^ row0, cx0 ^ rowP1, cxM1 ^ row0, cx0 ^ rowM1);
+  h_ortho ^= h_ortho >> 16u; h_ortho *= 0x85ebca6bu;
+  h_ortho ^= h_ortho >> 13u; h_ortho *= 0xc2b2ae35u;
+  h_ortho ^= h_ortho >> 16u;
+
+  vec4 px_o = vec4(h_ortho & 0xfffu) * (1.0 / 4095.0);
+  vec4 py_o = vec4((h_ortho >> 12u) & 0xfffu) * (1.0 / 4095.0);
+  vec4 dx_o = px_o - f.x + vec4(1.0, 0.0, -1.0, 0.0);
+  vec4 dy_o = py_o - f.y + vec4(0.0, 1.0, 0.0, -1.0);
+  vec4 d2_o = dx_o * dx_o + dy_o * dy_o;
+
+  for (int k = 0; k < 4; k++) {
+    float d2 = d2_o[k];
+    if (d2 < f1_sq) {
+      f2_sq = f1_sq;
+      f1_sq = d2;
+      btype = float(h_ortho[k] >> 24u) * (1.0 / 255.0);
+    } else if (d2 < f2_sq) {
+      f2_sq = d2;
+    }
+  }
+
+  // 4 Diagonals: (+1, +1), (-1, +1), (+1, -1), (-1, -1)
   float fx0_2 = f.x * f.x;
   float fx1_2 = (1.0 - f.x) * (1.0 - f.x);
   float fy0_2 = f.y * f.y;
   float fy1_2 = (1.0 - f.y) * (1.0 - f.y);
+  float minDiag = min(min(fx1_2 + fy1_2, fx0_2 + fy1_2), min(fx1_2 + fy0_2, fx0_2 + fy0_2));
 
-  if (fx1_2 < f2_sq) {
-    uint h = hash3(cxi0 + 1, cyi0, seed + 900);
-    vec2 p = vec2(float(h & 0xfffu), float((h >> 12u) & 0xfffu)) * (1.0 / 4095.0);
-    vec2 d = vec2(1.0, 0.0) + p - f;
-    float d2 = dot(d, d);
-    if (d2 < f1_sq) { f2_sq = f1_sq; f1_sq = d2; btype = float(h >> 24u) * (1.0 / 255.0); } else if (d2 < f2_sq) { f2_sq = d2; }
-  }
-  if (fy1_2 < f2_sq) {
-    uint h = hash3(cxi0, cyi0 + 1, seed + 900);
-    vec2 p = vec2(float(h & 0xfffu), float((h >> 12u) & 0xfffu)) * (1.0 / 4095.0);
-    vec2 d = vec2(0.0, 1.0) + p - f;
-    float d2 = dot(d, d);
-    if (d2 < f1_sq) { f2_sq = f1_sq; f1_sq = d2; btype = float(h >> 24u) * (1.0 / 255.0); } else if (d2 < f2_sq) { f2_sq = d2; }
-  }
-  if (fx0_2 < f2_sq) {
-    uint h = hash3(cxi0 - 1, cyi0, seed + 900);
-    vec2 p = vec2(float(h & 0xfffu), float((h >> 12u) & 0xfffu)) * (1.0 / 4095.0);
-    vec2 d = vec2(-1.0, 0.0) + p - f;
-    float d2 = dot(d, d);
-    if (d2 < f1_sq) { f2_sq = f1_sq; f1_sq = d2; btype = float(h >> 24u) * (1.0 / 255.0); } else if (d2 < f2_sq) { f2_sq = d2; }
-  }
-  if (fy0_2 < f2_sq) {
-    uint h = hash3(cxi0, cyi0 - 1, seed + 900);
-    vec2 p = vec2(float(h & 0xfffu), float((h >> 12u) & 0xfffu)) * (1.0 / 4095.0);
-    vec2 d = vec2(0.0, -1.0) + p - f;
-    float d2 = dot(d, d);
-    if (d2 < f1_sq) { f2_sq = f1_sq; f1_sq = d2; btype = float(h >> 24u) * (1.0 / 255.0); } else if (d2 < f2_sq) { f2_sq = d2; }
-  }
-  if (fx1_2 + fy1_2 < f2_sq) {
-    uint h = hash3(cxi0 + 1, cyi0 + 1, seed + 900);
-    vec2 p = vec2(float(h & 0xfffu), float((h >> 12u) & 0xfffu)) * (1.0 / 4095.0);
-    vec2 d = vec2(1.0, 1.0) + p - f;
-    float d2 = dot(d, d);
-    if (d2 < f1_sq) { f2_sq = f1_sq; f1_sq = d2; btype = float(h >> 24u) * (1.0 / 255.0); } else if (d2 < f2_sq) { f2_sq = d2; }
-  }
-  if (fx0_2 + fy1_2 < f2_sq) {
-    uint h = hash3(cxi0 - 1, cyi0 + 1, seed + 900);
-    vec2 p = vec2(float(h & 0xfffu), float((h >> 12u) & 0xfffu)) * (1.0 / 4095.0);
-    vec2 d = vec2(-1.0, 1.0) + p - f;
-    float d2 = dot(d, d);
-    if (d2 < f1_sq) { f2_sq = f1_sq; f1_sq = d2; btype = float(h >> 24u) * (1.0 / 255.0); } else if (d2 < f2_sq) { f2_sq = d2; }
-  }
-  if (fx1_2 + fy0_2 < f2_sq) {
-    uint h = hash3(cxi0 + 1, cyi0 - 1, seed + 900);
-    vec2 p = vec2(float(h & 0xfffu), float((h >> 12u) & 0xfffu)) * (1.0 / 4095.0);
-    vec2 d = vec2(1.0, -1.0) + p - f;
-    float d2 = dot(d, d);
-    if (d2 < f1_sq) { f2_sq = f1_sq; f1_sq = d2; btype = float(h >> 24u) * (1.0 / 255.0); } else if (d2 < f2_sq) { f2_sq = d2; }
-  }
-  if (fx0_2 + fy0_2 < f2_sq) {
-    uint h = hash3(cxi0 - 1, cyi0 - 1, seed + 900);
-    vec2 p = vec2(float(h & 0xfffu), float((h >> 12u) & 0xfffu)) * (1.0 / 4095.0);
-    vec2 d = vec2(-1.0, -1.0) + p - f;
-    float d2 = dot(d, d);
-    if (d2 < f1_sq) { f2_sq = f1_sq; f1_sq = d2; btype = float(h >> 24u) * (1.0 / 255.0); } else if (d2 < f2_sq) { f2_sq = d2; }
+  if (minDiag < f2_sq) {
+    uvec4 h_diag = uvec4(cxP1 ^ rowP1, cxM1 ^ rowP1, cxP1 ^ rowM1, cxM1 ^ rowM1);
+    h_diag ^= h_diag >> 16u; h_diag *= 0x85ebca6bu;
+    h_diag ^= h_diag >> 13u; h_diag *= 0xc2b2ae35u;
+    h_diag ^= h_diag >> 16u;
+
+    vec4 px_d = vec4(h_diag & 0xfffu) * (1.0 / 4095.0);
+    vec4 py_d = vec4((h_diag >> 12u) & 0xfffu) * (1.0 / 4095.0);
+    vec4 dx_d = px_d - f.x + vec4(1.0, -1.0, 1.0, -1.0);
+    vec4 dy_d = py_d - f.y + vec4(1.0, 1.0, -1.0, -1.0);
+    vec4 d2_d = dx_d * dx_d + dy_d * dy_d;
+
+    for (int k = 0; k < 4; k++) {
+      float d2 = d2_d[k];
+      if (d2 < f1_sq) {
+        f2_sq = f1_sq;
+        f1_sq = d2;
+        btype = float(h_diag[k] >> 24u) * (1.0 / 255.0);
+      } else if (d2 < f2_sq) {
+        f2_sq = d2;
+      }
+    }
   }
 
   float edge = sqrt(f2_sq) - sqrt(f1_sq);

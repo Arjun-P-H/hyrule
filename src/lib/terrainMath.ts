@@ -335,6 +335,7 @@ export function voronoi(x: number, y: number, seed: number): VoronoiResult {
  */
 const INV_4095 = 1.0 / 4095.0;
 const INV_255 = 1.0 / 255.0;
+const R_OUT_CELL_SQ = (ANOMALY.rOut / ANOMALY.cell) * (ANOMALY.rOut / ANOMALY.cell);
 
 export function worleyEdge(x: number, y: number, seed: number): number {
   const ipx = Math.floor(x) | 0, ipy = Math.floor(y) | 0;
@@ -453,7 +454,7 @@ export function domainWarp(
 /* §12 — Geological anomalies (Zonai-style terraces, spire, spiral)    */
 /* ------------------------------------------------------------------ */
 
-/** §12 — Geological anomalies (Zonai-style terraces, spire, spiral) with coarse cell rejection. */
+/** §12 — Geological anomalies (Zonai-style terraces, spire, spiral); neighbour cells pruned to R_out. */
 export function anomalyE(x: number, y: number, seed: number): number {
   const ax = x * (1.0 / ANOMALY.cell), ay = y * (1.0 / ANOMALY.cell);
   const ipx = Math.floor(ax) | 0, ipy = Math.floor(ay) | 0;
@@ -471,28 +472,11 @@ export function anomalyE(x: number, y: number, seed: number): number {
   let bcx = ipx + px0, bcy = ipy + py0;
   let btype = (h0 >>> 24) * INV_255;
 
-  const rOutCell = ANOMALY.rOut / ANOMALY.cell;
-  const rOutCellSq = rOutCell * rOutCell;
-
-  // Cheap coarse rejection: if point is in cell interior (distance to all 4 borders >= rOutCell),
-  // no neighbor cell feature point can possibly fall within ANOMALY.rOut (620 m).
-  if (fx >= rOutCell && fx <= (1.0 - rOutCell) && fy >= rOutCell && fy <= (1.0 - rOutCell)) {
-    if (btype >= ANOMALY.probability || f1_sq >= rOutCellSq) return 0.0;
-    const cx = (ipx + px0) * ANOMALY.cell;
-    const cy = (ipy + py0) * ANOMALY.cell;
-    const dx = x - cx, dy = y - cy;
-    const r2 = dx * dx + dy * dy;
-    const r = Math.sqrt(r2);
-    const theta = Math.atan2(dy, dx);
-    const fall = 1.0 - smoothstep(ANOMALY.rIn, ANOMALY.rOut, r);
-    const t = r / ANOMALY.terraceStep;
-    const ft = t - Math.floor(t);
-    const steps = (Math.floor(t) + smoothstep(0.3, 0.7, ft)) * ANOMALY.terraceHeight;
-    const spire = ANOMALY.spireHeight * Math.exp(-r2 / (ANOMALY.spireRadius * ANOMALY.spireRadius));
-    const spiral = ANOMALY.spiralAmp * Math.sin(ANOMALY.spiralTurns * theta + ANOMALY.spiralRadial * r);
-    return fall * (steps + spire + spiral);
-  }
-
+  // A neighbour cell can only change the result if its border lies within
+  // ANOMALY.rOut (beyond it the anomaly is 0 whichever feature owns the point)
+  // and it could hold a nearer feature than the best so far. Pruning against
+  // min(F1², R_out²) visits ~1.5 of 8 neighbours on average and subsumes the
+  // former cell-interior fast path. Mirrored in demoShader anomalyE.
   const fx0_2 = fx * fx;
   const fx1 = 1.0 - fx;
   const fx1_2 = fx1 * fx1;
@@ -507,7 +491,7 @@ export function anomalyE(x: number, y: number, seed: number): number {
   const cyp1Term = Math.imul(ipy_p1, 0x27d4eb2f);
   const cym1Term = Math.imul(ipy_m1, 0x27d4eb2f);
 
-  if (fx1_2 < f1_sq) {
+  if (fx1_2 < f1_sq && fx1_2 < R_OUT_CELL_SQ) {
     let hn = (ipx_p1 ^ cy0Term ^ sTerm) | 0;
     hn ^= hn >>> 16; hn = Math.imul(hn, 0x85ebca6b); hn ^= hn >>> 13; hn = Math.imul(hn, 0xc2b2ae35); hn ^= hn >>> 16;
     const px = (hn & 0xfff) * INV_4095;
@@ -516,7 +500,7 @@ export function anomalyE(x: number, y: number, seed: number): number {
     const d2 = dx * dx + dy * dy;
     if (d2 < f1_sq) { f1_sq = d2; bcx = ipx_p1 + px; bcy = ipy + py; btype = (hn >>> 24) * INV_255; }
   }
-  if (fy1_2 < f1_sq) {
+  if (fy1_2 < f1_sq && fy1_2 < R_OUT_CELL_SQ) {
     let hn = (ipx ^ cyp1Term ^ sTerm) | 0;
     hn ^= hn >>> 16; hn = Math.imul(hn, 0x85ebca6b); hn ^= hn >>> 13; hn = Math.imul(hn, 0xc2b2ae35); hn ^= hn >>> 16;
     const px = (hn & 0xfff) * INV_4095;
@@ -525,7 +509,7 @@ export function anomalyE(x: number, y: number, seed: number): number {
     const d2 = dx * dx + dy * dy;
     if (d2 < f1_sq) { f1_sq = d2; bcx = ipx + px; bcy = ipy_p1 + py; btype = (hn >>> 24) * INV_255; }
   }
-  if (fx0_2 < f1_sq) {
+  if (fx0_2 < f1_sq && fx0_2 < R_OUT_CELL_SQ) {
     let hn = (ipx_m1 ^ cy0Term ^ sTerm) | 0;
     hn ^= hn >>> 16; hn = Math.imul(hn, 0x85ebca6b); hn ^= hn >>> 13; hn = Math.imul(hn, 0xc2b2ae35); hn ^= hn >>> 16;
     const px = (hn & 0xfff) * INV_4095;
@@ -534,7 +518,7 @@ export function anomalyE(x: number, y: number, seed: number): number {
     const d2 = dx * dx + dy * dy;
     if (d2 < f1_sq) { f1_sq = d2; bcx = ipx_m1 + px; bcy = ipy + py; btype = (hn >>> 24) * INV_255; }
   }
-  if (fy0_2 < f1_sq) {
+  if (fy0_2 < f1_sq && fy0_2 < R_OUT_CELL_SQ) {
     let hn = (ipx ^ cym1Term ^ sTerm) | 0;
     hn ^= hn >>> 16; hn = Math.imul(hn, 0x85ebca6b); hn ^= hn >>> 13; hn = Math.imul(hn, 0xc2b2ae35); hn ^= hn >>> 16;
     const px = (hn & 0xfff) * INV_4095;
@@ -543,7 +527,7 @@ export function anomalyE(x: number, y: number, seed: number): number {
     const d2 = dx * dx + dy * dy;
     if (d2 < f1_sq) { f1_sq = d2; bcx = ipx + px; bcy = ipy_m1 + py; btype = (hn >>> 24) * INV_255; }
   }
-  if (fx1_2 + fy1_2 < f1_sq) {
+  if (fx1_2 + fy1_2 < f1_sq && fx1_2 + fy1_2 < R_OUT_CELL_SQ) {
     let hn = (ipx_p1 ^ cyp1Term ^ sTerm) | 0;
     hn ^= hn >>> 16; hn = Math.imul(hn, 0x85ebca6b); hn ^= hn >>> 13; hn = Math.imul(hn, 0xc2b2ae35); hn ^= hn >>> 16;
     const px = (hn & 0xfff) * INV_4095;
@@ -552,7 +536,7 @@ export function anomalyE(x: number, y: number, seed: number): number {
     const d2 = dx * dx + dy * dy;
     if (d2 < f1_sq) { f1_sq = d2; bcx = ipx_p1 + px; bcy = ipy_p1 + py; btype = (hn >>> 24) * INV_255; }
   }
-  if (fx0_2 + fy1_2 < f1_sq) {
+  if (fx0_2 + fy1_2 < f1_sq && fx0_2 + fy1_2 < R_OUT_CELL_SQ) {
     let hn = (ipx_m1 ^ cyp1Term ^ sTerm) | 0;
     hn ^= hn >>> 16; hn = Math.imul(hn, 0x85ebca6b); hn ^= hn >>> 13; hn = Math.imul(hn, 0xc2b2ae35); hn ^= hn >>> 16;
     const px = (hn & 0xfff) * INV_4095;
@@ -561,7 +545,7 @@ export function anomalyE(x: number, y: number, seed: number): number {
     const d2 = dx * dx + dy * dy;
     if (d2 < f1_sq) { f1_sq = d2; bcx = ipx_m1 + px; bcy = ipy_p1 + py; btype = (hn >>> 24) * INV_255; }
   }
-  if (fx1_2 + fy0_2 < f1_sq) {
+  if (fx1_2 + fy0_2 < f1_sq && fx1_2 + fy0_2 < R_OUT_CELL_SQ) {
     let hn = (ipx_p1 ^ cym1Term ^ sTerm) | 0;
     hn ^= hn >>> 16; hn = Math.imul(hn, 0x85ebca6b); hn ^= hn >>> 13; hn = Math.imul(hn, 0xc2b2ae35); hn ^= hn >>> 16;
     const px = (hn & 0xfff) * INV_4095;
@@ -570,7 +554,7 @@ export function anomalyE(x: number, y: number, seed: number): number {
     const d2 = dx * dx + dy * dy;
     if (d2 < f1_sq) { f1_sq = d2; bcx = ipx_p1 + px; bcy = ipy_m1 + py; btype = (hn >>> 24) * INV_255; }
   }
-  if (fx0_2 + fy0_2 < f1_sq) {
+  if (fx0_2 + fy0_2 < f1_sq && fx0_2 + fy0_2 < R_OUT_CELL_SQ) {
     let hn = (ipx_m1 ^ cym1Term ^ sTerm) | 0;
     hn ^= hn >>> 16; hn = Math.imul(hn, 0x85ebca6b); hn ^= hn >>> 13; hn = Math.imul(hn, 0xc2b2ae35); hn ^= hn >>> 16;
     const px = (hn & 0xfff) * INV_4095;
