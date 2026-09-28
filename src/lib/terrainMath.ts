@@ -25,7 +25,7 @@ import {
 /* §4 — Seed & deterministic hashing (uint32, Murmur3 finalizer)       */
 /* ------------------------------------------------------------------ */
 
-/** MurmurHash3 finalizer — avalanche. Input/output are uint32 bit patterns. */
+/** §4 — MurmurHash3 finalizer — avalanche. Input/output are uint32 bit patterns. */
 export function hashU(x: number): number {
   let h = x | 0;
   h ^= h >>> 16; h = Math.imul(h, 0x85ebca6b);
@@ -35,7 +35,7 @@ export function hashU(x: number): number {
 }
 
 /**
- * H(x_i, y_i, s) = finalize(x_i ⊕ (y_i · 0x27D4EB2F) ⊕ (s · 0x9E3779B9))
+ * §4 — H(x_i, y_i, s) = finalize(x_i ⊕ (y_i · 0x27D4EB2F) ⊕ (s · 0x9E3779B9))
  * xi/yi are integer lattice coords (may be negative — two's-complement wrap).
  */
 export function hash3(xi: number, yi: number, seed: number): number {
@@ -49,18 +49,18 @@ export function hash3(xi: number, yi: number, seed: number): number {
 const INV_U32 = 1.0 / 4294967295.0;
 const INV_U32_X2 = 2.0 / 4294967295.0;
 
-/** Uniform in [0,1] from an integer lattice cell. */
+/** §4 — Uniform in [0,1] from an integer lattice cell. */
 export function hash01(xi: number, yi: number, seed: number): number {
   return hash3(xi, yi, seed) * INV_U32;
 }
 
-/** Feature-point coords in [0,1]² packed from the two 12-bit halves of one hash. */
+/** §4 — Feature-point coords in [0,1]² packed from the two 12-bit halves of one hash. */
 export function cellPoint(ix: number, iy: number, seed: number): [number, number] {
   const h = hash3(ix, iy, seed);
   return [(h & 0xfff) / 4095.0, ((h >>> 12) & 0xfff) / 4095.0];
 }
 
-/** Cell type byte packed from the top 8 bits of the same hash (0..1). */
+/** §4 — Cell type byte packed from the top 8 bits of the same hash (0..1). */
 export function cellType(ix: number, iy: number, seed: number): number {
   return (hash3(ix, iy, seed) >>> 24) / 255.0;
 }
@@ -69,10 +69,12 @@ export function cellType(ix: number, iy: number, seed: number): number {
 /* §5 — Quintic value noise (C² continuous) & Nyquist weights          */
 /* ------------------------------------------------------------------ */
 
+/** §5 — Quintic C² polynomial S(t) = 6t⁵ − 15t⁴ + 10t³ evaluated via Horner's rule. */
 export function quintic(t: number): number {
   return t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
 }
 
+/** §5 — Quintic value noise with bilinear interpolation and Dyadic Murmur3 lattice. */
 export function vnoise(x: number, y: number, seed: number): number {
   const ix = Math.floor(x), iy = Math.floor(y);
   const fx = x - ix, fy = y - iy;
@@ -287,7 +289,7 @@ const CELL_I = [0,  1,  0, -1,  0,  1, -1,  1, -1];
 const CELL_J = [0,  0,  1,  0, -1,  1,  1, -1, -1];
 
 /**
- * 3×3 Worley scan. Compares squared distances to avoid 7 Math.sqrt calls,
+ * §7 — 3×3 Worley scan. Compares squared distances to avoid 7 Math.sqrt calls,
  * computes hash3 once per cell (extracting point and type together), and
  * avoids heap allocations.
  */
@@ -434,6 +436,7 @@ export function worleyEdge(x: number, y: number, seed: number): number {
 /* §14 — Domain warping                                                */
 /* ------------------------------------------------------------------ */
 
+/** §14 — Domain warping for organic geological folding and continuous coordinate displacement. */
 export function domainWarp(
   x: number, y: number, seed: number, dp: number,
 ): [number, number] {
@@ -447,6 +450,7 @@ export function domainWarp(
 /* §12 — Geological anomalies (Zonai-style terraces, spire, spiral)    */
 /* ------------------------------------------------------------------ */
 
+/** §12 — Geological anomalies (Zonai-style terraces, spire, spiral) with coarse cell rejection. */
 export function anomalyE(x: number, y: number, seed: number): number {
   const ax = x * (1.0 / ANOMALY.cell), ay = y * (1.0 / ANOMALY.cell);
   const ipx = Math.floor(ax) | 0, ipy = Math.floor(ay) | 0;
@@ -699,12 +703,13 @@ function evalRegionInternal(x: number, y: number, seed: number): void {
   _duneAmount = smoothstep(0.66, 0.8, btype) * _wRegion;
 }
 
+/** §13 — Regional biome field determining mountain/hills/dune factors and blending. */
 export function regionField(x: number, y: number, seed: number): RegionInfo {
   evalRegionInternal(x, y, seed);
   return { wRegion: _wRegion, mountFactor: _mountFactor, duneAmount: _duneAmount };
 }
 
-/** Crescent (barchan) dunes — trigonometric region rule f₁ (spec §13). */
+/** §11/§13 — Crescent (barchan) dunes — trigonometric region rule f₁ (spec §13). */
 export function dunesE(x: number, y: number, seed: number, dp: number, amount: number): number {
   if (amount <= 0.0) return 0.0;
   const phase = x * F.dune * (2.0 * Math.PI) +
@@ -723,12 +728,13 @@ function smoothstep(e0: number, e1: number, x: number): number {
   return t * t * (3 - 2 * t);
 }
 
+/** §4/§31 — Scalar clamp helper bounded between lo and hi. */
 export function clamp(x: number, lo: number, hi: number): number {
   return Math.min(hi, Math.max(lo, x));
 }
 
 /**
- * E(x, z) — terrain elevation in metres. `dp` is the Nyquist pixel footprint
+ * §2/§6/§14 — E(x, z) — terrain elevation in metres. `dp` is the Nyquist pixel footprint
  * (spec §5): pass ~0 for full-detail CPU evaluation, or the screen footprint
  * to mirror the GPU's filtered result. All lookups are chunk-local (spec §25).
  * Completely allocation-free in the hot path.
@@ -791,7 +797,7 @@ export function elevation(x: number, z: number, seed: number, dp: number): numbe
     + anom;
 }
 
-/** Central-difference gradient at the pixel-footprint scale (spec §17). */
+/** §5/§17 — Central-difference gradient at the pixel-footprint scale (spec §17). */
 export function gradient(
   x: number, z: number, seed: number, eps: number, out?: [number, number],
 ): [number, number] {
@@ -807,7 +813,7 @@ export function gradient(
   return [gx, gz];
 }
 
-/** Slope magnitude ‖∇E‖ — the Lipschitz factor + slide gate input (zero-allocation). */
+/** §5/§17/§31 — Slope magnitude ‖∇E‖ — the Lipschitz factor + slide gate input (zero-allocation). */
 export function slope(x: number, z: number, seed: number): number {
   const gx = (elevation(x + 0.25, z, seed, 0) - elevation(x - 0.25, z, seed, 0)) * 2.0;
   const gz = (elevation(x, z + 0.25, seed, 0) - elevation(x, z - 0.25, seed, 0)) * 2.0;
@@ -818,6 +824,7 @@ export function slope(x: number, z: number, seed: number): number {
 /* §9 — Climate fields                                                 */
 /* ------------------------------------------------------------------ */
 
+/** §9/§13 — Temperature equation based on latitude lapse and elevation lapse. */
 export function temperature(
   x: number, z: number, e: number, _seed = 0, globalY?: number,
 ): number {
@@ -827,6 +834,7 @@ export function temperature(
     - CLIMATE.lambdaAlt * Math.max(0, e);
 }
 
+/** §9/§13 — Moisture equation driven by moisture noise fBm and continent distance proxy. */
 export function moisture(x: number, z: number, e: number, seed: number): number {
   const n = fbm(x * F.moist, z * F.moist, seed + 61, 2, 2.0, 0.5, 0, F.moist);
   const cont = smoothstep(CONTINENT.lo, CONTINENT.hi,
@@ -873,7 +881,7 @@ function octaveWeights(
 }
 
 /**
- * March one ray against E. Records every step so the worked example (§30)
+ * §8/§16/§30 — March one ray against E. Records every step so the worked example (§30)
  * can show the Nyquist weights collapsing and the Lipschitz denominator
  * shrinking the steps near cliffs.
  */

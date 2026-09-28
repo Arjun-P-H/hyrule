@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [ "**" ]
+  pull_request:
+    branches: [ "**" ]
+
+jobs:
+  engine-ci:
+    name: Engine Test, Typecheck, Benchmark & Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install Dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Strict Typecheck (Phase 6 Gate)
+        run: bunx tsc --noEmit
+
+      - name: Unit & Dual-Twin Parity Tests (Phase 1-4 Gate)
+        run: bun test
+
+      - name: Automated Benchmark Suite (Phase 0/4 Gate)
+        run: bun run bench --cpu-only
+
+      - name: Production Bundle Build (Phase 5 Gate)
+        run: bun run build
