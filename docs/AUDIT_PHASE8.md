@@ -1,47 +1,64 @@
-# Phase 8 — UI, Controls & Test/File Structure Audit
+# Phase 8 — UI, controls, and test/file structure audit
 
-This document records the architectural findings for Phase 8 of the Hyrule Continuous World Engine optimization gauntlet.
+Audit of the live repository (2026-09-28), each finding backed by a measurement or a pointer to code.
+Numbers come from `bun run bench` suites and `bench/play.ts` (30 s scripted walks on the production
+build, headless Chrome on an Apple M1).
 
----
+## 1. Render-loop isolation — issue found, fixed
 
-### 1. Render-Loop Isolation
-- **Requirement:** The WebGL canvas must run its own `requestAnimationFrame` loop, fully decoupled from React's render cycle. 60 Hz physics data must not flow through `useState` or trigger React component re-renders.
-- **Finding:** Verified and Hardened.
-- **Evidence:**
-  - In `src/lib/engine/useTerrainEngine.ts`, the simulation runs within a self-scheduling `requestAnimationFrame(frame)` loop completely isolated from React's commit phase.
-  - Per-frame state updates (player positions, velocities, orientation matrices, chunk origins, camera bases) are mutated directly on local typed arrays and scalar records (`Float32Array(9)`, `cam.fly`, `player.grounded`).
-  - WebGL uniform calls (`gl.uniform*`) are dirty-checked per-frame against previous scalar values, executing driver calls only when uniforms actually mutate.
-  - React telemetry reporting (`setStats`) is explicitly throttled to a 200 ms interval (`statsAt = now; if (now - statsAt > 200)`), limiting React re-renders to a maximum of 5 Hz regardless of display refresh rate (60 Hz to 240 Hz).
+**Requirement:** the WebGL loop runs on its own `requestAnimationFrame`; 60 Hz data that only affects
+the canvas must not flow through React state.
 
----
+**Finding.** The loop itself was isolated: `useTerrainEngine` self-schedules `requestAnimationFrame`,
+physics and uniforms mutate plain records and a `Float32Array`, and uniform uploads are dirty-checked
+(SpectorJS: 12 GL commands and 1 draw call per frame, 2 uniform uploads). But HUD telemetry was
+published with `setState` from inside the page component every 200 ms, so each publish re-rendered the
+entire `/game` tree — Radix tooltips, icon buttons, the settings dialog — and the frame loop allocated a
+fresh `emitStats` closure on every rAF.
 
-### 2. Input Latency
-- **Requirement:** Pointer-lock mouse-look and keyboard inputs (WASD, Sprint, Jump) should be sampled synchronously at the top of each physics tick without being delayed or batched through React scheduling.
-- **Finding:** Verified and Hardened.
-- **Evidence:**
-  - Raw window event listeners (`keydown`, `keyup`) update an integer bitmask (`keyMask`) using bitwise OR/AND NOT operations.
-  - Pointer lock `mousemove` events mutate `cam.yaw` and `cam.pitch` directly on the local camera record in native window coordinate space.
-  - At the beginning of each animation frame, the physics tick decodes `keyMask` and camera angles synchronously before performing the semi-implicit Euler integration, guaranteeing minimal input-to-photon latency.
+**Fix (9c75a30).** The engine writes snapshots into a small external store
+(`src/lib/engine/statsStore.ts`); `HudOverlay` subscribes with `useSyncExternalStore` and the page
+subscribes only to the camera mode, which changes on user action. `publishStats` is created once.
+Alternated A/B against the Phase 0 build: total JS allocation **907–911 → 374–382 KiB/s (−58 %)**,
+React DOM chunk **222 → 41 KiB/s (−82 %)**, rAF 56 → 58.6 Hz.
 
----
+## 2. Input latency — fine, with one measured confirmation
 
-### 3. Test Organization
-- **Requirement:** Assess whether `tests/terrainMath.test.ts` (31 suites / 72 tests / 37,853 assertions) should be split across multiple files or retained as a monolithic suite.
-- **Finding:** Audited. Retained as a single, indexed suite with 31 cleanly sectioned `describe` blocks.
-- **Evidence:**
-  - Bun executes the entire 37,853-assertion test suite in **~420 ms** in a single process without module re-evaluation overhead.
-  - Each `describe` block is strictly numbered (§1 to §31), mapping 1:1 with specification chapters (§4 to §33) and JSDoc tags in `src/lib/terrainMath.ts`.
-  - Retaining a unified test file prevents cross-file helper fragmentation and ensures deterministic serial test execution in CI without parallel worker race conditions.
+Keyboard state is a bitmask updated by window listeners and decoded at the top of each frame, before
+physics; pointer-lock mouse deltas mutate `cam.yaw/pitch` directly in the event handler. Nothing is
+routed through React scheduling.
 
----
+The frame fence matters here: with `fenceSync` stubbed out, Chrome throttles rAF to the GPU's render
+rate, so input sampling and physics drop to **24 Hz**; with the fence the engine skips submitting a new
+frame while the GPU is busy and rAF — and the physics tick — stay at **59 Hz** at the same 24–26
+renders/s. On this integrated GPU the fence costs no throughput (Phase 7 A/B), so it stays.
 
-### 4. Continuous Integration (CI)
-- **Requirement:** Ensure `bun test`, `bun run bench`, and `tsc --noEmit` run automatically in CI on every push and pull request.
-- **Finding:** Verified and Operational.
-- **Evidence:**
-  - `.github/workflows/ci.yml` is active on `main` and feature branches.
-  - CI steps execute:
-    1. `bun install --frozen-lockfile`
-    2. `bun x tsc --noEmit` (TypeScript strict mode gate)
-    3. `bun test` (Full 37,853-assertion parity test suite)
-    4. `bun run bench --cpu-only` (Physics throughput and determinism regression gate)
+## 3. Test organization — reorganized forward, monolith kept
+
+`tests/terrainMath.test.ts` (1.4 k lines, 31 `describe` blocks) is kept: splitting it by § would churn
+blame for no behavioural gain, and `bun test` already runs every file as one command. New tests were
+written as topic files instead:
+
+| File | Covers |
+| :--- | :--- |
+| `tests/mathCore.test.ts` | §12 anomaly pruning exactness (Object.is vs an unpruned search), march/shadow constants mirrored GLSL↔TS, preset budgets |
+| `tests/floatingOrigin.test.ts` | §25 dyadic-frequency registry, rebase fuzz to ±2,000 km, GROUND_BIAS vs the recorded GPU parity measurement |
+| `tests/drs.test.ts` | §28 DRS closed-loop thrash tests on the engine's real controller |
+| `tests/statsStore.test.ts` | §30 telemetry store re-render semantics |
+
+Two hygiene fixes along the way: suite 30 tested a copy of the DRS logic pasted into the test file
+(now calls the engine's module), and the suite-17 wall-clock thresholds flaked under load (now warm up
+and take the best of five). 116 tests, 43,997 assertions (Phase 0: 72 / 37,853).
+
+## 4. CI — runs on every push and PR; gaps closed
+
+`.github/workflows/ci.yml` already ran typecheck, tests, the CPU bench and the production build. Found
+and fixed:
+
+- `bun-version: latest` → pinned to 1.3.14 (bench and test behaviour are version-sensitive).
+- `madge` and `ts-prune` were claimed as CI gates but never ran; `bun run quality` now fails on any
+  circular dependency, strict-mode error, failing test or unjustified dead export.
+- The bench step would have failed on a shallow checkout once the harness began A/B-ing against the
+  pinned Phase 0 revision; it now runs as a smoke test (`--against=none`).
+- GPU suites (timing, parity, frames, play sessions) need a real GPU and run locally with
+  `bun run bench`; they are not in CI.

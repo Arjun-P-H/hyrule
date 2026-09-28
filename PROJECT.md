@@ -1,7 +1,12 @@
 # Project: W(x, y) Infinite Procedural Terrain WebGL2 Browser Engine
 
 ## Architecture
-The engine renders an infinite, continuous procedural world $W(x, y)$ purely in the browser using a high-efficiency hardware-accelerated WebGL2 raymarching pipeline (120–240+ FPS on Apple Silicon / Modern GPUs) with an exact double-precision TypeScript physics and procedural math twin (`terrainMath.ts`). All desktop electron and Godot dependencies have been removed.
+The engine renders an infinite, continuous procedural world $W(x, y)$ purely in the browser using a high-efficiency hardware-accelerated WebGL2 raymarching pipeline with an exact double-precision TypeScript physics and procedural math twin (`terrainMath.ts`). All desktop electron and Godot dependencies have been removed.
+
+Measured performance (GPU timer queries, fixed fly-through, Apple M1 7-core GPU) is in
+[`BASELINE.md`](BASELINE.md) (Phase 0) and [`docs/OPTIMIZATION_REPORT.md`](docs/OPTIMIZATION_REPORT.md)
+(current): tens of milliseconds per frame at the preset resolutions, with dynamic resolution scaling
+holding interactive frame rates. Reproduce with `bun run bench`.
 
 ```
                               [WebGL2 Browser Game /game]
@@ -19,8 +24,8 @@ The engine renders an infinite, continuous procedural world $W(x, y)$ purely in 
    - Dynamic Resolution Scaling                      - Player Controller Loop (§31)
                   │                                                 │
                   ▼                                                 ▼
-         [120–240+ FPS View]                                [PlayerController]
-     (Frametime ≤ 4.16 – 8.33 ms)                         (WASD, Sprint, Jump,
+         [Raymarched View]                                  [PlayerController]
+     (DRS-scaled resolution)                              (WASD, Sprint, Jump,
                                                           Flight Mode, Mouse Look,
                                                           Respawn, Dynamic Settings)
 ```
