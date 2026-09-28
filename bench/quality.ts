@@ -16,7 +16,7 @@ export type QualityReport = {
   madgeCycles: string[][];
   /** src/ only. unused = imported nowhere; internalOnly = exported but used only in its own module. */
   deadExports: { unused: number; unusedJustified: number; internalOnly: number; findings: string[] };
-  tests: { pass: number; fail: number; expects: number; files: number };
+  tests: { pass: number; fail: number; expects: number; files: number; failing: string[] };
   coverage: { funcs: number; lines: number; perFile: Record<string, { funcs: number; lines: number }> };
 };
 
@@ -67,6 +67,7 @@ export async function runQuality(): Promise<QualityReport> {
       fail: num(/(\d+) fail/),
       expects: num(/(\d+) expect\(\) calls/),
       files: num(/across (\d+) files?/),
+      failing: [...text.matchAll(/^\(fail\) (.+)$/gm)].map((m) => m[1]),
     },
     coverage: { funcs, lines, perFile },
   };

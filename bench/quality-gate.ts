@@ -30,7 +30,7 @@ const unjustified = q.deadExports.findings.filter(
 const failures: string[] = [];
 if (q.tscErrors > 0) failures.push(`${q.tscErrors} TypeScript strict-mode errors`);
 if (q.madgeCircular > 0) failures.push(`${q.madgeCircular} circular dependencies: ${JSON.stringify(q.madgeCycles)}`);
-if (!(q.tests.fail === 0 && q.tests.pass > 0)) failures.push(`tests: ${q.tests.pass} pass / ${q.tests.fail} fail`);
+if (!(q.tests.fail === 0 && q.tests.pass > 0)) failures.push(`tests: ${q.tests.pass} pass / ${q.tests.fail} fail${q.tests.failing.length ? `:\n  ${q.tests.failing.join('\n  ')}` : ''}`);
 if (unjustified.length > 0) failures.push(`unjustified dead exports:\n  ${unjustified.join('\n  ')}`);
 
 console.log(
