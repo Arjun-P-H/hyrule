@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState, type RefObject } from 'react';
 import { TERRAIN_FS, TERRAIN_VS, minifyGlsl } from '@/components/terrain/demoShader';
 import { elevation, updatePlayer, type PlayerState, type InputState } from '@/lib/terrainMath';
+import { DRS_HARDWARE, DRS_SOFTWARE, createDrsState, drsStep, updateFpsEma } from './drs';
 import {
   CHUNK_SIZE,
   DEFAULT_SEED,
@@ -166,11 +167,8 @@ export function useTerrainEngine({
         /* renderer info unavailable — assume hardware */
       }
 
-      const auto = {
-        scale: software ? 0.25 : 1.0,
-        lastDownscaleAt: 0,
-        lastUpscaleAt: 0,
-      };
+      const drsCfg = software ? DRS_SOFTWARE : DRS_HARDWARE;
+      const auto = createDrsState(drsCfg);
 
       vs = compileShader(gl, gl.VERTEX_SHADER, TERRAIN_VS);
       fs = compileShader(gl, gl.FRAGMENT_SHADER, minifyGlsl(TERRAIN_FS));
@@ -590,31 +588,10 @@ export function useTerrainEngine({
 
         const rdt = Math.min((now - lastRender) / 1000, 1.0);
         lastRender = now;
-        fpsEma += (1 / Math.max(rdt, 1e-4) - fpsEma) * 0.1;
+        fpsEma = updateFpsEma(fpsEma, rdt);
 
-        // Dynamic Resolution Scaling (DRS) with deadband and hysteresis (§28)
-        // Deadband: [22, 45] FPS — no adjustments to prevent thrashing
-        const minScale = software ? 0.15 : 0.35;
-        if (now - t0 > 2500) {
-          // Downscale check: sustained drop below 22 FPS, minimum 1500 ms dwell
-          if (fpsEma < 22 && now - auto.lastDownscaleAt > 1500 && auto.scale > minScale) {
-            auto.scale = Math.max(minScale, auto.scale * 0.85);
-            auto.lastDownscaleAt = now;
-            auto.lastUpscaleAt = now; // reset upscale timer to enforce asymmetric dwell
-            applySize();
-          }
-          // Upscale recovery: sustained head-room > 45 FPS, minimum 4000 ms dwell
-          else if (
-            fpsEma > 45 &&
-            now - auto.lastUpscaleAt > 4000 &&
-            now - auto.lastDownscaleAt > 5000 &&
-            auto.scale < (software ? 0.25 : 1.0)
-          ) {
-            auto.scale = Math.min(software ? 0.25 : 1.0, auto.scale * 1.15);
-            auto.lastUpscaleAt = now;
-            applySize();
-          }
-        }
+        // Dynamic Resolution Scaling with deadband and hysteresis (§28, drs.ts)
+        if (drsStep(auto, drsCfg, fpsEma, now, t0)) applySize();
 
         emitStats();
       };

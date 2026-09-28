@@ -44,6 +44,7 @@ import {
   ANOMALY,
 } from '../src/lib/constants';
 import { TERRAIN_VS, TERRAIN_FS } from '../src/components/terrain/demoShader';
+import { drsStep, DRS_HARDWARE, DRS_SOFTWARE, type DrsState } from '../src/lib/engine/drs';
 
 describe('1. MurmurHash3 & Integer Determinism', () => {
   it('hashU produces deterministic 32-bit unsigned integers', () => {
@@ -1321,12 +1322,8 @@ describe('29. Zero-Allocation Hot-Loop Conformance & Heap Invariance (§IV.C.1, 
 });
 
 describe('30. Dynamic Resolution Scaling (DRS) Deadband & Hysteresis (§IV.D, §28)', () => {
-  interface DrsState {
-    scale: number;
-    lastDownscaleAt: number;
-    lastUpscaleAt: number;
-  }
-
+  // Exercises the controller the engine actually runs (src/lib/engine/drs.ts),
+  // not a copy of it; closed-loop thrash tests live in tests/drs.test.ts.
   function simulateDrsStep(
     state: DrsState,
     fpsEma: number,
@@ -1334,26 +1331,7 @@ describe('30. Dynamic Resolution Scaling (DRS) Deadband & Hysteresis (§IV.D, §
     t0: number,
     software = false,
   ): boolean {
-    const minScale = software ? 0.15 : 0.35;
-    const maxScale = software ? 0.25 : 1.0;
-    if (now - t0 > 2500) {
-      if (fpsEma < 22 && now - state.lastDownscaleAt > 1500 && state.scale > minScale) {
-        state.scale = Math.max(minScale, state.scale * 0.85);
-        state.lastDownscaleAt = now;
-        state.lastUpscaleAt = now;
-        return true;
-      } else if (
-        fpsEma > 45 &&
-        now - state.lastUpscaleAt > 4000 &&
-        now - state.lastDownscaleAt > 5000 &&
-        state.scale < maxScale
-      ) {
-        state.scale = Math.min(maxScale, state.scale * 1.15);
-        state.lastUpscaleAt = now;
-        return true;
-      }
-    }
-    return false;
+    return drsStep(state, software ? DRS_SOFTWARE : DRS_HARDWARE, fpsEma, now, t0);
   }
 
   it('warmup window ignores low framerates during first 2500 ms', () => {
