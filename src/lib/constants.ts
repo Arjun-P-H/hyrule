@@ -230,13 +230,21 @@ export type QualityPreset = {
 
 export type PresetId = QualityPreset['id'];
 
+/**
+ * Step budgets re-profiled after the Phase 1–2 march changes (bench, Apple M1,
+ * distance to a converged ground-truth render, GPU time relative to the
+ * previous budget): fewer march steps drop every preset below its Phase 0
+ * image quality, while shadow steps turned out to be the dominant quality
+ * lever — Low 12→20 shadow steps: 12.8 → 8.0 % of pixels above JND for +5.7 %
+ * time; Medium 20→28: 5.2 → 2.0 % for +3.3 %. High (128/28) is unchanged.
+ */
 export const QUALITY_PRESETS: QualityPreset[] = [
   {
     id: "low",
     label: "Low",
     resScale: 0.35,
     marchSteps: 64,
-    shadowSteps: 12,
+    shadowSteps: 20,
     note: "Integrated GPUs / software rasterizers",
   },
   {
@@ -244,7 +252,7 @@ export const QUALITY_PRESETS: QualityPreset[] = [
     label: "Medium",
     resScale: 0.5,
     marchSteps: 96,
-    shadowSteps: 20,
+    shadowSteps: 28,
     note: "Apple M-series default (TBDR budget)",
   },
   {
@@ -327,7 +335,7 @@ export const PARAM_TABLE: ParamRow[] = [
   { group: "Marching", symbol: "λ_step", name: "Lipschitz step relax factor", value: "0.8", cpu: "MARCH.lambdaStep", gpu: "LAMBDA_STEP", spec: "§16" },
   { group: "Marching", symbol: "Δ_min", name: "Minimum step", value: "0.05 m", cpu: "MARCH.deltaMin", gpu: "DELTA_MIN", spec: "§16" },
   { group: "Marching", symbol: "N_bisect", name: "Bisection refinements", value: "6", cpu: "MARCH.bisectSteps", gpu: "BISECT_STEPS", spec: "§16" },
-  { group: "Shadows", symbol: "Shadow_res", name: "Shadow ray steps (Med preset)", value: "20", cpu: "QUALITY_PRESETS", gpu: "u_shadow_steps", spec: "§18" },
+  { group: "Shadows", symbol: "Shadow_res", name: "Shadow ray steps (Med preset)", value: "28", cpu: "QUALITY_PRESETS", gpu: "u_shadow_steps", spec: "§18" },
   { group: "Shadows", symbol: "4×Δp", name: "Shadow footprint inflation (penumbra)", value: "4", cpu: "softShadow()", gpu: "soft_shadow()", spec: "§18" },
   { group: "Atmosphere", symbol: "σ_fog", name: "Extinction coefficient", value: "9e-4 /m", cpu: "LIGHT.sigmaFog", gpu: "SIGMA_FOG", spec: "§19" },
   { group: "Atmosphere", symbol: "H_fog", name: "Fog scale height", value: "900 m", cpu: "LIGHT.fogScaleHeight", gpu: "FOG_H", spec: "§19" },
