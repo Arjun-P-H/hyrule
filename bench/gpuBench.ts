@@ -8,8 +8,6 @@
 import { TERRAIN_VS, TERRAIN_FS } from '../src/components/terrain/demoShader';
 import { QUALITY_PRESETS, CHUNK_SIZE, DEFAULT_SEED, CAMERA } from '../src/lib/constants';
 import { generateSplineFrames } from './spline';
-import { writeFileSync } from 'fs';
-import path from 'path';
 
 export interface GpuPresetResult {
   preset: string;

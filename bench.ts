@@ -21,7 +21,6 @@ import {
 } from './src/lib/constants';
 import { runGpuBenchmark, type GpuBenchmarkResult } from './bench/gpuBench';
 import { writeFileSync, mkdirSync } from 'fs';
-import path from 'path';
 
 console.log('================================================================================');
 console.log('         W(x, y) HYRULE CONTINUOUS WORLD ENGINE — BENCHMARK SUITE               ');
