@@ -9,11 +9,17 @@
  *
  * PARITY NOTES
  *  - Hashing is strict uint32 integer math (spec §27): Math.imul + >>> 0.
- *  - GPU evaluates the same functions in fp32 on chunk-local coordinates.
- *    Divergence vs this double-precision twin is ≤ ~1e-6 of amplitude
- *    (< 1 mm on a 700 m peak) and is absorbed by GROUND_BIAS = 0.08 (spec §31).
+ *  - The GPU evaluates the same functions in fp32 on the fp32 global
+ *    coordinate `chunk_local + u_chunk_origin`, so its precision follows the
+ *    distance from the world origin. Measured by GPU readback (`bun run bench
+ *    --suites=parity`): max |E_gpu − E_cpu| 0.6 mm at 3 km, 3 mm at 12 km,
+ *    15 mm at 108 km — absorbed by PLAYER.groundBias (see constants.ts).
  *  - Field lookup convention: y-up world, terrain field is E(p.x, p.z);
  *    the spec's math z (elevation) maps to engine y.
+ *  - Allocation: JSC and SpiderMonkey never allocate here. V8 boxes a double
+ *    (16-byte HeapNumber) at every non-inlined call boundary, ~1.2 KB per
+ *    elevation() call (bench/alloc.ts); restructuring for V8 inlining was
+ *    measured slower in both engines and was not adopted.
  */
 
 import {
@@ -124,10 +130,9 @@ const ASUM_RIDGE = 0.5 * (1.0 - Math.pow(0.48, 5)) / (1.0 - 0.48); // 5 octaves,
 const ASUM_WARP = 1.5; // 2 octaves, gain 0.5, amp 1.0
 
 /**
- * fBm with Nyquist attenuation + amplitude renormalization (spec §5).
- * `px, py` are pre-scaled coordinates (p · f0); `f0` is the base world
- * frequency so the Nyquist weight uses the ABSOLUTE octave frequency
- * f_i = f0 · lac^i against the metre-space footprint Δp.
+ * §5/§6/§14 — octave tables (frequency multipliers and amplitudes) for the
+ * macro fBm, ridged multifractal and domain warp; mirrored verbatim by the
+ * shader's MACRO_/RIDGE_/WARP_ const arrays (tests/floatingOrigin.test.ts).
  */
 export const MACRO_FREQ = [1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0] as const;
 export const MACRO_AMP  = [1.0, 0.5, 0.25, 0.125, 0.0625, 0.03125, 0.015625, 0.0078125, 0.00390625] as const;
@@ -136,6 +141,12 @@ export const RIDGE_AMP  = [0.5, 0.24, 0.1152, 0.055296, 0.02654208] as const;
 export const WARP_FREQ  = [1.0, 2.0] as const;
 export const WARP_AMP   = [1.0, 0.5] as const;
 
+/**
+ * fBm with Nyquist attenuation + amplitude renormalization (spec §5).
+ * `px, py` are pre-scaled coordinates (p · f0); `f0` is the base world
+ * frequency so the Nyquist weight uses the ABSOLUTE octave frequency
+ * f_i = f0 · lac^i against the metre-space footprint Δp.
+ */
 function fbm(
   x: number, y: number, seed: number,
   octaves: number, lacunarity: number, gain: number, dp: number,
@@ -327,16 +338,15 @@ export function voronoi(x: number, y: number, seed: number): VoronoiResult {
   return { f1, f2, edge: f2 - f1, centerX: bcx, centerY: bcy, cellHash: btype };
 }
 
-/**
- * Spec §7: D_edge = F2 − F1 only.
- * High-performance allocation-free Worley edge calculation:
- * Skips tracking center coords and type bytes completely,
- * and skips ~32% of cells via geometric bounding.
- */
 const INV_4095 = 1.0 / 4095.0;
 const INV_255 = 1.0 / 255.0;
 const R_OUT_CELL_SQ = (ANOMALY.rOut / ANOMALY.cell) * (ANOMALY.rOut / ANOMALY.cell);
 
+/**
+ * §7 — Worley edge distance D_edge = F2 − F1 (river network). Tracks only the
+ * two nearest squared distances (no centre or type byte) and skips neighbour
+ * cells whose border is already farther than F2.
+ */
 export function worleyEdge(x: number, y: number, seed: number): number {
   const ipx = Math.floor(x) | 0, ipy = Math.floor(y) | 0;
   const fx = x - ipx, fy = y - ipy;
@@ -746,7 +756,7 @@ export function clamp(x: number, lo: number, hi: number): number {
  * §2/§6/§14 — E(x, z) — terrain elevation in metres. `dp` is the Nyquist pixel footprint
  * (spec §5): pass ~0 for full-detail CPU evaluation, or the screen footprint
  * to mirror the GPU's filtered result. All lookups are chunk-local (spec §25).
- * Completely allocation-free in the hot path.
+ * No object or array allocation (see PARITY NOTES for V8 number boxing).
  */
 export function elevation(x: number, z: number, seed: number, dp: number): number {
   // §14 — warp the domain (fluid geological folding, zero-allocation inline)
@@ -1030,8 +1040,8 @@ export type InputState = {
 /**
  * §31 loop verbatim: gravity always integrates; the ground clamp only ever
  * zeroes NEGATIVE vertical velocity so jumps are never killed; the slope
- * gate slides the player off steep warped ridges. Global frame, evaluated
- * through chunk-local coordinates (CHUNK_SIZE lattice alignment).
+ * gate slides the player off steep warped ridges. Evaluated on fp64 global
+ * coordinates; PLAYER.groundBias absorbs the GPU's fp32 divergence.
  */
 export function updatePlayer(
   s: PlayerState, input: InputState, dt: number, seed: number,
@@ -1056,9 +1066,9 @@ export function updatePlayer(
   s.x += s.vx * dt; s.y += s.vy * dt; s.z += s.vz * dt;
 
   // Global-frame evaluation (spec §25/§27): the CPU twin computes in double
-  // precision on GLOBAL coordinates; the GPU computes (local + chunk_origin)
-  // in fp32 — the dyadic frequency table keeps that sum exact, and the
-  // residual divergence is absorbed by GROUND_BIAS below.
+  // precision on GLOBAL coordinates; the GPU evaluates fp32(local + origin).
+  // The measured difference (constants.ts, PLAYER.groundBias) is absorbed by
+  // GROUND_BIAS below.
   const groundZ = elevation(s.x, s.z, seed, 0) + PLAYER.groundBias + PLAYER.height;
 
   s.grounded = false;

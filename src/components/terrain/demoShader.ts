@@ -5,11 +5,16 @@
  * Parity rules (spec §27, worklog constants lock):
  *   - Hashing: strict uint32 integer math (Math.imul → GLSL uint mult).
  *   - All constants mirror src/lib/constants.ts verbatim.
- *   - The GPU evaluates the field on (chunk_local + u_chunk_origin) in fp32;
- *     the CPU twin evaluates globals in fp64. The dyadic frequency table
- *     (n / 2^20) keeps origin·f exactly representable, so lattice cells align
- *     across chunk borders; residual divergence (< 1 mm on a 700 m peak) is
- *     absorbed by GROUND_BIAS = 0.08 in the walk-mode physics twin.
+ *   - The GPU evaluates the field on the fp32 global coordinate
+ *     (chunk_local + u_chunk_origin); the CPU twin evaluates fp64 globals.
+ *     Rebasing is seamless because both floating origins round a world point
+ *     to (nearly) the same fp32 value: GPU readback 0.000 mm at 8.6 / 98 /
+ *     1000 km, 0.14 mm at the boundary through the world origin. Precision
+ *     therefore follows distance from the origin: 0.6 mm at 3 km, 15 mm at
+ *     108 km, 99 mm at 534 km (bench/baseline/parity.json, GROUND_BIAS).
+ *   - Restructurings that leave E(x,z) bit-identical (octave unrolling,
+ *     vectorized Worley, anomaly pruning) need no CPU mirror; any change to
+ *     the value of E does (tests/mathCore.test.ts pins the shared constants).
  *   - Output transform: gamma 1/2.2 for sRGB monitor calibration.
  *
  * Coordinate convention: y-up. Terrain field is E(p.x, p.z). Spec z ↔ engine y.
@@ -997,9 +1002,10 @@ void main() {
 `;
 
 /**
- * Fast build-time/runtime GLSL minifier.
- * Strips comments, collapses redundant whitespace, and preserves preprocessor directives.
- * Reduces shader string payload by >20% without altering GLSL semantics.
+ * Runtime GLSL comment/whitespace stripper, applied before handing the source
+ * to the driver (~0.5 ms at startup). It does not shrink the download: the
+ * bundle still ships the commented source (36 KB raw / 9.6 KB gzip); a
+ * build-time strip would save 2.9 KB gzip (1.6 % of /game first-load JS).
  */
 export function minifyGlsl(source: string): string {
   const lines = source.split('\n');
