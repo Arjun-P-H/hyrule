@@ -18,7 +18,7 @@
 
 import {
   F, MACRO, MOUNTAIN, WARP, VALLEY, CONTINENT, REGION, ANOMALY,
-  CLIMATE, MARCH, MAX_WORLD_H, MAX_DIST, PLAYER,
+  CLIMATE, MARCH, SHADOW, MAX_WORLD_H, MAX_DIST, PLAYER,
 } from "./constants";
 
 /* ------------------------------------------------------------------ */
@@ -943,19 +943,20 @@ export function marchRay(
         const gap = my - elevation(mx, mz, seed, tm * opts.footprint);
         bisectRows.push({ i: b, t: tm, gap });
         if (gap < 0) hi = tm; else lo = tm;
-        if (!opts.record && (hi - lo) < 0.001) break;
+        if (!opts.record && (hi - lo) < MARCH.bisectTol) break;
       }
       return { hit: true, t: 0.5 * (lo + hi), rows, bisectRows };
     }
 
     // Lipschitz factor ‖∇E‖ via forward differences at the pixel-footprint
-    // scale, refreshed every 3rd sample (bisection catches overshoot; the
-    // horizon clamp below bounds the *stale* window — see §16/§34.1).
-    // If ray is far above terrain, step is bounded by horizon clamp (anti-tunneling),
-    // so gradient evaluation is bypassed, saving 2 full elevations per step!
-    if ((i % 3) === 0) {
-      if ((py - e) <= (t * 0.06 + 2.0) * 2.5) {
-        const eps = Math.max(dp, 0.15);
+    // scale, refreshed every MARCH.gradCadence-th sample and only within
+    // MARCH.gradGate clamp-lengths of the surface (bisection catches overshoot;
+    // the horizon clamp bounds the stale window — §16/§34.1). Mirrors the GPU.
+    const clampT = t * MARCH.clampSlope + MARCH.clampBase; // horizon clamp (anti-tunnel)
+    const farAbove = (py - e) > clampT * MARCH.gradGate;
+    if ((i % MARCH.gradCadence) === 0) {
+      if (!farAbove) {
+        const eps = Math.max(dp, MARCH.gradEpsMin);
         const ex = elevation(px + eps, pz, seed, dp);
         const ez = elevation(px, pz + eps, seed, dp);
         const invEps = 1.0 / eps;
@@ -975,9 +976,9 @@ export function marchRay(
       (py - e) / Math.sqrt(gradSq + 1.0) * MARCH.lambdaStep,
     );
     step *= 1.0 + t * MARCH.stepGrowth; // §26 adaptive growth
-    // Horizon clamp: no single step may exceed ~6% of distance travelled —
-    // bounds tunneling through unseen cliffs when the gradient is stale.
-    step = Math.min(step, t * 0.06 + 2.0);
+    // Far above the surface the gradient is not refreshed and the clamp alone
+    // paces the march, so it may widen there without loosening the near cap.
+    step = Math.min(step, farAbove ? t * MARCH.clampSlopeFar + MARCH.clampBase : clampT);
     t += step;
 
     if (t > maxDist) return { hit: false, t, rows, bisectRows: [] };
@@ -994,17 +995,17 @@ export function softShadow(
   footprint: number,
 ): number {
   let res = 1.0;
-  let t = 0.6;
+  let t = SHADOW.startT;
   for (let i = 0; i < steps; i++) {
     const qx = p[0] + sunDir[0] * t;
     const qy = p[1] + sunDir[1] * t;
     const qz = p[2] + sunDir[2] * t;
     if (qy > MAX_WORLD_H) break;
-    const h = qy - elevation(qx, qz, seed, 4.0 * t * footprint); // §18: 4×Δp
+    const h = qy - elevation(qx, qz, seed, SHADOW.footprintScale * t * footprint); // §18: 4×Δp
     if (h <= 0.0) return 0.0;
-    res = Math.min(res, 10.0 * h / t); // penumbra kernel
-    if (res < 0.005) return 0.0;
-    t += clamp(h * 0.8, 0.5, 60.0) + t * 0.04;
+    res = Math.min(res, SHADOW.penumbraK * h / t); // penumbra kernel
+    if (res < SHADOW.cutoff) return 0.0;
+    t += clamp(h * SHADOW.stepScale, SHADOW.stepMin, SHADOW.stepMax) + t * SHADOW.stepGrowth;
   }
   return clamp(res, 0, 1);
 }

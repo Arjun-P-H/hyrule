@@ -82,6 +82,15 @@ const float DMIN    = 0.05;   // minimum step (§16)
 const float GROWTH  = 0.0015; // adaptive step growth (§26)
 const float START_T = 0.4;
 const int   BISECT  = 6;
+const float BISECT_TOL = 0.001;
+// Horizon clamp (§26, MARCH.clamp* in constants.ts): tight near the surface,
+// wider for samples comfortably above it where the clamp alone paces the march.
+const float CLAMP_SLOPE = 0.06, CLAMP_SLOPE_FAR = 0.12, CLAMP_BASE = 2.0;
+const float GRAD_GATE = 2.5,    GRAD_EPS_MIN = 0.15;
+const int   GRAD_CADENCE = 3;
+// Soft shadows (§18, SHADOW in constants.ts)
+const float SH_START = 0.6, SH_FOOT = 4.0, SH_K = 10.0, SH_CUTOFF = 0.005;
+const float SH_STEP_SCALE = 0.8, SH_STEP_MIN = 0.5, SH_STEP_MAX = 60.0, SH_GROWTH = 0.04;
 
 const vec3  SUN      = vec3(0.550744, 0.420568, 0.720974); // normalize(0.55,0.42,0.72)
 const vec3  SUN_COL  = vec3(1.0, 0.955, 0.885) * 3.4;
@@ -732,17 +741,17 @@ vec3 biomeColor(float T, float M, float e, float slopeM, float vegNoise, out flo
 // ---------------------------------------------------------------------------
 float softShadow(vec3 p, int seed, float footprint) {
   float res = 1.0;
-  float t = 0.6;
-  float fp4 = 4.0 * footprint;
+  float t = SH_START;
+  float fp4 = SH_FOOT * footprint;
   for (int i = 0; i < 40; i++) {
     if (i >= u_shadow_steps) break;
     vec3 q = p + SUN * t;
     if (q.y > MAXH) break;
     float h = q.y - elevation(q.xz + u_chunk_origin, t * fp4, seed); // §18: 4×Δp
     if (h <= 0.0) return 0.0;
-    res = min(res, 10.0 * h / t);
-    if (res < 0.005) return 0.0;
-    t += clamp(h * 0.8, 0.5, 60.0) + t * 0.04;
+    res = min(res, SH_K * h / t);
+    if (res < SH_CUTOFF) return 0.0;
+    t += clamp(h * SH_STEP_SCALE, SH_STEP_MIN, SH_STEP_MAX) + t * SH_GROWTH;
   }
   return clamp(res, 0.0, 1.0);
 }
@@ -842,13 +851,15 @@ void main() {
 
     if (p.y < e) { hit = true; break; }
 
-    // Lipschitz ‖∇E‖ via forward differences, refreshed every 3rd sample
-    // (§16/§34.1); measured 3rd-step cadence reduces redundant elevations.
-    // If ray is far above terrain, step is bounded by horizon clamp (anti-tunneling),
-    // so gradient evaluation is bypassed, saving 2 full elevations per step!
-    if ((i % 3) == 0) {
-      if ((p.y - e) <= (t * 0.06 + 2.0) * 2.5) {
-        float eps = max(dp, 0.15);
+    // Lipschitz ‖∇E‖ via forward differences, refreshed every GRAD_CADENCE-th
+    // sample (§16/§34.1) and only within GRAD_GATE clamp-lengths of the surface;
+    // farther up the horizon clamp bounds the step and the 2 extra evaluations
+    // are skipped.
+    float clampT = t * CLAMP_SLOPE + CLAMP_BASE;   // horizon clamp (anti-tunnel)
+    bool farAbove = (p.y - e) > clampT * GRAD_GATE;
+    if ((i % GRAD_CADENCE) == 0) {
+      if (!farAbove) {
+        float eps = max(dp, GRAD_EPS_MIN);
         vec2 g = p.xz + u_chunk_origin;
         float ex = elevation(g + vec2(eps, 0.0), dp, u_seed);
         float ez = elevation(g + vec2(0.0, eps), dp, u_seed);
@@ -864,7 +875,9 @@ void main() {
     tPrev = t;
     float step = max(DMIN, (p.y - e) * inversesqrt(gradSq + 1.0) * LAMBDA);
     step *= 1.0 + t * GROWTH;            // §26 adaptive growth
-    step = min(step, t * 0.06 + 2.0);    // horizon clamp (anti-tunnel)
+    // Far above the surface the gradient is not refreshed and the clamp alone
+    // paces the march, so it may widen there without loosening the near cap.
+    step = min(step, farAbove ? t * CLAMP_SLOPE_FAR + CLAMP_BASE : clampT);
     t += step;
 
     if (t > MAXDIST) break;
@@ -878,7 +891,7 @@ void main() {
       vec3 m = ro + rd * tm;
       float gap = m.y - elevation(m.xz + u_chunk_origin, tm * u_footprint, u_seed);
       if (gap < 0.0) hi = tm; else lo = tm;
-      if ((hi - lo) < 0.001) break;
+      if ((hi - lo) < BISECT_TOL) break;
     }
     tHit = 0.5 * (lo + hi);
   }

@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'bun:test';
 import { anomalyE, cellPoint, cellType } from '../src/lib/terrainMath';
-import { ANOMALY, DEFAULT_SEED } from '../src/lib/constants';
+import { ANOMALY, DEFAULT_SEED, MARCH, SHADOW } from '../src/lib/constants';
+import { TERRAIN_FS } from '../src/components/terrain/demoShader';
 
 /**
  * §12 — anomaly neighbour pruning is exact. The reference visits all nine
@@ -91,3 +92,28 @@ describe('§12 anomaly pruning exactness', () => {
   });
 });
 
+describe('§16/§18/§26 march and shadow constants mirror constants.ts', () => {
+  const glsl = new Map<string, number>();
+  for (const m of TERRAIN_FS.matchAll(/const\s+(?:float|int)\s+([^;]+);/g)) {
+    for (const decl of m[1].split(',')) {
+      const [name, expr] = decl.split('=').map((x) => x.trim());
+      if (name && expr && /^[\d.eE+-]+$/.test(expr)) glsl.set(name, Number(expr));
+    }
+  }
+  const pairs: Array<[string, number]> = [
+    ['LAMBDA', MARCH.lambdaStep], ['DMIN', MARCH.deltaMin], ['GROWTH', MARCH.stepGrowth],
+    ['START_T', MARCH.startT], ['BISECT', MARCH.bisectSteps], ['BISECT_TOL', MARCH.bisectTol],
+    ['CLAMP_SLOPE', MARCH.clampSlope], ['CLAMP_SLOPE_FAR', MARCH.clampSlopeFar], ['CLAMP_BASE', MARCH.clampBase],
+    ['GRAD_GATE', MARCH.gradGate], ['GRAD_EPS_MIN', MARCH.gradEpsMin], ['GRAD_CADENCE', MARCH.gradCadence],
+    ['SH_START', SHADOW.startT], ['SH_FOOT', SHADOW.footprintScale], ['SH_K', SHADOW.penumbraK],
+    ['SH_CUTOFF', SHADOW.cutoff], ['SH_STEP_SCALE', SHADOW.stepScale], ['SH_STEP_MIN', SHADOW.stepMin],
+    ['SH_STEP_MAX', SHADOW.stepMax], ['SH_GROWTH', SHADOW.stepGrowth],
+  ];
+  it.each(pairs)('%s', (name, value) => {
+    expect(glsl.get(name)).toBe(value);
+  });
+
+  it('the far clamp only ever widens the near clamp', () => {
+    expect(MARCH.clampSlopeFar).toBeGreaterThanOrEqual(MARCH.clampSlope);
+  });
+});

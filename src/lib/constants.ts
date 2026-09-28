@@ -138,13 +138,41 @@ export const BIOME_ANCHORS: BiomeAnchor[] = [
   { name: "Arid Sand",   oklab: [0.79, 0.012, 0.072],  t: 16, m: 0.13, e: 55,  slope: 0.35, sT: 8,   sM: 0.17, sE: 320, sS: 0.5, veg: 0.05 },
 ];
 
-/** Raymarching (spec §16, §26). */
+/** Raymarching (spec §16, §26). Mirrored in demoShader.ts (LAMBDA … CLAMP_*). */
 export const MARCH = {
   lambdaStep: 0.8,
   deltaMin: 0.05,
   bisectSteps: 6,
+  bisectTol: 0.001, // m — bisection stops once the bracket is sub-millimetre
   stepGrowth: 0.0015, // adaptive: dt *= 1 + t·growth (spec §26)
   startT: 0.4,
+  /**
+   * Horizon clamp (anti-tunnel, §26): within gradGate clamp-lengths of the
+   * surface no step may exceed clampSlope·t + clampBase. Samples comfortably
+   * above it (gap > gradGate·clamp — where ‖∇E‖ is not even refreshed and the
+   * clamp alone paces the march) may step up to clampSlopeFar·t + clampBase.
+   * 0.12 was chosen against a converged ground-truth render: fewer pixels
+   * off-truth than 0.06 on every preset (Low 20.4 → 12.8 %, Medium 5.5 → 5.2 %,
+   * High 1.60 → 1.56 % above JND) at 14–16 % less GPU time on Medium/High.
+   */
+  clampSlope: 0.06,
+  clampSlopeFar: 0.12,
+  clampBase: 2.0,
+  gradGate: 2.5, // refresh ‖∇E‖ only within gradGate·clamp of the surface…
+  gradCadence: 3, // …and only on every Nth sample (§16/§34.1)
+  gradEpsMin: 0.15, // m — forward-difference step floor
+} as const;
+
+/** Soft shadows (spec §18). Mirrored in demoShader.ts (SH_*). */
+export const SHADOW = {
+  startT: 0.6,
+  footprintScale: 4.0, // 4×Δp inflated footprint → free penumbra
+  penumbraK: 10.0, // res = min(res, k·h/t)
+  cutoff: 0.005, // fully shadowed below this
+  stepScale: 0.8,
+  stepMin: 0.5,
+  stepMax: 60.0,
+  stepGrowth: 0.04,
 } as const;
 
 /** Lighting / sky / atmosphere (spec §18–§22). */
