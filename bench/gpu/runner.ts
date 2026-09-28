@@ -20,8 +20,13 @@ import type { QualityPreset } from '../../src/lib/constants';
 
 const PAGE_JS = path.join(import.meta.dir, 'page.js');
 
-export type VariantKind = 'render' | 'instrument' | 'probe' | 'evalcost';
-export type Variant = { name: string; vs: string; fs: string };
+export type VariantKind = 'render' | 'instrument' | 'probe' | 'evalcost' | 'truth';
+/**
+ * `budgets` lets a revision render with its own preset step budgets (a pinned
+ * baseline keeps the march/shadow steps it shipped with) instead of the
+ * working tree's QUALITY_PRESETS.
+ */
+export type Variant = { name: string; vs: string; fs: string; budgets?: Record<string, { marchSteps: number; shadowSteps: number }> };
 
 function mustFind(src: string, anchor: string): number {
   const i = src.indexOf(anchor);
@@ -46,8 +51,32 @@ const OPTIONAL_COUNTERS: Array<[string, string]> = [
   ['float elevationBound(vec2 g, float dp, int seed) {', 'W_IB'],
 ];
 
+/**
+ * Converged ground truth for perceptual scoring: tiny horizon clamp, no step
+ * growth, gradient refreshed every 2nd sample without gating, 3,000-step and
+ * 600-shadow-step loops, 14 bisection steps. Independent of the march
+ * parameters under test, unlike rendering a revision at its own loop caps.
+ */
+function truthShader(fs: string): string {
+  const rep = (s: string, a: RegExp | string, b: string) => {
+    const out = s.replace(a, b);
+    if (out === s) throw new Error(`truth transform: anchor not found: ${String(a)}`);
+    return out;
+  };
+  let s = rep(fs, /for \(int i = 0; i < 160; i\+\+\) \{\n\s*if \(i >= u_march_steps\) break;/, 'for (int i = 0; i < 3000; i++) {');
+  s = rep(s, /if \(\(i % (?:3|GRAD_CADENCE)\) == 0\) \{/, 'if ((i % 2) == 0) {');
+  s = rep(s, /if \((?:\(p\.y - e\) <= \(t \* 0\.06 \+ 2\.0\) \* 2\.5|!farAbove)\) \{/, 'if (true) {');
+  s = rep(s, /step \*= 1\.0 \+ t \* GROWTH;[^\n]*\n/, '\n');
+  s = rep(s, /step = min\(step, [^;]+\);/, 'step = min(step, t * 0.01 + 0.25);');
+  s = rep(s, 'const int   BISECT  = 6;', 'const int   BISECT  = 14;');
+  s = rep(s, /for \(int i = 0; i < 40; i\+\+\) \{\n\s*if \(i >= u_shadow_steps\) break;/, 'for (int i = 0; i < 600; i++) {');
+  s = rep(s, /t \+= clamp\(h \* (?:0\.8|SH_STEP_SCALE), (?:0\.5|SH_STEP_MIN), (?:60\.0|SH_STEP_MAX)\) \+ t \* (?:0\.04|SH_GROWTH);/, 't += clamp(h * 0.5, 0.2, 15.0) + t * 0.01;');
+  return s;
+}
+
 export function transformShader(fs: string, kind: VariantKind, evalK = 16): string {
   if (kind === 'render') return fs;
+  if (kind === 'truth') return truthShader(fs);
   const globals =
     kind === 'instrument'
       ? '\nint W_IE = 0; int W_IS = 0; int W_IB = 0; int W_IX = 0;\n'

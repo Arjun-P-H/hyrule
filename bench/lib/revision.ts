@@ -64,3 +64,12 @@ export async function loadTerrainMath(rev: string): Promise<{ rev: string; mod: 
   const mod = (await import(path.join(dir, 'src/lib/terrainMath.ts'))) as TerrainMathModule;
   return { rev: await resolveRev(rev), mod };
 }
+
+export type ConstantsModule = typeof import('../../src/lib/constants');
+
+/** constants.ts as of `rev` (e.g. to render a baseline with the preset budgets it shipped). */
+export async function loadConstants(rev: string): Promise<ConstantsModule> {
+  if (rev === WORKTREE) return (await import(path.join(ROOT, 'src/lib/constants.ts'))) as ConstantsModule;
+  const dir = await materialize(rev, ['src/lib/terrainMath.ts', 'src/lib/constants.ts']);
+  return (await import(path.join(dir, 'src/lib/constants.ts'))) as ConstantsModule;
+}

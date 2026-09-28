@@ -3,9 +3,9 @@
  * ---------------------------------------------------------------------------
  * The baseline is a pinned git revision, rendered in the same browser session
  * as the candidate (same driver, same GPU), so the diff isolates the change.
- * For each preset we also render a converged reference — the baseline shader
- * at the loop caps (160 march / 40 shadow steps) — so an approximation can be
- * judged by whether it moves the image toward or away from ground truth.
+ * Both are also scored against a converged ground-truth render (tiny horizon
+ * clamp, no step growth, 3,000-step loops; transformShader 'truth') so a march
+ * approximation is judged by whether it moves the image toward the truth.
  * Frame SHA-256s are recorded so a re-render of the baseline can be verified
  * as bit-identical across sessions.
  */
@@ -14,13 +14,8 @@ import path from 'node:path';
 import { mkdirSync } from 'node:fs';
 import type { BlobRecord } from './gpu/runner';
 import { encodePNG, perceptualDiff, sha256, type PerceptualDiff, type RGBAImage } from './lib/image';
-import type { QualityPreset } from '../src/lib/constants';
 
 export const SHOT_FRAMES = [0, 6, 12, 18, 24, 30, 35, 41, 47, 53];
-
-export function referencePresets(presets: QualityPreset[]): QualityPreset[] {
-  return presets.map((p) => ({ ...p, id: `${p.id}-ref` as QualityPreset['id'], marchSteps: 160, shadowSteps: 40, label: `${p.label} (ref)` }));
-}
 
 export type ShotSet = Map<string, RGBAImage>; // key: `${variant}|${preset}|${frame}`
 

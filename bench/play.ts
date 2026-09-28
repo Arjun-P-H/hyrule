@@ -48,13 +48,15 @@ export type PlayResult = {
   canvas: { first: [number, number]; last: [number, number]; minW: number; maxW: number; changes: number; reversals: number };
   gpuMs?: { n: number; p50: number; p95: number; mean: number };
   hudFps?: string;
+  /** ms from navigation start: first contentful paint, DOM interactive, first engine draw */
+  load?: { fcp: number; firstDraw: number; domInteractive: number };
   spector?: Record<string, unknown>;
 };
 
 // Injected before any page script. No allocation per frame: pre-bound
 // functions, fixed-size typed arrays for samples.
 const INSTRUMENT = (fenceOff: boolean, gpuTiming: boolean) => `(() => {
-  const W = window.__wb = { raf: 0, draws: 0, sizes: new Float64Array(3 * 4096), nSizes: 0, gpu: new Float64Array(8192), nGpu: 0, pending: [], ext: null };
+  const W = window.__wb = { raf: 0, draws: 0, firstDrawAt: 0, sizes: new Float64Array(3 * 4096), nSizes: 0, gpu: new Float64Array(8192), nGpu: 0, pending: [], ext: null };
   const raf = window.requestAnimationFrame.bind(window);
   function tick() { W.raf++; raf(tick); }
   raf(tick);
@@ -62,6 +64,7 @@ const INSTRUMENT = (fenceOff: boolean, gpuTiming: boolean) => `(() => {
   const draw = proto.drawArrays;
   const timing = ${gpuTiming};
   proto.drawArrays = function (m, f, c) {
+    if (W.draws === 0) W.firstDrawAt = performance.now();
     W.draws++;
     if (!timing) return draw.call(this, m, f, c);
     if (!W.ext) W.ext = this.getExtension('EXT_disjoint_timer_query_webgl2');
@@ -116,6 +119,10 @@ export async function runPlaySession(baseUrl: string, opts: PlayOptions): Promis
     await cdp.send('Page.navigate', { url: `${baseUrl}/game` });
     await loaded;
     await Bun.sleep(1500);
+    const load = await evalJson<{ fcp: number; firstDraw: number; domInteractive: number }>(cdp,
+      `({ fcp: (performance.getEntriesByName('first-contentful-paint')[0] || {}).startTime || 0,
+          firstDraw: __wb.firstDrawAt,
+          domInteractive: performance.getEntriesByType('navigation')[0].domInteractive })`);
 
     // quality preset buttons are the first text buttons in the top-right bar
     if (opts.preset && opts.preset !== 'med') {
@@ -196,6 +203,7 @@ export async function runPlaySession(baseUrl: string, opts: PlayOptions): Promis
         reversals,
       },
       hudFps: end.hud,
+      load,
     };
     if (gpu.length) {
       result.gpuMs = { n: gpu.length, p50: gpu[Math.floor(gpu.length / 2)], p95: gpu[Math.floor(gpu.length * 0.95)], mean: gpu.reduce((a, b) => a + b, 0) / gpu.length };

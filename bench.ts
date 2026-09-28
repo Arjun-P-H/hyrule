@@ -23,12 +23,12 @@ import { runCpuBench, walkScriptProfile, type CpuMetric } from './bench/cpu';
 import { runAllocTrace, type AllocResult } from './bench/alloc';
 import { runSession, runSessionPerPreset, transformShader, type SessionConfig, type Variant } from './bench/gpu/runner';
 import { probeSpecs, analyzeParity, type ParityStats } from './bench/parity';
-import { SHOT_FRAMES, referencePresets, collectShots, diffSets, type DiffSummary } from './bench/shots';
+import { SHOT_FRAMES, collectShots, diffSets, type DiffSummary } from './bench/shots';
 import { runQuality, type QualityReport } from './bench/quality';
 import { measureRoutes, type RouteBundle } from './bench/bundle';
 import { runPlaySession, type PlayResult } from './bench/play';
 import { buildProduction, withProductionServer } from './bench/lib/server';
-import { loadShader, loadTerrainMath, describeWorktree, resolveRev, WORKTREE } from './bench/lib/revision';
+import { loadShader, loadTerrainMath, loadConstants, describeWorktree, resolveRev, WORKTREE } from './bench/lib/revision';
 import { generateCameraPath, type CameraFrame } from './bench/spline';
 import { summarize, pairedRatio, median, fmt, type Summary } from './bench/lib/stats';
 import { QUALITY_PRESETS, CHUNK_SIZE, DEFAULT_SEED, CAMERA } from './src/lib/constants';
@@ -125,7 +125,9 @@ async function variantsFor(kind: 'render' | 'instrument' | 'probe' | 'evalcost')
   const list: Variant[] = [];
   if (against) {
     const b = await loadShader(against);
-    list.push({ name: `base@${b.rev}`, vs: b.vs, fs: transformShader(b.fs, kind) });
+    // the baseline renders with the preset budgets it shipped with
+    const budgets = Object.fromEntries((await loadConstants(against)).QUALITY_PRESETS.map((p) => [p.id, { marchSteps: p.marchSteps, shadowSteps: p.shadowSteps }]));
+    list.push({ name: `base@${b.rev}`, vs: b.vs, fs: transformShader(b.fs, kind), budgets });
   }
   const w = await loadShader(WORKTREE);
   list.push({ name: `wt@${w.rev}`, vs: w.vs, fs: transformShader(w.fs, kind) });
@@ -239,19 +241,22 @@ async function suiteParity(report: Report, frames: CameraFrame[]): Promise<void>
 }
 
 async function suiteShots(report: Report, frames: CameraFrame[]): Promise<void> {
-  console.log('  [shots] frozen frames + converged references, perceptual ΔE_ok');
+  console.log('  [shots] frozen frames + converged ground truth, perceptual ΔE_ok');
   const variants = await variantsFor('render');
-  const presets = [...QUALITY_PRESETS, ...referencePresets(QUALITY_PRESETS)];
-  const res = await runSessionPerPreset({ ...sessionBase(frames), modes: ['shots'], variants, presets });
+  // Ground truth: the pinned revision's shader (or the worktree's) with a tiny
+  // horizon clamp, no growth and 3,000-step loops — independent of the march
+  // parameters being compared (see transformShader 'truth').
+  const src = await loadShader(against ?? WORKTREE);
+  const truth: Variant = { name: 'truth', vs: src.vs, fs: transformShader(src.fs, 'truth') };
+  const res = await runSessionPerPreset({ ...sessionBase(frames), modes: ['shots'], variants: [...variants, truth] });
   const stamp = variants.map((v) => v.name).join('_vs_');
   const { shots, hashes } = collectShots(res.blobs, path.join(OUT, 'frames', stamp));
   const diffs: DiffSummary[] = [];
   const base = variants[0].name, cand = variants[variants.length - 1].name;
+  const fs = sessionBase(frames).shotFrames;
   for (const p of QUALITY_PRESETS) {
-    const fs = sessionBase(frames).shotFrames;
     if (variants.length === 2) diffs.push(diffSets(shots, base, p.id, cand, p.id, fs));
-    // distance to the converged reference (baseline shader at loop caps)
-    for (const v of variants) diffs.push(diffSets(shots, base, `${p.id}-ref`, v.name, p.id, fs));
+    for (const v of variants) diffs.push(diffSets(shots, 'truth', p.id, v.name, p.id, fs));
   }
   report.shots = { diffs, hashes };
 }

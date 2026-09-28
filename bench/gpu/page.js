@@ -52,7 +52,7 @@ async function main() {
     if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(`${v.name} link: ${gl.getProgramInfoLog(p)}`);
     const loc = {};
     for (const u of UNIFORMS) loc[u] = gl.getUniformLocation(p, u);
-    return { name: v.name, prog: p, loc, compileMs: performance.now() - t0 };
+    return { name: v.name, prog: p, loc, budgets: v.budgets || null, compileMs: performance.now() - t0 };
   });
   await postJSON('/compile', programs.map((p) => ({ name: p.name, compileMs: p.compileMs })));
 
@@ -78,8 +78,9 @@ async function main() {
     gl.uniformMatrix3fv(L.u_basis, false, basis);
     gl.uniform1f(L.u_tan_half, tanHalf);
     gl.uniform1i(L.u_seed, cfg.seed);
-    gl.uniform1i(L.u_march_steps, preset.marchSteps);
-    gl.uniform1i(L.u_shadow_steps, preset.shadowSteps);
+    const b = (P.budgets && P.budgets[preset.id]) || preset;
+    gl.uniform1i(L.u_march_steps, b.marchSteps);
+    gl.uniform1i(L.u_shadow_steps, preset.shadowOff ? 0 : b.shadowSteps);
     gl.uniform1f(L.u_footprint, (2 * tanHalf) / Math.max(h, 2));
   }
 
@@ -248,7 +249,7 @@ async function main() {
             const hist = new Map();
             let n = 0;
             for (const f of cfg.instrumentFrames) {
-              const pr = shadowOff ? { ...preset, shadowSteps: 0 } : preset;
+              const pr = shadowOff ? { ...preset, shadowSteps: 0, shadowOff: true } : preset;
               setCamera(P, cfg.frames[f], w, h, pr, f / 60);
               drawTri();
               gl.readPixels(0, 0, w, h, gl.RGBA, gl.FLOAT, buf);
