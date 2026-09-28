@@ -40,12 +40,17 @@ export async function runQuality(): Promise<QualityReport> {
   const unused = findings.filter((l) => !l.endsWith('(used in module)'));
   const unusedJustified = unused.filter((l) => FRAMEWORK.some((r) => r.test(l)));
 
-  const test = await $`bun test --coverage`.cwd(ROOT).nothrow();
+  // Pass/fail from a plain run: coverage instrumentation slows code enough to
+  // trip the wall-clock threshold tests, so the instrumented run only supplies
+  // the coverage table.
+  const test = await $`bun test`.cwd(ROOT).nothrow();
   const text = test.stdout.toString() + test.stderr.toString();
   const num = (re: RegExp) => Number(text.match(re)?.[1] ?? 'NaN');
+  const cov = await $`bun test --coverage`.cwd(ROOT).nothrow();
+  const covText = cov.stdout.toString() + cov.stderr.toString();
   const perFile: QualityReport['coverage']['perFile'] = {};
   let funcs = NaN, lines = NaN;
-  for (const row of text.split('\n')) {
+  for (const row of covText.split('\n')) {
     const m = row.match(/^\s*(\S.*?)\s*\|\s*([\d.]+)\s*\|\s*([\d.]+)\s*\|/);
     if (!m) continue;
     if (m[1] === 'All files') { funcs = Number(m[2]); lines = Number(m[3]); }

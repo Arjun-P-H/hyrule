@@ -8,7 +8,8 @@
     "start": "NODE_ENV=production bun .next/standalone/server.js",
     "test": "bun test",
     "bench": "bun bench.ts",
-    "lint": "eslint ."
+    "lint": "eslint .",
+    "quality": "bun bench/quality-gate.ts"
   },
   "dependencies": {
     "@radix-ui/react-tooltip": "^1.2.7",
