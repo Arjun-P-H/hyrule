@@ -125,6 +125,7 @@ export type SessionConfig = {
   evalReps: number;
   software?: boolean;
   timeoutMs?: number;
+  stallMs?: number;
 };
 
 export type BlobRecord = { query: Record<string, string>; data: Uint8Array };
@@ -147,12 +148,25 @@ export async function runSession(cfg: SessionConfig): Promise<SessionResult> {
   const html = `<!doctype html><html><head><meta charset="utf-8"><title>W(x,y) GPU bench</title></head>
 <body style="margin:0;background:#000"><canvas id="c"></canvas><script src="/page.js"></script></body></html>`;
 
+  // Stall watchdog: every page message refreshes it; silence for stallMs aborts
+  // the session with the last thing the page reported.
+  let lastMessage = 'session start';
+  let lastAt = Date.now();
+  const touch = (what: string) => { lastMessage = what; lastAt = Date.now(); };
+  const stallMs = cfg.stallMs ?? 120_000;
+
   const server = Bun.serve({
     port: 0,
     maxRequestBodySize: 1 << 30,
     async fetch(req) {
       const url = new URL(req.url);
+      touch(url.pathname);
       switch (url.pathname) {
+        case '/heartbeat': {
+          const h = await req.json();
+          touch(`heartbeat ${h.done}/${h.total}`);
+          return new Response('ok');
+        }
         case '/': return new Response(html, { headers: { 'content-type': 'text/html' } });
         case '/page.js': return new Response(Bun.file(PAGE_JS), { headers: { 'content-type': 'text/javascript' } });
         case '/config': return Response.json(cfg);
@@ -182,14 +196,51 @@ export async function runSession(cfg: SessionConfig): Promise<SessionResult> {
   const timeout = cfg.timeoutMs ?? 20 * 60_000;
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
+    let watchdog: ReturnType<typeof setInterval> | undefined;
+    const stalled = new Promise<never>((_, rej) => {
+      watchdog = setInterval(() => {
+        if (Date.now() - lastAt > stallMs) rej(new Error(`GPU session stalled: no message for ${stallMs} ms (last: ${lastMessage})`));
+      }, 5000);
+    });
     const results = await Promise.race([
       done,
+      stalled,
       new Promise<never>((_, rej) => { timer = setTimeout(() => rej(new Error(`GPU session timed out after ${timeout} ms`)), timeout); }),
-    ]);
+    ]).finally(() => clearInterval(watchdog));
     return { env, compile, results, blobs };
   } finally {
     clearTimeout(timer);
     await chrome.close();
     server.stop(true);
   }
+}
+
+/**
+ * Long sessions on ANGLE/Metal occasionally wedge the GPU process: a
+ * synchronous WebGL query blocks the renderer indefinitely (0 % CPU, no
+ * error). Bounding each browser session to one preset and retrying a stalled
+ * preset once keeps a single wedge from losing a whole run.
+ */
+export async function runSessionPerPreset(cfg: SessionConfig, retries = 1): Promise<SessionResult> {
+  const merged: SessionResult = { env: {}, compile: [], results: {}, blobs: [] };
+  for (const preset of cfg.presets) {
+    let attempt = 0;
+    for (;;) {
+      try {
+        const r = await runSession({ ...cfg, presets: [preset] });
+        merged.env = r.env;
+        merged.compile = r.compile;
+        for (const [mode, value] of Object.entries(r.results)) {
+          const prev = merged.results[mode];
+          merged.results[mode] = Array.isArray(prev) && Array.isArray(value) ? [...prev, ...value] : value;
+        }
+        merged.blobs.push(...r.blobs);
+        break;
+      } catch (e) {
+        if (attempt++ >= retries || !/stalled|timed out/.test(String(e))) throw e;
+        process.stdout.write(`      ! ${preset.id}: ${(e as Error).message} — retrying\n`);
+      }
+    }
+  }
+  return merged;
 }

@@ -5,6 +5,8 @@
 const post = (path, body, headers = {}) => fetch(path, { method: 'POST', body, headers });
 const postJSON = (path, obj) => post(path, JSON.stringify(obj), { 'content-type': 'application/json' });
 const fail = (msg) => postJSON('/error', { message: String(msg && msg.stack ? msg.stack : msg) });
+window.addEventListener('error', (e) => fail(e.error || e.message));
+window.addEventListener('unhandledrejection', (e) => fail(e.reason));
 
 // A macrotask yield without setTimeout's 4 ms clamp. WebGL only publishes
 // query results after control returns to the event loop.
@@ -110,7 +112,9 @@ async function main() {
         if (gl.getParameter(timer.GPU_DISJOINT_EXT)) disjoint++;
         else out[i] = gl.getQueryParameter(q, gl.QUERY_RESULT) / 1e6;
         gl.deleteQuery(q);
+        if ((i + 1) % 50 === 0) postJSON('/heartbeat', { done: i + 1, total: tasks.length });
       }
+      if (gl.isContextLost()) throw new Error('WebGL context lost during timing');
     }
     return { ms: Array.from(out), disjoint };
   }

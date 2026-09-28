@@ -36,7 +36,8 @@ function at(id: string, worldX: number, worldZ: number, step: number, w = N, h =
   return { id, origin: [ox, oz], local0: [worldX - ox, worldZ - oz], step, w, h, dp: 1e-4 };
 }
 
-export const DISTANCES = [0, 10_000, 100_000, 1_000_000];
+export const DISTANCES = [0, 10_000, 100_000, 250_000, 500_000, 1_000_000];
+export const SEAMS = [0, 1, 12, 122];
 
 /** Probe grids: spawn, distance sweep (fine + coarse), and chunk-boundary straddles. */
 export function probeSpecs(): ProbeSpec[] {
@@ -45,7 +46,7 @@ export function probeSpecs(): ProbeSpec[] {
     specs.push(at(`dist${d}-fine`, 2016.137 + d, -2592.419 + d * 0.37, FINE));
     specs.push(at(`dist${d}-coarse`, 2016.137 + d, -2592.419 + d * 0.37, COARSE));
   }
-  for (const k of [1, 12, 122]) {
+  for (const k of SEAMS) {
     const bx = k * CHUNK_SIZE;
     const z0 = -2592.419 + k * 101;
     const oz = Math.floor(z0 / CHUNK_SIZE) * CHUNK_SIZE;
@@ -120,7 +121,7 @@ export function analyzeParity(
     });
   }
   // rebase seams: same world points from adjacent origins
-  for (const k of [1, 12, 122]) {
+  for (const k of SEAMS) {
     const L = byId.get(`seam${k}-left`), R = byId.get(`seam${k}-right`);
     const st = out.find((o) => o.id === `seam${k}-left`);
     if (!L || !R || !st) continue;

@@ -21,7 +21,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { runCpuBench, walkScriptProfile, type CpuMetric } from './bench/cpu';
 import { runAllocTrace, type AllocResult } from './bench/alloc';
-import { runSession, transformShader, type SessionConfig, type Variant } from './bench/gpu/runner';
+import { runSession, runSessionPerPreset, transformShader, type SessionConfig, type Variant } from './bench/gpu/runner';
 import { probeSpecs, analyzeParity, type ParityStats } from './bench/parity';
 import { SHOT_FRAMES, referencePresets, collectShots, diffSets, type DiffSummary } from './bench/shots';
 import { runQuality, type QualityReport } from './bench/quality';
@@ -169,7 +169,7 @@ async function suiteGpu(report: Report, frames: CameraFrame[]): Promise<void> {
   console.log('  [gpu] calibrate + timing (timer queries, depth 1, variants interleaved)');
   const variants = await variantsFor('render');
   const t0 = await thermal();
-  const res = await runSession({ ...sessionBase(frames), modes: ['calibrate', 'timing'], variants });
+  const res = await runSessionPerPreset({ ...sessionBase(frames), modes: ['calibrate', 'timing'], variants });
   const t1 = await thermal();
   const timing: Record<string, Record<string, GpuPresetStats>> = {};
   const ratio: NonNullable<Report['gpu']>['ratio'] = {};
@@ -196,7 +196,7 @@ async function suiteGpu(report: Report, frames: CameraFrame[]): Promise<void> {
   }
 
   console.log('  [gpu] instrumentation counters');
-  const inst = await runSession({ ...sessionBase(frames), modes: ['instrument'], variants: await variantsFor('instrument') });
+  const inst = await runSessionPerPreset({ ...sessionBase(frames), modes: ['instrument'], variants: await variantsFor('instrument') });
 
   report.gpu = {
     env: { ...res.env, thermalBefore: t0, thermalAfter: t1 },
@@ -242,7 +242,7 @@ async function suiteShots(report: Report, frames: CameraFrame[]): Promise<void> 
   console.log('  [shots] frozen frames + converged references, perceptual ΔE_ok');
   const variants = await variantsFor('render');
   const presets = [...QUALITY_PRESETS, ...referencePresets(QUALITY_PRESETS)];
-  const res = await runSession({ ...sessionBase(frames), modes: ['shots'], variants, presets });
+  const res = await runSessionPerPreset({ ...sessionBase(frames), modes: ['shots'], variants, presets });
   const stamp = variants.map((v) => v.name).join('_vs_');
   const { shots, hashes } = collectShots(res.blobs, path.join(OUT, 'frames', stamp));
   const diffs: DiffSummary[] = [];
