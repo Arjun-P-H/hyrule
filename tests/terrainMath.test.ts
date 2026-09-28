@@ -674,22 +674,30 @@ describe('16. Physics Determinism (§IV.L.1.e)', () => {
 });
 
 describe('17. Performance Benchmark Thresholds (§VII Benchmark Standard)', () => {
-  it('elevation function evaluates in < 0.002 ms per point', () => {
-    const N = 20000;
-    const t0 = performance.now();
-    let sum = 0;
-    for (let i = 0; i < N; i++) {
-      sum += elevation(SPAWN.x + (i & 127), SPAWN.z + ((i >> 7) & 127), DEFAULT_SEED, 0);
+  // Wall-clock thresholds in a unit test: warm the JIT first and take the best
+  // of several runs, so transient machine load cannot fail the build. Real
+  // measurements live in `bun run bench`.
+  function bestMsPerCall(n: number, fn: (i: number) => void): number {
+    for (let i = 0; i < n; i++) fn(i); // warm-up to optimized tiers
+    let best = Infinity;
+    for (let run = 0; run < 5; run++) {
+      const t0 = performance.now();
+      for (let i = 0; i < n; i++) fn(i);
+      best = Math.min(best, (performance.now() - t0) / n);
     }
-    const t1 = performance.now();
-    const msPerPoint = (t1 - t0) / N;
+    return best;
+  }
 
+  it('elevation function evaluates in < 0.002 ms per point', () => {
+    let sum = 0;
+    const msPerPoint = bestMsPerCall(20000, (i) => {
+      sum += elevation(SPAWN.x + (i & 127), SPAWN.z + ((i >> 7) & 127), DEFAULT_SEED, 0);
+    });
     expect(Number.isFinite(sum)).toBe(true);
     expect(msPerPoint).toBeLessThan(0.002); // 2 microseconds target
   });
 
   it('physics loop tick executes in < 0.005 ms per tick', () => {
-    const N = 10000;
     const p: PlayerState = {
       x: SPAWN.x,
       y: 350.0,
@@ -699,18 +707,8 @@ describe('17. Performance Benchmark Thresholds (§VII Benchmark Standard)', () =
       vz: 1.0,
       grounded: true,
     };
-    const t0 = performance.now();
-    for (let i = 0; i < N; i++) {
-      updatePlayer(
-        p,
-        { forward: 1, strafe: 0, jump: false, sprint: true, yaw: 1.0 },
-        0.016,
-        DEFAULT_SEED,
-      );
-    }
-    const t1 = performance.now();
-    const msPerTick = (t1 - t0) / N;
-
+    const input = { forward: 1, strafe: 0, jump: false, sprint: true, yaw: 1.0 };
+    const msPerTick = bestMsPerCall(10000, () => updatePlayer(p, input, 0.016, DEFAULT_SEED));
     expect(msPerTick).toBeLessThan(0.005); // 5 microseconds target
   });
 });
