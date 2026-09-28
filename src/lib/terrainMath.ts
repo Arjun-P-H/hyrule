@@ -88,13 +88,24 @@ export function vnoise(x: number, y: number, seed: number): number {
   const uy1 = (uy0 + 0x27d4eb2f) | 0;
   const sTerm = Math.imul(seed | 0, 0x9e3779b9);
 
-  const h0 = uy0 ^ sTerm;
-  const h1 = uy1 ^ sTerm;
+  const h0 = (uy0 ^ sTerm) | 0;
+  const h1 = (uy1 ^ sTerm) | 0;
 
-  const a = hashU(ux0 ^ h0) * INV_U32_X2;
-  const b = hashU(ux1 ^ h0) * INV_U32_X2;
-  const c = hashU(ux0 ^ h1) * INV_U32_X2;
-  const d = hashU(ux1 ^ h1) * INV_U32_X2;
+  let ha = (ux0 ^ h0) | 0;
+  ha ^= ha >>> 16; ha = Math.imul(ha, 0x85ebca6b); ha ^= ha >>> 13; ha = Math.imul(ha, 0xc2b2ae35); ha ^= ha >>> 16;
+  const a = (ha >>> 0) * INV_U32_X2;
+
+  let hb = (ux1 ^ h0) | 0;
+  hb ^= hb >>> 16; hb = Math.imul(hb, 0x85ebca6b); hb ^= hb >>> 13; hb = Math.imul(hb, 0xc2b2ae35); hb ^= hb >>> 16;
+  const b = (hb >>> 0) * INV_U32_X2;
+
+  let hc = (ux0 ^ h1) | 0;
+  hc ^= hc >>> 16; hc = Math.imul(hc, 0x85ebca6b); hc ^= hc >>> 13; hc = Math.imul(hc, 0xc2b2ae35); hc ^= hc >>> 16;
+  const c = (hc >>> 0) * INV_U32_X2;
+
+  let hd = (ux1 ^ h1) | 0;
+  hd ^= hd >>> 16; hd = Math.imul(hd, 0x85ebca6b); hd ^= hd >>> 13; hd = Math.imul(hd, 0xc2b2ae35); hd ^= hd >>> 16;
+  const d = (hd >>> 0) * INV_U32_X2;
 
   return (a + (b - a) * ux + (c - a) * uy + (a - b - c + d) * ux * uy) - 1.0;
 }
@@ -214,19 +225,11 @@ function ridged(
   if (dp <= 0.0) {
     if (octaves === 5 && lacunarity === 2.17 && gain === 0.48) {
       const n0 = 1.0 - Math.abs(vnoise(x, y, seed));
-      let sum = 0.5 * (n0 * n0);
-      let freq = 2.17, amp = 0.24;
-      const n1 = 1.0 - Math.abs(vnoise(x * freq, y * freq, seed + 34283));
-      sum += amp * (n1 * n1);
-      freq *= 2.17; amp *= 0.48;
-      const n2 = 1.0 - Math.abs(vnoise(x * freq, y * freq, seed + 68566));
-      sum += amp * (n2 * n2);
-      freq *= 2.17; amp *= 0.48;
-      const n3 = 1.0 - Math.abs(vnoise(x * freq, y * freq, seed + 102849));
-      sum += amp * (n3 * n3);
-      freq *= 2.17; amp *= 0.48;
-      const n4 = 1.0 - Math.abs(vnoise(x * freq, y * freq, seed + 137132));
-      return sum + amp * (n4 * n4);
+      const n1 = 1.0 - Math.abs(vnoise(x * 2.17, y * 2.17, seed + 34283));
+      const n2 = 1.0 - Math.abs(vnoise(x * 4.7089, y * 4.7089, seed + 68566));
+      const n3 = 1.0 - Math.abs(vnoise(x * 10.218313, y * 10.218313, seed + 102849));
+      const n4 = 1.0 - Math.abs(vnoise(x * 22.17373921, y * 22.17373921, seed + 137132));
+      return 0.5 * (n0 * n0) + 0.24 * (n1 * n1) + 0.1152 * (n2 * n2) + 0.055296 * (n3 * n3) + 0.02654208 * (n4 * n4);
     }
     let freq = 1.0, amp = 0.5, sum = 0.0;
     for (let i = 0; i < octaves; i++) {
@@ -809,7 +812,7 @@ export function elevation(x: number, z: number, seed: number, dp: number): numbe
   const valley = VALLEY.cDepth * (sv * sv);
 
   // §13 — dune rule + §12 — anomalies (raw plane, rigid Zonai geometry)
-  const dune = dunesE(x, z, seed, dp, duneAmount);
+  const dune = duneAmount > 0.0 ? dunesE(x, z, seed, dp, duneAmount) : 0.0;
   const anom = anomalyE(x, z, seed);
 
   return base * (CONTINENT.minFactor + (1.0 - CONTINENT.minFactor) * cont)
@@ -962,12 +965,12 @@ export function marchRay(
     }
 
     // Lipschitz factor ‖∇E‖ via forward differences at the pixel-footprint
-    // scale, refreshed every 2nd sample (bisection catches overshoot; the
+    // scale, refreshed every 3rd sample (bisection catches overshoot; the
     // horizon clamp below bounds the *stale* window — see §16/§34.1).
     // If ray is far above terrain, step is bounded by horizon clamp (anti-tunneling),
     // so gradient evaluation is bypassed, saving 2 full elevations per step!
-    if ((i & 1) === 0) {
-      if ((py - e) <= (t * 0.06 + 2.0) * 4.0) {
+    if ((i % 3) === 0) {
+      if ((py - e) <= (t * 0.06 + 2.0) * 2.5) {
         const eps = Math.max(dp, 0.15);
         const ex = elevation(px + eps, pz, seed, dp);
         const ez = elevation(px, pz + eps, seed, dp);

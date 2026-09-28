@@ -245,14 +245,21 @@ let m_steadyAllocSec = 0;
   const step = EXTENT / (SIZE - 1);
   const data = new Float32Array(SIZE * SIZE);
 
-  const t0 = performance.now();
-  for (let row = 0; row < SIZE; row++) {
-    const z = SPAWN.z - EXTENT / 2 + row * step;
-    for (let j = 0; j < SIZE; j++) {
-      const x = SPAWN.x - EXTENT / 2 + j * step;
-      data[row * SIZE + j] = elevation(x, z, DEFAULT_SEED, 0);
+  const generateHillshadeGrid = (buf: Float32Array) => {
+    for (let row = 0; row < SIZE; row++) {
+      const z = SPAWN.z - EXTENT / 2 + row * step;
+      for (let j = 0; j < SIZE; j++) {
+        const x = SPAWN.x - EXTENT / 2 + j * step;
+        buf[row * SIZE + j] = elevation(x, z, DEFAULT_SEED, 0);
+      }
     }
-  }
+  };
+
+  // Warm-up to trigger steady-state FTL JIT compilation
+  generateHillshadeGrid(data);
+
+  const t0 = performance.now();
+  generateHillshadeGrid(data);
   const t1 = performance.now();
   const totalMs = t1 - t0;
   m_hillshade = totalMs;

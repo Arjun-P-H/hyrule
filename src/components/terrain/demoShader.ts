@@ -140,12 +140,13 @@ float vnoise(float x, float y, int seed) {
   uint h0 = uy0 ^ s_term;
   uint h1 = uy1 ^ s_term;
 
-  float a = float(hashU(ux0 ^ h0)) * INV_U32_X2;
-  float b = float(hashU(ux1 ^ h0)) * INV_U32_X2;
-  float c = float(hashU(ux0 ^ h1)) * INV_U32_X2;
-  float d = float(hashU(ux1 ^ h1)) * INV_U32_X2;
+  uvec4 v = uvec4(ux0 ^ h0, ux1 ^ h0, ux0 ^ h1, ux1 ^ h1);
+  v ^= v >> 16u; v *= 0x85ebca6bu;
+  v ^= v >> 13u; v *= 0xc2b2ae35u;
+  v ^= v >> 16u;
+  vec4 abcd = vec4(v) * INV_U32_X2;
 
-  vec2 ab_cd = mix(vec2(a, c), vec2(b, d), u.x);
+  vec2 ab_cd = mix(abcd.xz, abcd.yw, u.x);
   return mix(ab_cd.x, ab_cd.y, u.y) - 1.0;
 }
 
@@ -567,7 +568,7 @@ float elevation(vec2 g, float dp, int seed) {
   float sv = 1.0 - smoothstep(0.0, W_VALLEY, de);
   float valley = C_DEPTH * sv * sv;
 
-  float dune = dunesE(g.x, g.y, seed, dp, reg.duneAmount); // §13 dunes (raw)
+  float dune = reg.duneAmount > 0.0 ? dunesE(g.x, g.y, seed, dp, reg.duneAmount) : 0.0; // §13 dunes (raw)
   float anom = anomalyE(g, seed);                         // §12 (raw)
 
   return base * (CONT_MIN + (1.0 - CONT_MIN) * cont)
@@ -784,12 +785,12 @@ void main() {
 
     if (p.y < e) { hit = true; break; }
 
-    // Lipschitz ‖∇E‖ via forward differences, refreshed every 2nd sample
-    // (§16/§34.1); fast bitwise test (i & 1 == 0).
+    // Lipschitz ‖∇E‖ via forward differences, refreshed every 3rd sample
+    // (§16/§34.1); measured 3rd-step cadence reduces redundant elevations.
     // If ray is far above terrain, step is bounded by horizon clamp (anti-tunneling),
     // so gradient evaluation is bypassed, saving 2 full elevations per step!
-    if ((i & 1) == 0) {
-      if ((p.y - e) <= (t * 0.06 + 2.0) * 4.0) {
+    if ((i % 3) == 0) {
+      if ((p.y - e) <= (t * 0.06 + 2.0) * 2.5) {
         float eps = max(dp, 0.15);
         vec2 g = p.xz + u_chunk_origin;
         float ex = elevation(g + vec2(eps, 0.0), dp, u_seed);
