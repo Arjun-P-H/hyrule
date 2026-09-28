@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState, type RefObject } from 'react';
 import { TERRAIN_FS, TERRAIN_VS, minifyGlsl } from '@/components/terrain/demoShader';
-import { elevation, updatePlayer, type PlayerState } from '@/lib/terrainMath';
+import { elevation, updatePlayer, type PlayerState, type InputState } from '@/lib/terrainMath';
 import {
   CHUNK_SIZE,
   DEFAULT_SEED,
@@ -218,6 +218,8 @@ export function useTerrainEngine({
 
       cam.fly.y = elevation(SPAWN.x, SPAWN.z, seedRef.current, 0) + 30;
       cam.player.y = cam.fly.y;
+
+      const playerInput: InputState = { forward: 0, strafe: 0, jump: false, sprint: false, yaw: 0 };
 
       const doRespawn = () => {
         const s = seedRef.current;
@@ -456,9 +458,14 @@ export function useTerrainEngine({
         let px: number, py: number, pz: number, grounded = false;
 
         if (cam.mode === 'walk') {
+          playerInput.forward = fwdKey;
+          playerInput.strafe = strKey;
+          playerInput.jump = jump;
+          playerInput.sprint = sprint;
+          playerInput.yaw = cam.yaw;
           updatePlayer(
             cam.player,
-            { forward: fwdKey, strafe: strKey, jump, sprint, yaw: cam.yaw },
+            playerInput,
             dt,
             s,
           );

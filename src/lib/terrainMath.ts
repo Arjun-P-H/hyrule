@@ -468,6 +468,28 @@ export function anomalyE(x: number, y: number, seed: number): number {
   let bcx = ipx + px0, bcy = ipy + py0;
   let btype = (h0 >>> 24) * INV_255;
 
+  const rOutCell = ANOMALY.rOut / ANOMALY.cell;
+  const rOutCellSq = rOutCell * rOutCell;
+
+  // Cheap coarse rejection: if point is in cell interior (distance to all 4 borders >= rOutCell),
+  // no neighbor cell feature point can possibly fall within ANOMALY.rOut (620 m).
+  if (fx >= rOutCell && fx <= (1.0 - rOutCell) && fy >= rOutCell && fy <= (1.0 - rOutCell)) {
+    if (btype >= ANOMALY.probability || f1_sq >= rOutCellSq) return 0.0;
+    const cx = (ipx + px0) * ANOMALY.cell;
+    const cy = (ipy + py0) * ANOMALY.cell;
+    const dx = x - cx, dy = y - cy;
+    const r2 = dx * dx + dy * dy;
+    const r = Math.sqrt(r2);
+    const theta = Math.atan2(dy, dx);
+    const fall = 1.0 - smoothstep(ANOMALY.rIn, ANOMALY.rOut, r);
+    const t = r / ANOMALY.terraceStep;
+    const ft = t - Math.floor(t);
+    const steps = (Math.floor(t) + smoothstep(0.3, 0.7, ft)) * ANOMALY.terraceHeight;
+    const spire = ANOMALY.spireHeight * Math.exp(-r2 / (ANOMALY.spireRadius * ANOMALY.spireRadius));
+    const spiral = ANOMALY.spiralAmp * Math.sin(ANOMALY.spiralTurns * theta + ANOMALY.spiralRadial * r);
+    return fall * (steps + spire + spiral);
+  }
+
   const fx0_2 = fx * fx;
   const fx1 = 1.0 - fx;
   const fx1_2 = fx1 * fx1;
@@ -934,6 +956,7 @@ export function marchRay(
         const gap = my - elevation(mx, mz, seed, tm * opts.footprint);
         bisectRows.push({ i: b, t: tm, gap });
         if (gap < 0) hi = tm; else lo = tm;
+        if (!opts.record && (hi - lo) < 0.001) break;
       }
       return { hit: true, t: 0.5 * (lo + hi), rows, bisectRows };
     }

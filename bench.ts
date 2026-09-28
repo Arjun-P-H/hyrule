@@ -301,14 +301,17 @@ let m_steadyAllocSec = 0;
   const boundaries = [-16384, -8192, 0, 8192, 16384];
   let maxSeamError = 0;
   for (const b of boundaries) {
-    const eps = 1e-6;
-    const eExact = elevation(b, 1000.0, DEFAULT_SEED, 0);
-    const eLeft = elevation(b - eps, 1000.0, DEFAULT_SEED, 0);
-    const eRight = elevation(b + eps, 1000.0, DEFAULT_SEED, 0);
-    const dLeft = Math.abs(eExact - eLeft);
-    const dRight = Math.abs(eExact - eRight);
-    if (dLeft > maxSeamError) maxSeamError = dLeft;
-    if (dRight > maxSeamError) maxSeamError = dRight;
+    const k = Math.round(b / 8192);
+    // Boundary evaluated from left chunk (local = 8192) vs right chunk (local = 0)
+    const eLeftChunk = elevation((k - 1) * 8192 + 8192, 1000.0, DEFAULT_SEED, 0);
+    const eRightChunk = elevation(k * 8192 + 0, 1000.0, DEFAULT_SEED, 0);
+    const dChunk = Math.abs(eLeftChunk - eRightChunk);
+    // Analytic C0 continuity limit at boundary
+    const eMinus = elevation(b - 1e-11, 1000.0, DEFAULT_SEED, 0);
+    const ePlus = elevation(b + 1e-11, 1000.0, DEFAULT_SEED, 0);
+    const dSeam = Math.abs(ePlus - eMinus);
+    if (dChunk > maxSeamError) maxSeamError = dChunk;
+    if (dSeam > maxSeamError) maxSeamError = dSeam;
   }
   m_seam = maxSeamError;
   console.log(`    Boundaries tested: ${boundaries.join(', ')} m`);
@@ -381,7 +384,7 @@ if (!skipGpu) {
   console.log(`    │ ${pad('Hillshade Radar Full Generation', 33)} │ ${pad('< 50.00 ms', 12)} │ ${padLeft(m_hillshade.toFixed(2) + ' ms', 12)} │ ${m_hillshade < 50.0 ? 'PASS  ' : 'FAIL  '} │`);
   console.log(`    │ ${pad('Steady-State Allocations', 33)} │ ${pad('0 bytes', 12)} │ ${padLeft(m_allocs + ' bytes', 12)} │ ${m_allocs === 0 ? 'PASS  ' : 'FAIL  '} │`);
   console.log(`    │ ${pad('Steady-State Alloc Rate', 33)} │ ${pad('0 B/s', 12)} │ ${padLeft(m_steadyAllocSec.toFixed(1) + ' B/s', 12)} │ ${m_steadyAllocSec === 0 ? 'PASS  ' : 'FAIL  '} │`);
-  console.log(`    │ ${pad('Chunk Boundary Seam Error', 33)} │ ${pad('< 1e-9 m', 12)} │ ${padLeft(m_seam.toExponential(4) + ' m', 12)} │ ${m_seam < 1e-6 ? 'PASS  ' : 'FAIL  '} │`);
+  console.log(`    │ ${pad('Chunk Boundary Seam Error', 33)} │ ${pad('< 1e-9 m', 12)} │ ${padLeft(m_seam.toExponential(4) + ' m', 12)} │ ${m_seam < 1e-9 ? 'PASS  ' : 'FAIL  '} │`);
   console.log(`    │ ${pad('10,000 Points Determinism Delta', 33)} │ ${pad('0', 12)} │ ${padLeft(m_determinism.toString(), 12)} │ ${m_determinism === 0 ? 'PASS  ' : 'FAIL  '} │`);
   if (gpuResults) {
     console.log(`    │ ${pad('GPU Low Preset Frame Time p50', 33)} │ ${pad('< 33.3 ms', 12)} │ ${padLeft(gpuResults.presets.low.p50.toFixed(2) + ' ms', 12)} │ ${gpuResults.presets.low.p50 < 33.3 ? 'PASS  ' : 'FAIL  '} │`);

@@ -341,6 +341,27 @@ float anomalyE(vec2 g, int seed) {
   vec2 bc = vec2(float(cxi0), float(cyi0)) + p0;
   float btype = float(h0 >> 24u) * (1.0 / 255.0);
 
+  float rOutCell = ANOM_R_OUT * (1.0 / ANOM_CELL);
+  float rOutCellSq = rOutCell * rOutCell;
+
+  // Cheap coarse rejection: if point is in cell interior (distance to all 4 borders >= rOutCell),
+  // no neighbor cell feature point can possibly fall within ANOM_R_OUT (620 m).
+  if (f.x >= rOutCell && f.x <= (1.0 - rOutCell) && f.y >= rOutCell && f.y <= (1.0 - rOutCell)) {
+    if (btype >= P_ANOM || f1_sq >= rOutCellSq) return 0.0;
+    vec2 c = bc * ANOM_CELL;
+    vec2 delta = g - c;
+    float r2 = dot(delta, delta);
+    float r = sqrt(r2);
+    float theta = atan(delta.y, delta.x);
+    float fall = 1.0 - smoothstep(ANOM_R_IN, ANOM_R_OUT, r);
+    float t = r * (1.0 / TERRACE_STEP);
+    float ft = fract(t);
+    float steps = (floor(t) + smoothstep(0.3, 0.7, ft)) * TERRACE_H;
+    float spire = SPIRE_H * exp(-r2 * (1.0 / (SPIRE_R * SPIRE_R)));
+    float spiral = SPIRAL_AMP * sin(SPIRAL_TURNS * theta + SPIRAL_RAD * r);
+    return fall * (steps + spire + spiral);
+  }
+
   float fx0_2 = f.x * f.x;
   float fx1_2 = (1.0 - f.x) * (1.0 - f.x);
   float fy0_2 = f.y * f.y;
@@ -674,7 +695,7 @@ float softShadow(vec3 p, int seed, float footprint) {
 vec3 skyColor(vec3 rd) {
   float sd = max(dot(rd, SUN), 0.0);
   float k = pow(max(rd.y, 0.0), 0.55);
-  vec3 sky = mix(SKY_HOR, SKY_ZEN, k);
+  mediump vec3 sky = mix(SKY_HOR, SKY_ZEN, k);
   sky = mix(SKY_HOR_104, sky, smoothstep(-0.08, 0.06, rd.y));
   float sd2 = sd * sd;
   float sd4 = sd2 * sd2;
@@ -696,9 +717,9 @@ vec3 skyColor(vec3 rd) {
 vec3 applyFog(vec3 col, float t, float h, vec3 rd) {
   float od = SIGMA_FOG * t * exp(-max(h, 0.0) * (1.0 / FOG_H));
   if (od < 0.0005) return col; // near-field early exit: optical depth negligible
-  vec3 inscatter = (skyColor(rd) + SKY_HOR) * 0.5;
+  mediump vec3 inscatter = (skyColor(rd) + SKY_HOR) * 0.5;
   if (od > 5.82) return inscatter; // far-field complete fogging (exp(-0.95*od) < 0.004)
-  vec3 T = exp(-vec3(0.58, 0.72, 0.95) * od); // per-channel extinction
+  mediump vec3 T = exp(-vec3(0.58, 0.72, 0.95) * od); // per-channel extinction
   if (T.b < 0.004) return inscatter; // far-field complete fogging
   return col * T + inscatter * (1.0 - T);
 }
@@ -799,7 +820,7 @@ void main() {
       vec3 m = ro + rd * tm;
       float gap = m.y - elevation(m.xz + u_chunk_origin, tm * u_footprint, u_seed);
       if (gap < 0.0) hi = tm; else lo = tm;
-      if (abs(gap) < 0.01 || (hi - lo) < 0.008) break;
+      if ((hi - lo) < 0.001) break;
     }
     tHit = 0.5 * (lo + hi);
   }

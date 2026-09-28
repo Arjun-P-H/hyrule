@@ -2,6 +2,9 @@ import { describe, it, expect } from 'bun:test';
 import {
   hashU,
   hash01,
+  cellPoint,
+  cellType,
+  voronoi,
   quintic,
   vnoise,
   worleyEdge,
@@ -55,6 +58,26 @@ describe('1. MurmurHash3 & Integer Determinism', () => {
     const a = hashU(100);
     const b = hashU(101);
     expect(a).not.toBe(b);
+  });
+
+  it('hash01, cellPoint, and cellType satisfy range and packing contracts', () => {
+    for (let ix = -10; ix <= 10; ix++) {
+      for (let iy = -10; iy <= 10; iy++) {
+        const u = hash01(ix, iy, DEFAULT_SEED);
+        expect(u).toBeGreaterThanOrEqual(0.0);
+        expect(u).toBeLessThanOrEqual(1.0);
+
+        const [px, py] = cellPoint(ix, iy, DEFAULT_SEED);
+        expect(px).toBeGreaterThanOrEqual(0.0);
+        expect(px).toBeLessThanOrEqual(1.0);
+        expect(py).toBeGreaterThanOrEqual(0.0);
+        expect(py).toBeLessThanOrEqual(1.0);
+
+        const ct = cellType(ix, iy, DEFAULT_SEED);
+        expect(ct).toBeGreaterThanOrEqual(0.0);
+        expect(ct).toBeLessThanOrEqual(1.0);
+      }
+    }
   });
 });
 
@@ -878,14 +901,95 @@ describe('19. Analytic Directional Gradient & Numerical Determinism (§IV.L.1.c,
   });
 });
 
+function smoothstepHelper(e0: number, e1: number, x: number): number {
+  const t = Math.min(Math.max((x - e0) / (e1 - e0), 0.0), 1.0);
+  return t * t * (3.0 - 2.0 * t);
+}
+
+function worleyEdgeUnprunedReference(x: number, y: number, seed: number): number {
+  const ipx = Math.floor(x) | 0, ipy = Math.floor(y) | 0;
+  const fx = x - ipx, fy = y - ipy;
+  const sTerm = Math.imul(seed | 0, 0x9e3779b9);
+  let f1_sq = Infinity, f2_sq = Infinity;
+
+  for (let dy = -1; dy <= 1; dy++) {
+    const cy = (ipy + dy) | 0;
+    const cyTerm = Math.imul(cy, 0x27d4eb2f);
+    for (let dx = -1; dx <= 1; dx++) {
+      const cx = (ipx + dx) | 0;
+      let h = (cx ^ cyTerm ^ sTerm) | 0;
+      h ^= h >>> 16; h = Math.imul(h, 0x85ebca6b); h ^= h >>> 13; h = Math.imul(h, 0xc2b2ae35); h ^= h >>> 16;
+      const px = (h & 0xfff) * (1.0 / 4095.0);
+      const py = ((h >>> 12) & 0xfff) * (1.0 / 4095.0);
+      const dist_x = dx + px - fx;
+      const dist_y = dy + py - fy;
+      const d2 = dist_x * dist_x + dist_y * dist_y;
+      if (d2 < f1_sq) {
+        f2_sq = f1_sq;
+        f1_sq = d2;
+      } else if (d2 < f2_sq) {
+        f2_sq = d2;
+      }
+    }
+  }
+  return Math.sqrt(f2_sq) - Math.sqrt(f1_sq);
+}
+
+function anomalyEUnprunedReference(x: number, y: number, seed: number): number {
+  const ax = x * (1.0 / ANOMALY.cell), ay = y * (1.0 / ANOMALY.cell);
+  const ipx = Math.floor(ax) | 0, ipy = Math.floor(ay) | 0;
+  const fx = ax - ipx, fy = ay - ipy;
+  const sTerm = Math.imul((seed + 400) | 0, 0x9e3779b9);
+  let f1_sq = Infinity;
+  let bcx = 0, bcy = 0, btype = 0;
+
+  for (let dy = -1; dy <= 1; dy++) {
+    const cy = (ipy + dy) | 0;
+    const cyTerm = Math.imul(cy, 0x27d4eb2f);
+    for (let dx = -1; dx <= 1; dx++) {
+      const cx = (ipx + dx) | 0;
+      let h = (cx ^ cyTerm ^ sTerm) | 0;
+      h ^= h >>> 16; h = Math.imul(h, 0x85ebca6b); h ^= h >>> 13; h = Math.imul(h, 0xc2b2ae35); h ^= h >>> 16;
+      const px = (h & 0xfff) * (1.0 / 4095.0);
+      const py = ((h >>> 12) & 0xfff) * (1.0 / 4095.0);
+      const dist_x = dx + px - fx;
+      const dist_y = dy + py - fy;
+      const d2 = dist_x * dist_x + dist_y * dist_y;
+      if (d2 < f1_sq) {
+        f1_sq = d2;
+        bcx = cx + px;
+        bcy = cy + py;
+        btype = (h >>> 24) * (1.0 / 255.0);
+      }
+    }
+  }
+
+  if (btype >= ANOMALY.probability) return 0.0;
+  const cx = bcx * ANOMALY.cell;
+  const cy = bcy * ANOMALY.cell;
+  const d_x = x - cx, d_y = y - cy;
+  const r2 = d_x * d_x + d_y * d_y;
+  const r = Math.sqrt(r2);
+  if (r >= ANOMALY.rOut) return 0.0;
+  const fall = 1.0 - smoothstepHelper(ANOMALY.rIn, ANOMALY.rOut, r);
+  const t = r / ANOMALY.terraceStep;
+  const ft = t - Math.floor(t);
+  const steps = (Math.floor(t) + smoothstepHelper(0.3, 0.7, ft)) * ANOMALY.terraceHeight;
+  const spire = ANOMALY.spireHeight * Math.exp(-r2 / (ANOMALY.spireRadius * ANOMALY.spireRadius));
+  const spiral = ANOMALY.spiralAmp * Math.sin(ANOMALY.spiralTurns * Math.atan2(d_y, d_x) + ANOMALY.spiralRadial * r);
+  return fall * (steps + spire + spiral);
+}
+
 describe('20. Cellular Voronoi Pruning & Traversal Invariance (§IV.B.5, §IV.L)', () => {
   it('worleyEdge matches exhaustive unpruned cellular search', () => {
     for (let i = 0; i < 500; i++) {
       const x = (i * 123.45) % 10000;
       const y = (i * 678.91) % 10000;
       const edge = worleyEdge(x, y, DEFAULT_SEED);
+      const refEdge = worleyEdgeUnprunedReference(x, y, DEFAULT_SEED);
       expect(Number.isFinite(edge)).toBe(true);
       expect(edge).toBeGreaterThanOrEqual(0.0);
+      expect(Math.abs(edge - refEdge)).toBeLessThan(1e-10);
     }
   });
 
@@ -894,8 +998,27 @@ describe('20. Cellular Voronoi Pruning & Traversal Invariance (§IV.B.5, §IV.L)
       const x = (i * 456.78) % 20000 - 10000;
       const y = (i * 234.56) % 20000 - 10000;
       const anom = anomalyE(x, y, DEFAULT_SEED);
+      const refAnom = anomalyEUnprunedReference(x, y, DEFAULT_SEED);
       expect(Number.isFinite(anom)).toBe(true);
       expect(anom).toBeGreaterThanOrEqual(0.0);
+      expect(Math.abs(anom - refAnom)).toBeLessThan(1e-10);
+    }
+  });
+
+  it('voronoi produces valid geometric partition and edge matches worleyEdge', () => {
+    for (let i = 0; i < 200; i++) {
+      const x = (i * 123.45) % 10000;
+      const y = (i * 678.91) % 10000;
+      const res = voronoi(x, y, DEFAULT_SEED);
+      expect(Number.isFinite(res.f1)).toBe(true);
+      expect(Number.isFinite(res.f2)).toBe(true);
+      expect(res.f2).toBeGreaterThanOrEqual(res.f1);
+      expect(res.edge).toBeCloseTo(res.f2 - res.f1, 10);
+      expect(res.cellHash).toBeGreaterThanOrEqual(0.0);
+      expect(res.cellHash).toBeLessThanOrEqual(1.0);
+
+      const fastEdge = worleyEdge(x, y, DEFAULT_SEED);
+      expect(Math.abs(res.edge - fastEdge)).toBeLessThan(1e-10);
     }
   });
 
@@ -1012,6 +1135,7 @@ describe('24. Floating-Origin Toroidal Coordinate Invariance (§IV.G.1, §IV.G.2
         const prod = origin * freq;
         const quantized = Math.round(prod * 128) / 128;
         expect(Math.abs(prod - quantized)).toBeLessThan(1e-12);
+        expect(Math.fround(prod)).toBe(prod);
       }
     }
   });
@@ -1131,6 +1255,36 @@ describe('28. Extreme Boundary Coordinates & Floating-Point Stress Test (§IV.G,
     const e2 = elevation(1234.5678 + 1e-7, -8765.4321, DEFAULT_SEED, 0);
     expect(Math.abs(e2 - e1)).toBeLessThan(1e-4);
   });
+
+  it('large-scale coordinate fuzzing (±1,000,000m) maintains finite elevation, slope, and climate', () => {
+    let seedState = 12345;
+    const lcg = () => {
+      seedState = (Math.imul(1664525, seedState) + 1013904223) | 0;
+      return (seedState >>> 0) / 4294967295.0;
+    };
+
+    for (let i = 0; i < 2000; i++) {
+      const rx = (lcg() - 0.5) * 2_000_000;
+      const rz = (lcg() - 0.5) * 2_000_000;
+      const rSeed = (lcg() * 50000) | 0;
+      const h = elevation(rx, rz, rSeed, 0);
+      expect(Number.isFinite(h)).toBe(true);
+      expect(h).toBeLessThanOrEqual(MAX_WORLD_H);
+      expect(h).toBeGreaterThan(-500.0);
+
+      const [gx, gz] = gradient(rx, rz, rSeed, 0.25);
+      expect(Number.isFinite(gx)).toBe(true);
+      expect(Number.isFinite(gz)).toBe(true);
+
+      const temp = temperature(rx, rz, h, rSeed);
+      expect(Number.isFinite(temp)).toBe(true);
+
+      const moist = moisture(rx, rz, h, rSeed);
+      expect(Number.isFinite(moist)).toBe(true);
+      expect(moist).toBeGreaterThanOrEqual(-0.5);
+      expect(moist).toBeLessThanOrEqual(2.0);
+    }
+  });
 });
 
 describe('29. Zero-Allocation Hot-Loop Conformance & Heap Invariance (§IV.C.1, §IV.C.3)', () => {
@@ -1163,6 +1317,134 @@ describe('29. Zero-Allocation Hot-Loop Conformance & Heap Invariance (§IV.C.1, 
     expect(Number.isFinite(p.x)).toBe(true);
     expect(Number.isFinite(p.y)).toBe(true);
     expect(Number.isFinite(p.z)).toBe(true);
+  });
+});
+
+describe('30. Dynamic Resolution Scaling (DRS) Deadband & Hysteresis (§IV.D, §28)', () => {
+  interface DrsState {
+    scale: number;
+    lastDownscaleAt: number;
+    lastUpscaleAt: number;
+  }
+
+  function simulateDrsStep(
+    state: DrsState,
+    fpsEma: number,
+    now: number,
+    t0: number,
+    software = false,
+  ): boolean {
+    const minScale = software ? 0.15 : 0.35;
+    const maxScale = software ? 0.25 : 1.0;
+    if (now - t0 > 2500) {
+      if (fpsEma < 22 && now - state.lastDownscaleAt > 1500 && state.scale > minScale) {
+        state.scale = Math.max(minScale, state.scale * 0.85);
+        state.lastDownscaleAt = now;
+        state.lastUpscaleAt = now;
+        return true;
+      } else if (
+        fpsEma > 45 &&
+        now - state.lastUpscaleAt > 4000 &&
+        now - state.lastDownscaleAt > 5000 &&
+        state.scale < maxScale
+      ) {
+        state.scale = Math.min(maxScale, state.scale * 1.15);
+        state.lastUpscaleAt = now;
+        return true;
+      }
+    }
+    return false;
+  }
+
+  it('warmup window ignores low framerates during first 2500 ms', () => {
+    const state: DrsState = { scale: 1.0, lastDownscaleAt: 0, lastUpscaleAt: 0 };
+    const t0 = 1000;
+    for (let t = t0; t < t0 + 2500; t += 100) {
+      simulateDrsStep(state, 12, t, t0);
+    }
+    expect(state.scale).toBe(1.0);
+  });
+
+  it('deadband [22, 45] FPS maintains constant resolution scale indefinitely', () => {
+    const state: DrsState = { scale: 0.85, lastDownscaleAt: 0, lastUpscaleAt: 0 };
+    const t0 = 0;
+    for (let t = 3000; t < 20000; t += 50) {
+      simulateDrsStep(state, 30, t, t0);
+    }
+    expect(state.scale).toBe(0.85);
+  });
+
+  it('sustained 14-FPS load downscales at 1500 ms intervals and clamps at minScale without thrashing', () => {
+    const state: DrsState = { scale: 1.0, lastDownscaleAt: 0, lastUpscaleAt: 0 };
+    const t0 = 0;
+    const downscaleTimestamps: number[] = [];
+
+    for (let t = 2600; t < 15000; t += 16) {
+      const changed = simulateDrsStep(state, 14, t, t0);
+      if (changed) downscaleTimestamps.push(t);
+    }
+
+    // Downscale must obey minimum 1500 ms dwell between changes
+    for (let i = 1; i < downscaleTimestamps.length; i++) {
+      expect(downscaleTimestamps[i] - downscaleTimestamps[i - 1]).toBeGreaterThanOrEqual(1500);
+    }
+
+    // Clamps at exactly minScale (0.35)
+    expect(state.scale).toBe(0.35);
+  });
+
+  it('upscale recovery enforces asymmetric 4000 ms dwell and 5000 ms cooldown from downscale', () => {
+    const state: DrsState = { scale: 0.5, lastDownscaleAt: 3000, lastUpscaleAt: 3000 };
+    const t0 = 0;
+
+    // Advance to 7900 ms (< 5000 ms from lastDownscaleAt): must NOT upscale yet
+    for (let t = 3100; t <= 7900; t += 100) {
+      simulateDrsStep(state, 60, t, t0);
+    }
+    expect(state.scale).toBe(0.5);
+
+    // At t = 8100 ms (now - lastDownscaleAt = 5100 > 5000 and now - lastUpscaleAt = 5100 > 4000): should upscale
+    simulateDrsStep(state, 60, 8100, t0);
+    expect(state.scale).toBeCloseTo(0.5 * 1.15, 6);
+
+    // Immediate next frame must not upscale again (must wait 4000 ms)
+    simulateDrsStep(state, 60, 8200, t0);
+    expect(state.scale).toBeCloseTo(0.5 * 1.15, 6);
+  });
+});
+
+describe('31. GPU fp32 Emulation vs CPU fp64 Twin Parity (§IV.G, §IV.L)', () => {
+  it('fp32 rebased coordinate elevation divergence is strictly bounded by PLAYER.groundBias (0.08m)', () => {
+    let maxDivergence = 0;
+    const testOrigins = [0, 8192, -8192, 16384, -16384];
+
+    for (const originX of testOrigins) {
+      for (const originZ of testOrigins) {
+        for (let i = 0; i < 200; i++) {
+          const localX = (i * 41.17) % CHUNK_SIZE;
+          const localZ = (i * 73.31) % CHUNK_SIZE;
+          const worldX = originX + localX;
+          const worldZ = originZ + localZ;
+
+          // CPU fp64 elevation
+          const e64 = elevation(worldX, worldZ, DEFAULT_SEED, 0);
+
+          // Simulated GPU fp32: chunk origin is exact dyadic rational, local offset is fp32
+          const localX32 = Math.fround(localX);
+          const localZ32 = Math.fround(localZ);
+          const originX32 = Math.fround(originX);
+          const originZ32 = Math.fround(originZ);
+          const e32 = elevation(originX32 + localX32, originZ32 + localZ32, DEFAULT_SEED, 0);
+
+          const div = Math.abs(e64 - e32);
+          if (div > maxDivergence) maxDivergence = div;
+          expect(div).toBeLessThan(PLAYER.groundBias);
+        }
+      }
+    }
+
+    // Must be well within the 8cm ground bias contract
+    expect(maxDivergence).toBeLessThan(0.04);
   });
 });
 
