@@ -94,7 +94,9 @@ precision is governed by distance from the world origin, not by chunk size.
 | 1,067 km | **113.3 mm** (48.5 mm) | 62.2 mm / 83.7 mm |
 
 - Rebase seam (the same world points evaluated from adjacent floating origins at 8.6, 98 and 1,000 km):
-  **0.000 mm** — both sides round to the same fp32 global grid.
+  **0.000 mm** — both sides round to the same fp32 global grid. *(Added after the freeze: at the
+  boundary through the world origin the far-side local coordinate (~8 km) is coarser than the global
+  one; GPU readback 0.14 mm, bound ≤ 1 fp32 ulp of 8192 m ≈ 1 mm — see `bench/baseline/parity.json`.)*
 - `GROUND_BIAS = 0.08 m` covers the measured divergence out to ≥ 108 km with 5× margin; it is **exceeded at ~1,000 km**.
 - Perceptual distance to the converged image (baseline shader at 160 march / 40 shadow steps), ΔE_ok:
 

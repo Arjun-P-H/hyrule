@@ -192,18 +192,19 @@ export const LIGHT = {
 export const PLAYER = {
   height: 1.7,
   /**
-   * GROUND_BIAS = 0.08 m absorbs residual fp32 vs fp64 divergence (spec §27, §31).
+   * GROUND_BIAS = 0.08 m absorbs the GPU (fp32) vs CPU (fp64) divergence of E
+   * (spec §27, §31). Measured, not assumed: bench/baseline/parity.json holds
+   * GPU readbacks of the production elevation() against this twin
+   * (`bun run bench --suites=parity`, Apple M1 / ANGLE-Metal):
    *
-   * Rationale:
-   * The CPU physics twin evaluates the closed-form terrain elevation E(x, z) in double
-   * precision (fp64, 53 mantissa bits) across continuous world coordinates.
-   * The GPU fragment shader evaluates E(x_local, z_local) in single precision (fp32,
-   * 24 mantissa bits) relative to the local chunk origin. Across a chunk radius of 8192 m,
-   * accumulating across 9 octaves of fBm, 5 octaves of ridged multifractal noise, and
-   * domain warp, the worst-case fp32 vs fp64 divergence bound is delta_max ≈ 0.024 m.
-   * Setting GROUND_BIAS = 0.08 m provides a safety margin of ~3.3x over delta_max,
-   * mathematically preventing the player avatar from falling through or visually clipping
-   * below the rendered terrain surface.
+   *     |x| from world origin   3 km   12 km   108 km   268 km   534 km   1,067 km
+   *     max |E_gpu − E_cpu|    0.6 mm  3.2 mm  15.0 mm  28.9 mm  99.4 mm  113 mm
+   *
+   * The shader evaluates noise on the fp32 *global* coordinate, so the error
+   * grows with distance from the origin (rebasing itself is seamless: ≤ 0.14 mm).
+   * 0.08 m therefore holds with ≥ 2.8× margin within ±300 km (5.3× within
+   * ±108 km) and is exceeded beyond ~500 km. tests/floatingOrigin.test.ts
+   * enforces the margin against the recorded measurement.
    */
   groundBias: 0.08,
   gravity: 22.0,

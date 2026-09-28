@@ -1,0 +1,132 @@
+{
+ "measuredAt": "2026-09-28T17:16:32.890Z",
+ "rev": "0b01d46-dirty",
+ "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M1) \u2014 headless Chrome 154",
+ "method": "GPU elevation() read back through an RGBA32F target at points formed exactly like the renderer (fp32 local + u_chunk_origin), vs the fp64 CPU twin at the intended point (bench/parity.ts)",
+ "probes": [
+  {
+   "id": "dist0-fine",
+   "distanceKm": 3.3,
+   "maxM": 0.0002764157215722207,
+   "p99M": 0.00022843203278455348
+  },
+  {
+   "id": "dist0-coarse",
+   "distanceKm": 3.3,
+   "maxM": 0.0006280603200394808,
+   "p99M": 0.0003111511603890449
+  },
+  {
+   "id": "dist10000-fine",
+   "distanceKm": 12.1,
+   "maxM": 0.00317364684065069,
+   "p99M": 0.0020782808770718475
+  },
+  {
+   "id": "dist10000-coarse",
+   "distanceKm": 12.1,
+   "maxM": 0.002324171158875288,
+   "p99M": 0.0011942277555476721
+  },
+  {
+   "id": "dist100000-fine",
+   "distanceKm": 107.7,
+   "maxM": 0.007819511875709395,
+   "p99M": 0.005905587378663313
+  },
+  {
+   "id": "dist100000-coarse",
+   "distanceKm": 107.7,
+   "maxM": 0.015020398379874678,
+   "p99M": 0.008936269112382433
+  },
+  {
+   "id": "dist250000-fine",
+   "distanceKm": 267.6,
+   "maxM": 0.0066822737585425784,
+   "p99M": 0.0046991414892545436
+  },
+  {
+   "id": "dist250000-coarse",
+   "distanceKm": 267.6,
+   "maxM": 0.028916151151520353,
+   "p99M": 0.018016872988937394
+  },
+  {
+   "id": "dist500000-fine",
+   "distanceKm": 534.1,
+   "maxM": 0.060731972858889094,
+   "p99M": 0.04988425025555898
+  },
+  {
+   "id": "dist500000-coarse",
+   "distanceKm": 534.1,
+   "maxM": 0.09944149099425204,
+   "p99M": 0.03690495480191203
+  },
+  {
+   "id": "dist1000000-fine",
+   "distanceKm": 1067.3,
+   "maxM": 0.021248418049211182,
+   "p99M": 0.01623679786477794
+  },
+  {
+   "id": "dist1000000-coarse",
+   "distanceKm": 1067.3,
+   "maxM": 0.11326916735015402,
+   "p99M": 0.048448725535408244
+  },
+  {
+   "id": "seam0-left",
+   "distanceKm": 2.6,
+   "maxM": 0.0001263853719208896,
+   "p99M": 0.00010026302290455646,
+   "rebaseSeamM": 0.0001373291015625
+  },
+  {
+   "id": "seam0-right",
+   "distanceKm": 2.6,
+   "maxM": 0.00013545606679699063,
+   "p99M": 0.0001022887885540058
+  },
+  {
+   "id": "seam1-left",
+   "distanceKm": 8.6,
+   "maxM": 0.0002584705359254258,
+   "p99M": 0.0001924200441578705,
+   "rebaseSeamM": 0
+  },
+  {
+   "id": "seam1-right",
+   "distanceKm": 8.6,
+   "maxM": 0.0002584705359254258,
+   "p99M": 0.0001924200441578705
+  },
+  {
+   "id": "seam12-left",
+   "distanceKm": 98.3,
+   "maxM": 0.0026358128188803676,
+   "p99M": 0.0019010668970622646,
+   "rebaseSeamM": 0
+  },
+  {
+   "id": "seam12-right",
+   "distanceKm": 98.3,
+   "maxM": 0.0026358128188803676,
+   "p99M": 0.0019010668970622646
+  },
+  {
+   "id": "seam122-left",
+   "distanceKm": 999.5,
+   "maxM": 0.01685135700358842,
+   "p99M": 0.013276836624363852,
+   "rebaseSeamM": 0
+  },
+  {
+   "id": "seam122-right",
+   "distanceKm": 999.5,
+   "maxM": 0.01685135700358842,
+   "p99M": 0.013276836624363852
+  }
+ ]
+}
