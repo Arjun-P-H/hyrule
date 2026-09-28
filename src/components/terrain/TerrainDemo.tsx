@@ -11,6 +11,7 @@
 
 import { useRef, useState } from 'react';
 import { useTerrainEngine, type PresetId } from '@/lib/engine/useTerrainEngine';
+import { useEngineStats } from '@/lib/engine/statsStore';
 import { DEFAULT_SEED } from '@/lib/constants';
 
 export default function TerrainDemo({
@@ -23,13 +24,14 @@ export default function TerrainDemo({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [running, setRunning] = useState(true);
 
-  const { stats, error, respawn } = useTerrainEngine({
+  const { statsStore, error, respawn } = useTerrainEngine({
     canvasRef,
     seed,
     preset,
     running,
     enablePointerLock: false,
   });
+  const stats = useEngineStats(statsStore);
 
   return (
     <div className="relative w-full overflow-hidden rounded-xl border bg-stone-950">

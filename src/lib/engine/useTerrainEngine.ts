@@ -1,6 +1,8 @@
 'use client';
 
 import { useEffect, useRef, useState, type RefObject } from 'react';
+import { assertNever } from '@/lib/utils';
+import { createStatsStore, type CamMode } from './statsStore';
 import { TERRAIN_FS, TERRAIN_VS, minifyGlsl } from '@/components/terrain/demoShader';
 import { elevation, updatePlayer, type PlayerState, type InputState } from '@/lib/terrainMath';
 import { DRS_HARDWARE, DRS_SOFTWARE, createDrsState, drsStep, updateFpsEma } from './drs';
@@ -15,19 +17,6 @@ import {
 } from '@/lib/constants';
 
 export type { PresetId };
-type CamMode = 'walk' | 'fly';
-
-export type EngineStats = {
-  fps: number;
-  x: number;
-  y: number;
-  z: number;
-  mode: CamMode;
-  grounded: boolean;
-  originX: number;
-  originZ: number;
-  resPct: number;
-};
 
 type CamState = {
   yaw: number;
@@ -75,7 +64,7 @@ export function useTerrainEngine({
   onPointerLockChange,
   onToggleHud,
 }: TerrainEngineOptions & { onToggleHud?: () => void }) {
-  const [stats, setStats] = useState<EngineStats | null>(null);
+  const [statsStore] = useState(createStatsStore);
   const [error, setError] = useState<string | null>(null);
 
   const seedRef = useRef(seed);
@@ -240,21 +229,26 @@ export function useTerrainEngine({
       respawnTriggerRef.current = doRespawn;
 
       const doToggleMode = () => {
-        if (cam.mode === 'fly') {
-          cam.mode = 'walk';
-          cam.player = {
-            x: cam.fly.x,
-            y: cam.fly.y,
-            z: cam.fly.z,
-            vx: 0,
-            vy: 0,
-            vz: 0,
-            grounded: false,
-          };
-        } else {
-          cam.mode = 'fly';
-          cam.fly = { x: cam.player.x, y: cam.player.y, z: cam.player.z };
-          cam.flyVel = { x: 0, y: 0, z: 0 };
+        switch (cam.mode) {
+          case 'fly':
+            cam.mode = 'walk';
+            cam.player = {
+              x: cam.fly.x,
+              y: cam.fly.y,
+              z: cam.fly.z,
+              vx: 0,
+              vy: 0,
+              vz: 0,
+              grounded: false,
+            };
+            break;
+          case 'walk':
+            cam.mode = 'fly';
+            cam.fly = { x: cam.player.x, y: cam.player.y, z: cam.player.z };
+            cam.flyVel = { x: 0, y: 0, z: 0 };
+            break;
+          default:
+            assertNever(cam.mode);
         }
       };
       modeToggleRef.current = doToggleMode;
@@ -416,6 +410,24 @@ export function useTerrainEngine({
       let lastOx = NaN, lastOz = NaN;
       let fx = 0, fy = 0, fz = 1, rx = 1, rz = 0;
 
+      // Telemetry for the HUD at most every 200 ms; created once so the 60 Hz
+      // loop allocates no closure per frame.
+      const publishStats = (
+        now: number, x: number, y: number, z: number, grounded: boolean,
+        originX: number, originZ: number, resScale: number,
+      ) => {
+        statsAt = now;
+        statsStore.set({
+          fps: Math.round(fpsEma),
+          x, y, z,
+          mode: cam.mode,
+          grounded,
+          originX,
+          originZ,
+          resPct: Math.round(resScale * auto.scale * 100),
+        });
+      };
+
       const frame = (now: number) => {
         raf = requestAnimationFrame(frame);
         const active = isIntersecting && isTabVisible && runRef.current;
@@ -455,7 +467,8 @@ export function useTerrainEngine({
 
         let px: number, py: number, pz: number, grounded = false;
 
-        if (cam.mode === 'walk') {
+        switch (cam.mode) {
+        case 'walk': {
           playerInput.forward = fwdKey;
           playerInput.strafe = strKey;
           playerInput.jump = jump;
@@ -471,7 +484,9 @@ export function useTerrainEngine({
           py = cam.player.y;
           pz = cam.player.z;
           grounded = cam.player.grounded;
-        } else {
+          break;
+        }
+        case 'fly': {
           const boost = sprint ? 2.5 : 1;
           const speed = PLAYER.flySpeed * boost * speedMultiplierRef.current;
           const wx = (fx * fwdKey + rx * strKey) * speed;
@@ -492,6 +507,10 @@ export function useTerrainEngine({
           px = cam.fly.x;
           py = cam.fly.y;
           pz = cam.fly.z;
+          break;
+        }
+        default:
+          assertNever(cam.mode);
         }
 
         const ox = Math.floor(px / CHUNK_SIZE) * CHUNK_SIZE;
@@ -499,25 +518,8 @@ export function useTerrainEngine({
         const lx = px - ox;
         const lz = pz - oz;
 
-        const emitStats = () => {
-          if (now - statsAt > 200) {
-            statsAt = now;
-            setStats({
-              fps: Math.round(fpsEma),
-              x: px,
-              y: py,
-              z: pz,
-              mode: cam.mode,
-              grounded,
-              originX: ox,
-              originZ: oz,
-              resPct: Math.round(p.resScale * auto.scale * 100),
-            });
-          }
-        };
-
         if (fence && gl.clientWaitSync(fence, 0, 0) === gl.TIMEOUT_EXPIRED) {
-          emitStats();
+          if (now - statsAt > 200) publishStats(now, px, py, pz, grounded, ox, oz, p.resScale);
           return;
         }
 
@@ -593,7 +595,7 @@ export function useTerrainEngine({
         // Dynamic Resolution Scaling with deadband and hysteresis (§28, drs.ts)
         if (drsStep(auto, drsCfg, fpsEma, now, t0)) applySize();
 
-        emitStats();
+        if (now - statsAt > 200) publishStats(now, px, py, pz, grounded, ox, oz, p.resScale);
       };
 
       raf = requestAnimationFrame(frame);
@@ -639,10 +641,10 @@ export function useTerrainEngine({
         ro?.disconnect();
       };
     }
-  }, [canvasRef, enablePointerLock]);
+  }, [canvasRef, enablePointerLock, statsStore]);
 
   return {
-    stats,
+    statsStore,
     error,
     respawn: () => respawnTriggerRef.current?.(),
     toggleMode: () => modeToggleRef.current?.(),

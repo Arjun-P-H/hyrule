@@ -16,11 +16,8 @@ import {
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
-import {
-  useTerrainEngine,
-  type PresetId,
-  type EngineStats,
-} from '@/lib/engine/useTerrainEngine';
+import { useTerrainEngine, type PresetId } from '@/lib/engine/useTerrainEngine';
+import { useEngineMode, useEngineStats, type StatsStore } from '@/lib/engine/statsStore';
 import { useSeedState } from '@/lib/engine/useSeedState';
 import {
   DEFAULT_SEED,
@@ -32,15 +29,18 @@ const SettingsModal = dynamic(() => import('./SettingsModal'), {
   ssr: false,
 });
 
+// Subscribes to engine telemetry itself, so its 5 Hz updates re-render only
+// this panel and not the page (tooltips, buttons, dialogs) around it.
 const HudOverlay = React.memo(function HudOverlay({
-  stats,
+  statsStore,
   preset,
   showHud,
 }: {
-  stats: EngineStats | null;
+  statsStore: StatsStore;
   preset: PresetId;
   showHud: boolean;
 }) {
+  const stats = useEngineStats(statsStore);
   if (!showHud || !stats) return null;
   return (
     <div className="flex flex-col gap-1.5 p-3 rounded-lg border border-stone-800/80 bg-stone-950/85 backdrop-blur-md font-mono text-xs text-stone-200 shadow-2xl w-[280px] max-w-[calc(100vw-32px)]">
@@ -86,7 +86,7 @@ export default function GamePage() {
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
-  const { stats, error, respawn, toggleMode } = useTerrainEngine({
+  const { statsStore, error, respawn, toggleMode } = useTerrainEngine({
     canvasRef,
     seed,
     preset,
@@ -98,6 +98,7 @@ export default function GamePage() {
     onPointerLockChange: setIsPointerLocked,
     onToggleHud: () => setShowHud((v) => !v),
   });
+  const mode = useEngineMode(statsStore);
 
   const toggleFullscreen = () => {
     if (!document.fullscreenElement) {
@@ -142,7 +143,7 @@ export default function GamePage() {
             </span>
           </div>
 
-          <HudOverlay stats={stats} preset={preset} showHud={showHud} />
+          <HudOverlay statsStore={statsStore} preset={preset} showHud={showHud} />
         </div>
 
         {/* Top Right Quick Controls */}
@@ -175,7 +176,7 @@ export default function GamePage() {
                 onClick={toggleMode}
                 className="h-8 border-stone-800 bg-stone-950/80 backdrop-blur text-stone-300 hover:bg-stone-900 hover:text-emerald-400 font-mono text-xs px-2.5 flex items-center gap-1.5"
               >
-                {stats?.mode === 'walk' ? (
+                {mode === 'walk' ? (
                   <>
                     <PersonStanding className="size-3.5 text-amber-400" />
                     <span>WALK</span>
@@ -256,7 +257,7 @@ export default function GamePage() {
             setFov={setFov}
             sensitivity={sensitivity}
             setSensitivity={setSensitivity}
-            mode={stats?.mode}
+            mode={mode ?? undefined}
             toggleMode={toggleMode}
             showHud={showHud}
             setShowHud={setShowHud}

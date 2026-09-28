@@ -5,6 +5,11 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
 }
 
+/** Exhaustiveness guard: a `switch` over a union that misses a case fails to compile here. */
+export function assertNever(value: never): never {
+  throw new Error(`Unhandled variant: ${String(value)}`);
+}
+
 /** Thin scrollbar utility classes. */
 export const THIN_SCROLL =
   '[scrollbar-width:thin] [scrollbar-color:#44403c_transparent] ' +
