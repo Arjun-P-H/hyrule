@@ -38,7 +38,7 @@ export default function TerrainDemo({
       <canvas
         ref={canvasRef}
         className="block h-[46vh] min-h-[320px] w-full cursor-grab touch-none active:cursor-grabbing sm:h-[56vh]"
-        aria-label="Live procedural terrain raymarcher — drag to look, WASD to move, F to toggle walk mode"
+        aria-label="Live procedural terrain raymarcher — drag to look, WASD to move, F to toggle walk mode, V for the third-person hero"
         role="img"
       />
 
@@ -48,6 +48,7 @@ export default function TerrainDemo({
           <span className="rounded bg-stone-950/70 px-2 py-1 backdrop-blur-sm">
             {stats.fps} fps · {preset.toUpperCase()} · {stats.mode.toUpperCase()}
             {stats.mode === 'walk' ? (stats.grounded ? ' · grounded' : ' · airborne') : ''}
+            {stats.mode === 'hero' && stats.action ? ` · ${stats.action}` : ''}
             {' '}· {stats.resPct}% res
           </span>
           <span className="rounded bg-stone-950/70 px-2 py-1 backdrop-blur-sm">
@@ -86,7 +87,7 @@ export default function TerrainDemo({
       {!error && (
         <div className="pointer-events-none absolute bottom-3 left-3 rounded bg-stone-950/70 px-2 py-1 font-mono text-[10px] text-stone-300 backdrop-blur-sm sm:text-[11px]">
           drag&nbsp;=look · WASD/arrows&nbsp;move · shift&nbsp;sprint · F&nbsp;walk/fly ·
-          space&nbsp;jump/up · C&nbsp;down · R&nbsp;respawn
+          V&nbsp;hero · space&nbsp;jump/up · C&nbsp;down · R&nbsp;respawn
         </div>
       )}
 

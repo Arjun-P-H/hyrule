@@ -5,6 +5,7 @@ import Link from 'next/link';
 import dynamic from 'next/dynamic';
 import {
   Compass,
+  Eye,
   Maximize2,
   Minimize2,
   Sliders,
@@ -13,11 +14,12 @@ import {
   Move,
   PersonStanding,
   RotateCcw,
+  SwitchCamera,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { useTerrainEngine, type PresetId } from '@/lib/engine/useTerrainEngine';
-import { useEngineMode, useEngineStats, type StatsStore } from '@/lib/engine/statsStore';
+import { useEngineApi, useEngineMode, useEngineStats, useHeroStamina, type CamMode, type StatsStore } from '@/lib/engine/statsStore';
 import { useSeedState } from '@/lib/engine/useSeedState';
 import {
   DEFAULT_SEED,
@@ -56,6 +58,7 @@ const HudOverlay = React.memo(function HudOverlay({
         <span className="text-stone-400">Mode:</span>
         <span className="text-amber-300 font-semibold text-right uppercase">
           {stats.mode} {stats.mode === 'walk' && (stats.grounded ? '(ground)' : '(air)')}
+          {stats.mode === 'hero' && stats.action && `· ${stats.action}`}
         </span>
         <span className="text-stone-400">Pos (X,Y,Z):</span>
         <span className="text-stone-200 text-right">
@@ -67,10 +70,72 @@ const HudOverlay = React.memo(function HudOverlay({
         </span>
         <span className="text-stone-400">Resolution:</span>
         <span className="text-stone-300 text-right">{stats.resPct}% native</span>
+        <span className="text-stone-400">Renderer:</span>
+        <span className="text-stone-300 text-right">{stats.api === 'webgpu' ? 'WebGPU · raster clipmap' : 'WebGL2 · ray-march'}</span>
       </div>
     </div>
   );
 });
+
+// The stamina wheel beside the hero (third person only): hidden while full,
+// red while exhausted. Updated at the 5 Hz telemetry rate; the CSS transition
+// fills the gaps between samples.
+const STAMINA_R = 15;
+const STAMINA_C = 2 * Math.PI * STAMINA_R;
+const StaminaWheel = React.memo(function StaminaWheel({ statsStore }: { statsStore: StatsStore }) {
+  const { percent, exhausted } = useHeroStamina(statsStore);
+  if (percent === null) return null;
+  const hidden = percent >= 100 && !exhausted;
+  // Beside the hero's head: the orbit camera frames the chest at the screen
+  // centre with ~6.4 m of height in view, so the offsets scale with the viewport.
+  return (
+    <div
+      aria-hidden
+      className={`pointer-events-none absolute left-[calc(50%+5vh)] top-[calc(50%-12vh)] z-10 transition-opacity duration-500 ${hidden ? 'opacity-0' : 'opacity-100'}`}
+    >
+      <svg width="40" height="40" viewBox="0 0 40 40">
+        <circle cx="20" cy="20" r={STAMINA_R} fill="rgba(12,10,9,0.45)" stroke="rgba(255,255,255,0.14)" strokeWidth="5" />
+        <circle
+          cx="20"
+          cy="20"
+          r={STAMINA_R}
+          fill="none"
+          stroke={exhausted ? '#ef4444' : '#4ade80'}
+          strokeWidth="5"
+          strokeLinecap="round"
+          strokeDasharray={STAMINA_C}
+          strokeDashoffset={STAMINA_C * (1 - percent / 100)}
+          transform="rotate(-90 20 20)"
+          style={{ transition: 'stroke-dashoffset 200ms linear, stroke 200ms' }}
+        />
+      </svg>
+    </div>
+  );
+});
+
+const MODE_LABEL: Record<CamMode, string> = { hero: 'HERO', walk: 'WALK', fly: 'FLY' };
+
+function ControlsBanner({ mode, isPointerLocked }: { mode: CamMode | null; isPointerLocked: boolean }) {
+  const keys: Array<[string, string]> =
+    mode === 'fly'
+      ? [['WASD', 'Move'], ['Shift', 'Boost'], ['Space', 'Up'], ['C', 'Down'], ['F', 'Land'], ['V', 'Hero'], ['R', 'Respawn']]
+      : mode === 'walk'
+        ? [['WASD', 'Move'], ['Shift', 'Sprint'], ['Space', 'Jump'], ['V', 'Third person'], ['F', 'Fly'], ['R', 'Respawn']]
+        : [['WASD', 'Move'], ['Shift', 'Sprint'], ['Space', 'Jump · Glide'], ['C', 'Sneak'], ['Wheel', 'Zoom'], ['V', 'First person'], ['F', 'Fly'], ['R', 'Respawn']];
+  return (
+    <div className="flex flex-wrap items-center justify-center gap-x-3 gap-y-1 px-4 py-2 rounded-full border border-stone-800/80 bg-stone-950/80 backdrop-blur-md font-mono text-[11px] text-stone-300 shadow-xl">
+      {keys.map(([k, what]) => (
+        <React.Fragment key={k}>
+          <span><strong className="text-emerald-400">{k}</strong> {what}</span>
+          <span className="text-stone-700">•</span>
+        </React.Fragment>
+      ))}
+      <span className="text-amber-300">
+        {isPointerLocked ? 'Mouse Locked (Esc to free)' : 'Click to Lock Mouse'}
+      </span>
+    </div>
+  );
+}
 
 export default function GamePage() {
   const { seed, seedText, onSeedChange, randomizeSeed } = useSeedState(DEFAULT_SEED);
@@ -86,7 +151,7 @@ export default function GamePage() {
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
-  const { statsStore, error, respawn, toggleMode } = useTerrainEngine({
+  const { statsStore, error, respawn, toggleMode, toggleView } = useTerrainEngine({
     canvasRef,
     seed,
     preset,
@@ -95,10 +160,13 @@ export default function GamePage() {
     speedMultiplier,
     enablePointerLock: true,
     running: true,
+    initialMode: 'hero',
+    renderer: 'auto',
     onPointerLockChange: setIsPointerLocked,
     onToggleHud: () => setShowHud((v) => !v),
   });
   const mode = useEngineMode(statsStore);
+  const api = useEngineApi(statsStore);
 
   const toggleFullscreen = () => {
     if (!document.fullscreenElement) {
@@ -139,12 +207,14 @@ export default function GamePage() {
               </Button>
             </Link>
             <span className="hidden sm:flex h-8 items-center px-2.5 rounded-md bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 font-mono text-xs font-semibold">
-              <Sparkles className="mr-1.5 size-3.5" /> 120-240 FPS WebGL2 Engine
+              <Sparkles className="mr-1.5 size-3.5" /> {api === 'webgpu' ? 'WebGPU Engine' : 'WebGL2 Engine'}
             </span>
           </div>
 
           <HudOverlay statsStore={statsStore} preset={preset} showHud={showHud} />
         </div>
+
+        <StaminaWheel statsStore={statsStore} />
 
         {/* Top Right Quick Controls */}
         <div className="absolute top-4 right-4 z-20 flex items-center gap-1.5 sm:gap-2 pointer-events-auto">
@@ -174,23 +244,38 @@ export default function GamePage() {
                 variant="outline"
                 size="sm"
                 onClick={toggleMode}
+                data-engine-mode={mode ?? ''}
                 className="h-8 border-stone-800 bg-stone-950/80 backdrop-blur text-stone-300 hover:bg-stone-900 hover:text-emerald-400 font-mono text-xs px-2.5 flex items-center gap-1.5"
               >
-                {mode === 'walk' ? (
-                  <>
-                    <PersonStanding className="size-3.5 text-amber-400" />
-                    <span>WALK</span>
-                  </>
+                {mode === 'fly' ? (
+                  <Compass className="size-3.5 text-emerald-400" />
+                ) : mode === 'walk' ? (
+                  <Eye className="size-3.5 text-amber-400" />
                 ) : (
-                  <>
-                    <Compass className="size-3.5 text-emerald-400" />
-                    <span>FLY</span>
-                  </>
+                  <PersonStanding className="size-3.5 text-amber-400" />
                 )}
+                <span>{mode ? MODE_LABEL[mode] : '—'}</span>
               </Button>
             </TooltipTrigger>
             <TooltipContent className="bg-stone-900 border-stone-700 font-mono text-xs">
-              Toggle Walk / Flight Mode (F)
+              {mode === 'fly' ? 'Land (F)' : 'Take off: Flight Mode (F)'}
+            </TooltipContent>
+          </Tooltip>
+
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="outline"
+                size="icon"
+                onClick={toggleView}
+                aria-label="Switch third / first person"
+                className="h-8 w-8 border-stone-800 bg-stone-950/80 backdrop-blur text-stone-300 hover:bg-stone-900 hover:text-emerald-400"
+              >
+                <SwitchCamera className="size-3.5" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent className="bg-stone-900 border-stone-700 font-mono text-xs">
+              {mode === 'hero' ? 'First Person (V)' : 'Third Person Hero (V)'}
             </TooltipContent>
           </Tooltip>
 
@@ -259,30 +344,15 @@ export default function GamePage() {
             setSensitivity={setSensitivity}
             mode={mode ?? undefined}
             toggleMode={toggleMode}
+            toggleView={toggleView}
             showHud={showHud}
             setShowHud={setShowHud}
           />
         )}
 
         {/* Bottom Center Controls Banner */}
-        <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-20 pointer-events-none">
-          <div className="flex items-center gap-3 px-4 py-2 rounded-full border border-stone-800/80 bg-stone-950/80 backdrop-blur-md font-mono text-[11px] text-stone-300 shadow-xl">
-            <span><strong className="text-emerald-400">WASD</strong> Move</span>
-            <span className="text-stone-700">•</span>
-            <span><strong className="text-emerald-400">Shift</strong> Sprint</span>
-            <span className="text-stone-700">•</span>
-            <span><strong className="text-emerald-400">Space</strong> Jump / Up</span>
-            <span className="text-stone-700">•</span>
-            <span><strong className="text-emerald-400">C</strong> Descend</span>
-            <span className="text-stone-700">•</span>
-            <span><strong className="text-emerald-400">F</strong> Walk / Fly</span>
-            <span className="text-stone-700">•</span>
-            <span><strong className="text-emerald-400">R</strong> Respawn</span>
-            <span className="text-stone-700">•</span>
-            <span className="text-amber-300">
-              {isPointerLocked ? 'Mouse Locked (Esc to free)' : 'Click to Lock Mouse'}
-            </span>
-          </div>
+        <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-20 pointer-events-none w-max max-w-[calc(100vw-32px)]">
+          <ControlsBanner mode={mode} isPointerLocked={isPointerLocked} />
         </div>
 
         {/* Pointer lock hint on canvas initial click */}

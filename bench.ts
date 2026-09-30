@@ -276,12 +276,14 @@ async function suiteBundle(report: Report): Promise<void> {
 }
 
 async function suitePlay(report: Report): Promise<void> {
-  console.log('  [play] scripted 30 s walk sessions on /game (fence on / off) + in-game GPU time + SpectorJS');
+  console.log('  [play] scripted 30 s sessions on /game: first-person walk (fence on / off), third-person hero; in-game GPU time; SpectorJS');
   await ensureBuild(report);
   report.play = await withProductionServer(async (base) => [
     await runPlaySession(base, { seconds: 30 }),
     await runPlaySession(base, { seconds: 30, fenceOff: true }),
     await runPlaySession(base, { seconds: 12, gpuTiming: true, spector: true }),
+    await runPlaySession(base, { seconds: 30, mode: 'hero' }),
+    await runPlaySession(base, { seconds: 12, gpuTiming: true, mode: 'hero' }),
   ]);
 }
 

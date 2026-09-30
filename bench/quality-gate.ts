@@ -19,6 +19,9 @@ const JUSTIFIED: Record<string, string> = {
   'src/components/ui/badge.tsx - badgeVariants': 'shadcn/ui component contract (variant helper exported with the component)',
   'src/components/ui/button.tsx - buttonVariants': 'shadcn/ui component contract (variant helper exported with the component)',
   'src/lib/engine/useTerrainEngine.ts - TerrainEngineOptions': 'parameter type of the exported useTerrainEngine()',
+  'src/lib/hero/camera.ts - HeroCamera': 'return type of the exported createHeroCamera()',
+  'src/lib/hero/locomotion.ts - HeroMove': 'type of the exported HeroState.move',
+  'src/lib/engine/useTerrainEngine.ts - RendererChoice': 'type of the exported TerrainEngineOptions.renderer',
 };
 
 const q = await runQuality();

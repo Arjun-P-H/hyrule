@@ -1,5 +1,6 @@
 /**
- * Headless Chrome launcher + a minimal Chrome DevTools Protocol client.
+ * Chrome launcher (headless, or a visible window with `headed`) + a minimal
+ * Chrome DevTools Protocol client.
  * The GPU path runs through ANGLE/Metal on macOS (the same backend the game
  * uses in desktop Chrome); `software: true` switches to SwiftShader, the
  * CPU rasterizer that stands in for the "no usable GPU" hardware floor.
@@ -18,6 +19,8 @@ export type ChromeOptions = {
   width?: number;
   height?: number;
   remoteDebugging?: boolean;
+  /** A visible window on the real display (vsync, compositor) instead of headless. */
+  headed?: boolean;
   extraArgs?: string[];
 };
 
@@ -30,7 +33,7 @@ export type ChromeHandle = {
 export async function launchChrome(opts: ChromeOptions): Promise<ChromeHandle> {
   const profile = mkdtempSync(path.join(tmpdir(), 'hyrule-bench-'));
   const args = [
-    '--headless=new',
+    ...(opts.headed ? [] : ['--headless=new']),
     `--user-data-dir=${profile}`,
     '--no-first-run',
     '--no-default-browser-check',

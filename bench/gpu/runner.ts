@@ -24,9 +24,16 @@ export type VariantKind = 'render' | 'instrument' | 'probe' | 'evalcost' | 'trut
 /**
  * `budgets` lets a revision render with its own preset step budgets (a pinned
  * baseline keeps the march/shadow steps it shipped with) instead of the
- * working tree's QUALITY_PRESETS.
+ * working tree's QUALITY_PRESETS. `hero` uploads each frame's packed hero
+ * uniforms (CameraFrame.hero); without it the hero is disabled.
  */
-export type Variant = { name: string; vs: string; fs: string; budgets?: Record<string, { marchSteps: number; shadowSteps: number }> };
+export type Variant = {
+  name: string;
+  vs: string;
+  fs: string;
+  budgets?: Record<string, { marchSteps: number; shadowSteps: number }>;
+  hero?: boolean;
+};
 
 function mustFind(src: string, anchor: string): number {
   const i = src.indexOf(anchor);
@@ -166,7 +173,17 @@ export type SessionResult = {
   blobs: BlobRecord[];
 };
 
-export async function runSession(cfg: SessionConfig): Promise<SessionResult> {
+/**
+ * Another page than page.js: the JavaScript to serve as /page.js (e.g. the
+ * bundled WebGPU page) and extra Chrome flags. The session protocol — /config,
+ * /env, /compile, /progress, /blob, /heartbeat, /done, /error — is the same.
+ */
+export type PageOptions = { pageJs?: string; chromeArgs?: string[] };
+
+export type SessionLimits = { software?: boolean; timeoutMs?: number; stallMs?: number };
+
+export async function runSession(cfg: SessionConfig | (SessionLimits & Record<string, unknown>), page: PageOptions = {}): Promise<SessionResult> {
+  const limits = cfg as SessionLimits;
   let env: Record<string, unknown> = {};
   let compile: SessionResult['compile'] = [];
   const blobs: BlobRecord[] = [];
@@ -182,7 +199,7 @@ export async function runSession(cfg: SessionConfig): Promise<SessionResult> {
   let lastMessage = 'session start';
   let lastAt = Date.now();
   const touch = (what: string) => { lastMessage = what; lastAt = Date.now(); };
-  const stallMs = cfg.stallMs ?? 120_000;
+  const stallMs = limits.stallMs ?? 120_000;
 
   const server = Bun.serve({
     port: 0,
@@ -197,7 +214,7 @@ export async function runSession(cfg: SessionConfig): Promise<SessionResult> {
           return new Response('ok');
         }
         case '/': return new Response(html, { headers: { 'content-type': 'text/html' } });
-        case '/page.js': return new Response(Bun.file(PAGE_JS), { headers: { 'content-type': 'text/javascript' } });
+        case '/page.js': return new Response(page.pageJs ?? Bun.file(PAGE_JS), { headers: { 'content-type': 'text/javascript' } });
         case '/config': return Response.json(cfg);
         case '/env': env = await req.json(); return new Response('ok');
         case '/compile': compile = await req.json(); return new Response('ok');
@@ -221,8 +238,8 @@ export async function runSession(cfg: SessionConfig): Promise<SessionResult> {
     },
   });
 
-  const chrome = await launchChrome({ url: `http://127.0.0.1:${server.port}/`, software: cfg.software });
-  const timeout = cfg.timeoutMs ?? 20 * 60_000;
+  const chrome = await launchChrome({ url: `http://127.0.0.1:${server.port}/`, software: limits.software, extraArgs: page.chromeArgs });
+  const timeout = limits.timeoutMs ?? 20 * 60_000;
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     let watchdog: ReturnType<typeof setInterval> | undefined;

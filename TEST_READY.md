@@ -1,8 +1,9 @@
 # TEST_READY — Browser Engine Test Suite Verification Report
 
 > **Superseded (2026-09-28).** This report describes an early 29-test suite. The current suite is
-> 116 tests / 43,997 assertions across 5 files; run `bun run quality` for live counts and coverage, and
-> see `docs/AUDIT_PHASE8.md` for how the files are organized.
+> 154 tests / 123,094 assertions across 6 files (the third-person hero added `tests/hero.test.ts`);
+> run `bun run quality` for live counts and coverage, and see `docs/AUDIT_PHASE8.md` for how the
+> files are organized.
 
 **Status**: READY / 100% PASSING  
 **Target Platform**: Browser (WebGL2 / Next.js)  

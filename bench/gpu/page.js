@@ -42,7 +42,7 @@ async function main() {
   }
   const UNIFORMS = ['u_res', 'u_time', 'u_cam_pos', 'u_chunk_origin', 'u_basis', 'u_tan_half', 'u_seed',
     'u_march_steps', 'u_shadow_steps', 'u_footprint', 'u_probe_local', 'u_probe_step', 'u_probe_dp',
-    'u_bench_dp', 'u_bench_base'];
+    'u_bench_dp', 'u_bench_base', 'u_hero_bound', 'u_hero_j', 'u_hero_torso', 'u_hero_head', 'u_hero_misc'];
   const programs = cfg.variants.map((v) => {
     const t0 = performance.now();
     const p = gl.createProgram();
@@ -52,7 +52,7 @@ async function main() {
     if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(`${v.name} link: ${gl.getProgramInfoLog(p)}`);
     const loc = {};
     for (const u of UNIFORMS) loc[u] = gl.getUniformLocation(p, u);
-    return { name: v.name, prog: p, loc, budgets: v.budgets || null, compileMs: performance.now() - t0 };
+    return { name: v.name, prog: p, loc, budgets: v.budgets || null, hero: !!v.hero, compileMs: performance.now() - t0 };
   });
   await postJSON('/compile', programs.map((p) => ({ name: p.name, compileMs: p.compileMs })));
 
@@ -82,6 +82,19 @@ async function main() {
     gl.uniform1i(L.u_march_steps, b.marchSteps);
     gl.uniform1i(L.u_shadow_steps, preset.shadowOff ? 0 : b.shadowSteps);
     gl.uniform1f(L.u_footprint, (2 * tanHalf) / Math.max(h, 2));
+    // Third-person hero: the frame carries the packed uniforms (rig.ts
+    // HERO_UNIFORM layout, camera-relative to this frame's camera); variants
+    // without `hero` — and revisions without the uniforms — draw no hero.
+    if (P.hero && frame.hero) {
+      const hb = frame.heroF32 || (frame.heroF32 = new Float32Array(frame.hero));
+      gl.uniform3fv(L.u_hero_j, hb.subarray(0, 54));
+      gl.uniformMatrix3fv(L.u_hero_torso, false, hb.subarray(54, 63));
+      gl.uniformMatrix3fv(L.u_hero_head, false, hb.subarray(63, 72));
+      gl.uniform4fv(L.u_hero_bound, hb.subarray(72, 76));
+      gl.uniform4fv(L.u_hero_misc, hb.subarray(76, 80));
+    } else if (L.u_hero_bound) {
+      gl.uniform4f(L.u_hero_bound, 0, 0, 0, 0);
+    }
   }
 
   function resize(w, h) {

@@ -19,6 +19,7 @@ export interface SettingsModalProps {
   setSensitivity: (v: number) => void;
   mode?: string;
   toggleMode: () => void;
+  toggleView: () => void;
   showHud: boolean;
   setShowHud: React.Dispatch<React.SetStateAction<boolean>>;
 }
@@ -37,6 +38,7 @@ export default function SettingsModal({
   setSensitivity,
   mode = 'fly',
   toggleMode,
+  toggleView,
   showHud,
   setShowHud,
 }: SettingsModalProps) {
@@ -149,6 +151,18 @@ export default function SettingsModal({
           className="h-6 px-2 text-[10px] border-stone-800 bg-stone-900 font-mono text-stone-200 uppercase"
         >
           {mode} (F)
+        </Button>
+      </div>
+
+      <div className="flex items-center justify-between pt-1 border-t border-stone-800/80">
+        <span className="text-stone-400 text-[11px]">Camera</span>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={toggleView}
+          className="h-6 px-2 text-[10px] border-stone-800 bg-stone-900 font-mono text-stone-200 uppercase"
+        >
+          {mode === 'hero' ? 'Third person' : mode === 'walk' ? 'First person' : 'Free'} (V)
         </Button>
       </div>
 

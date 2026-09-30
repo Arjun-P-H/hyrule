@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState, type RefObject } from 'react';
-import { createStatsStore } from './statsStore';
+import { createStatsStore, type CamMode } from './statsStore';
 import type { EngineHandle } from './engineCore';
 import { DEFAULT_SEED, CAMERA, type PresetId } from '@/lib/constants';
 
@@ -14,6 +14,32 @@ export type { PresetId };
 const engineCore = typeof window === 'undefined' ? null : import('./engineCore');
 engineCore?.catch(() => {});
 
+/**
+ * Which graphics API to draw with. 'auto' (the game) takes the WebGPU raster
+ * clipmap renderer (src/lib/gpu/engineGpu.ts, its own chunk) where the
+ * browser supports it and WebGL2 otherwise; `?renderer=webgl2` or
+ * `?renderer=webgpu` in the URL overrides. Backend creation is serialized:
+ * under React StrictMode the effect mounts twice on one canvas, and the
+ * canvas holds a single WebGPU configuration.
+ */
+export type RendererChoice = 'auto' | 'webgl2' | 'webgpu';
+
+function wantsWebGpu(choice: RendererChoice): boolean {
+  if (typeof window === 'undefined') return false;
+  const param = new URLSearchParams(window.location.search).get('renderer');
+  const want = param === 'webgl2' || param === 'webgpu' ? param : choice;
+  return want === 'webgpu' || (want === 'auto' && 'gpu' in navigator);
+}
+let gpuChain: Promise<unknown> = Promise.resolve();
+function createGpuBackendSerialized(canvas: HTMLCanvasElement) {
+  const next = gpuChain.then(async () => {
+    const { createGpuBackend } = await import('@/lib/gpu/engineGpu');
+    return createGpuBackend(canvas);
+  });
+  gpuChain = next.catch(() => {});
+  return next;
+}
+
 export type TerrainEngineOptions = {
   canvasRef: RefObject<HTMLCanvasElement | null>;
   seed?: number;
@@ -23,6 +49,10 @@ export type TerrainEngineOptions = {
   speedMultiplier?: number;
   enablePointerLock?: boolean;
   running?: boolean;
+  /** Mode on start: 'hero' (third person), 'walk' (first person) or 'fly'. */
+  initialMode?: CamMode;
+  /** Graphics API (default 'webgl2'); see RendererChoice. */
+  renderer?: RendererChoice;
   onPointerLockChange?: (locked: boolean) => void;
 };
 
@@ -41,6 +71,8 @@ export function useTerrainEngine({
   speedMultiplier = 1.0,
   enablePointerLock = false,
   running = true,
+  initialMode = 'fly',
+  renderer = 'webgl2',
   onPointerLockChange,
   onToggleHud,
 }: TerrainEngineOptions & { onToggleHud?: () => void }) {
@@ -70,9 +102,18 @@ export function useTerrainEngine({
     const canvas = canvasRef.current;
     if (!canvas) return;
     let cancelled = false;
-    (engineCore ?? import('./engineCore'))
-      .then(({ startEngine }) => {
-        if (cancelled) return;
+    const gpu = wantsWebGpu(renderer)
+      ? createGpuBackendSerialized(canvas).catch((e: unknown) => {
+          console.warn('WebGPU unavailable, drawing with WebGL2:', e);
+          return null;
+        })
+      : Promise.resolve(null);
+    Promise.all([engineCore ?? import('./engineCore'), gpu])
+      .then(([{ startEngine }, backend]) => {
+        if (cancelled) {
+          backend?.dispose();
+          return;
+        }
         handleRef.current = startEngine(canvas, statsStore, {
           seed: seedRef,
           preset: presetRef,
@@ -82,7 +123,7 @@ export function useTerrainEngine({
           speedMultiplier: speedMultiplierRef,
           onToggleHud: hudToggleRef,
           onPointerLockChange: onPointerLockChangeRef,
-        }, enablePointerLock);
+        }, enablePointerLock, initialMode, backend);
       })
       .catch((e: unknown) => {
         if (!cancelled) setError(e instanceof Error ? e.message : String(e));
@@ -92,12 +133,13 @@ export function useTerrainEngine({
       handleRef.current?.dispose();
       handleRef.current = null;
     };
-  }, [canvasRef, enablePointerLock, statsStore]);
+  }, [canvasRef, enablePointerLock, initialMode, renderer, statsStore]);
 
   return {
     statsStore,
     error,
     respawn: () => handleRef.current?.respawn(),
     toggleMode: () => handleRef.current?.toggleMode(),
+    toggleView: () => handleRef.current?.toggleView(),
   };
 }

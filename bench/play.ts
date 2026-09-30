@@ -2,8 +2,9 @@
  * Scripted steady-state play session against the production build.
  * ---------------------------------------------------------------------------
  * Drives /game in headless Chrome (ANGLE/Metal, 1280×720, DPR 1) through the
- * DevTools protocol: walk mode, W held, periodic jumps and strafes — the real
- * 60 Hz path (useTerrainEngine frame loop → updatePlayer → uniforms → draw).
+ * DevTools protocol: first-person walk (or the third-person hero with
+ * `mode: 'hero'`), W held, periodic jumps and strafes — the real 60 Hz path
+ * (useTerrainEngine frame loop → updatePlayer / updateHero → uniforms → draw).
  *
  * Measures, without touching production code:
  *   - JS heap allocation rate: V8 young generation pinned at 64 MB so no
@@ -33,6 +34,18 @@ export type PlayOptions = {
   spector?: boolean;
   software?: boolean;
   dpr?: number;
+  /** 'walk' (first person, the default) or 'hero' (third person). */
+  mode?: 'walk' | 'hero';
+  /** Seconds of play before the measured window (default 3: JIT tiers, DRS warm-up). */
+  settleSeconds?: number;
+  /**
+   * Graphics API, as the `renderer` URL parameter (default 'webgl2', which keeps
+   * sessions comparable with revisions that predate WebGPU); 'auto' opens /game
+   * bare, as a player would. WebGPU frames are counted per GPUQueue.submit.
+   */
+  renderer?: 'webgl2' | 'webgpu' | 'auto';
+  /** Play in a visible Chrome window (real display, vsync) instead of headless. */
+  headed?: boolean;
 };
 
 export type PlayResult = {
@@ -45,6 +58,8 @@ export type PlayResult = {
   /** usedSize delta / s; only meaningful when no GC ran (Chrome also collects on idle), else null. */
   heapBytesPerSec: number | null;
   allocByScript: Array<{ script: string; bytesPerSec: number; share: number }>;
+  /** Top allocating functions (sampled), `script:function:line`. */
+  allocByFunction: Array<{ fn: string; bytesPerSec: number; share: number }>;
   canvas: { first: [number, number]; last: [number, number]; minW: number; maxW: number; changes: number; reversals: number; timeline: Array<[number, number]> };
   gpuMs?: { n: number; p50: number; p95: number; mean: number };
   hudFps?: string;
@@ -82,6 +97,15 @@ const INSTRUMENT = (fenceOff: boolean, gpuTiming: boolean) => `(() => {
     W.pending.push(q);
   };
   ${fenceOff ? 'proto.fenceSync = function () { return null; };' : ''}
+  // WebGPU: the engine submits one command buffer per rendered frame.
+  if (window.GPUQueue) {
+    const submit = GPUQueue.prototype.submit;
+    GPUQueue.prototype.submit = function (bufs) {
+      if (W.draws === 0) W.firstDrawAt = performance.now();
+      W.draws++;
+      return submit.call(this, bufs);
+    };
+  }
   setInterval(() => {
     const c = document.querySelector('canvas');
     if (c && W.nSizes < 4096) { const o = 3 * W.nSizes++; W.sizes[o] = performance.now(); W.sizes[o + 1] = c.width; W.sizes[o + 2] = c.height; }
@@ -104,6 +128,7 @@ export async function runPlaySession(baseUrl: string, opts: PlayOptions): Promis
     url: 'about:blank',
     remoteDebugging: true,
     software: opts.software,
+    headed: opts.headed,
     extraArgs: ['--js-flags=--min-semi-space-size=64 --max-semi-space-size=64'],
   });
   try {
@@ -116,7 +141,8 @@ export async function runPlaySession(baseUrl: string, opts: PlayOptions): Promis
     }
     await cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: INSTRUMENT(!!opts.fenceOff, !!opts.gpuTiming) });
     const loaded = new Promise<void>((r) => cdp.on('Page.loadEventFired', () => r()));
-    await cdp.send('Page.navigate', { url: `${baseUrl}/game` });
+    const renderer = opts.renderer ?? 'webgl2';
+    await cdp.send('Page.navigate', { url: `${baseUrl}/game${renderer === 'auto' ? '' : `?renderer=${renderer}`}` });
     await loaded;
     await Bun.sleep(1500);
     const load = await evalJson<{ fcp: number; firstDraw: number; domInteractive: number }>(cdp,
@@ -129,12 +155,23 @@ export async function runPlaySession(baseUrl: string, opts: PlayOptions): Promis
       const label = opts.preset === 'low' ? 'LOW' : 'HIGH';
       await evalJson(cdp, `[...document.querySelectorAll('button')].find(b => b.textContent.trim() === '${label}')?.click(), true`);
     }
-    // focus page, enter walk mode (F), hold W
+    // focus page, enter the requested mode, hold W. Revisions without the
+    // data-engine-mode marker start in fly mode (F → walk, V → hero); newer
+    // ones start as the hero (V → walk).
     await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 640, y: 360 });
-    await key(cdp, 'KeyF', 'f', 70, 'keyDown');
-    await key(cdp, 'KeyF', 'f', 70, 'keyUp');
+    const want = opts.mode ?? 'walk';
+    let mode = '';
+    for (let i = 0; i < 50 && !mode; i++) {
+      mode = await evalJson<string>(cdp, `(() => { const m = document.querySelector('[data-engine-mode]'); return m ? m.getAttribute('data-engine-mode') : 'fly'; })()`);
+      if (!mode) await Bun.sleep(200);
+    }
+    if (mode !== want) {
+      const [code, name, vk] = want === 'walk' && mode === 'fly' ? ['KeyF', 'f', 70] as const : ['KeyV', 'v', 86] as const;
+      await key(cdp, code, name, vk, 'keyDown');
+      await key(cdp, code, name, vk, 'keyUp');
+    }
     await key(cdp, 'KeyW', 'w', 87, 'keyDown');
-    await Bun.sleep(3000); // settle: JIT tiers, DRS warm-up window (2.5 s)
+    await Bun.sleep((opts.settleSeconds ?? 3) * 1000); // settle: JIT tiers, DRS warm-up window (2.5 s)
 
     await cdp.send('HeapProfiler.collectGarbage');
     await cdp.send('HeapProfiler.startSampling', { samplingInterval: 128, includeObjectsCollectedByMajorGC: true, includeObjectsCollectedByMinorGC: true });
@@ -166,11 +203,14 @@ export async function runPlaySession(baseUrl: string, opts: PlayOptions): Promis
     let monotonic = true;
     for (let i = 1; i < heap.length; i++) if (heap[i] < heap[i - 1]) monotonic = false;
     const byScript = new Map<string, number>();
+    const byFn = new Map<string, number>();
     let total = 0;
     const visit = (n: SampleNode) => {
       if (n.selfSize > 0) {
         const u = n.callFrame.url ? n.callFrame.url.split('/').pop()! : '(native/harness)';
         byScript.set(u, (byScript.get(u) ?? 0) + n.selfSize);
+        const f = `${u}:${n.callFrame.functionName || '(anonymous)'}:${n.callFrame.lineNumber + 1}:${n.callFrame.columnNumber + 1}`;
+        byFn.set(f, (byFn.get(f) ?? 0) + n.selfSize);
         total += n.selfSize;
       }
       for (const c of n.children) visit(c);
@@ -196,6 +236,7 @@ export async function runPlaySession(baseUrl: string, opts: PlayOptions): Promis
       sampledBytesPerSec: total / secs,
       heapBytesPerSec: monotonic ? (heap[heap.length - 1] - heap[0]) / secs : null,
       allocByScript: [...byScript.entries()].sort((a, b) => b[1] - a[1]).slice(0, 6).map(([script, b]) => ({ script, bytesPerSec: b / secs, share: b / total })),
+      allocByFunction: [...byFn.entries()].sort((a, b) => b[1] - a[1]).slice(0, 12).map(([fn, b]) => ({ fn, bytesPerSec: b / secs, share: b / total })),
       canvas: {
         first: sizes.length ? [sizes[0][1], sizes[0][2]] : [0, 0],
         last: sizes.length ? [sizes[sizes.length - 1][1], sizes[sizes.length - 1][2]] : [0, 0],
@@ -220,7 +261,7 @@ export async function runPlaySession(baseUrl: string, opts: PlayOptions): Promis
   }
 }
 
-type SampleNode = { selfSize: number; callFrame: { url: string; functionName: string }; children: SampleNode[] };
+type SampleNode = { selfSize: number; callFrame: { url: string; functionName: string; lineNumber: number; columnNumber: number }; children: SampleNode[] };
 
 async function spectorCapture(cdp: CDPSession): Promise<Record<string, unknown>> {
   const bundle = readFileSync(path.join(ROOT, 'node_modules/spectorjs/dist/spector.bundle.js'), 'utf8');

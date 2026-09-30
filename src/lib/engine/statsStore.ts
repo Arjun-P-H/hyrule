@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from 'react';
+import type { HeroAction } from '@/lib/hero/locomotion';
 
 /**
  * §30 HUD telemetry channel between the engine's rAF loop and React.
@@ -8,7 +9,11 @@ import { useSyncExternalStore } from 'react';
  * only — not the page that owns the engine (buttons, tooltips, dialogs).
  */
 
-export type CamMode = 'walk' | 'fly';
+/** 'hero': third-person character · 'walk': first person · 'fly': free camera. */
+export type CamMode = 'hero' | 'walk' | 'fly';
+
+/** The graphics API the engine draws with. */
+export type RenderApi = 'webgl2' | 'webgpu';
 
 export type EngineStats = {
   fps: number;
@@ -20,6 +25,10 @@ export type EngineStats = {
   originX: number;
   originZ: number;
   resPct: number;
+  action: HeroAction | null; // what the hero is doing (third person only)
+  stamina: number;           // hero stamina wheel, 0..1
+  exhausted: boolean;
+  api: RenderApi;
 };
 
 export type StatsStore = {
@@ -56,7 +65,25 @@ export function selectMode(store: StatsStore): CamMode | null {
   return store.get()?.mode ?? null;
 }
 
-/** Camera mode only: re-renders the caller when walk/fly actually changes. */
+/** Camera mode only: re-renders the caller when the mode actually changes. */
 export function useEngineMode(store: StatsStore): CamMode | null {
   return useSyncExternalStore(store.subscribe, () => selectMode(store), serverSnapshot);
+}
+
+/** The graphics API slice: re-renders the caller only when it changes (once, at start). */
+export function useEngineApi(store: StatsStore): RenderApi | null {
+  return useSyncExternalStore(store.subscribe, () => store.get()?.api ?? null, serverSnapshot);
+}
+
+/** Stamina in whole percent while in third person, else null (a primitive slice). */
+export function selectStamina(store: StatsStore): number | null {
+  const s = store.get();
+  return s && s.mode === 'hero' ? Math.round(s.stamina * 100) : null;
+}
+
+/** Stamina wheel: re-renders the caller only when the shown value changes. */
+export function useHeroStamina(store: StatsStore): { percent: number | null; exhausted: boolean } {
+  const percent = useSyncExternalStore(store.subscribe, () => selectStamina(store), serverSnapshot);
+  const exhausted = useSyncExternalStore(store.subscribe, () => store.get()?.exhausted ?? false, () => false);
+  return { percent, exhausted };
 }

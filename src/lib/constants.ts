@@ -219,6 +219,94 @@ export const PLAYER = {
   springK: 60.0, // critically damped position spring (kD = 2√kS)
 } as const;
 
+/**
+ * Third-person hero locomotion (src/lib/hero/locomotion.ts), tuned after the
+ * open-world Zelda games: run by default, sprint / climb / glide / swim-dash
+ * spend one stamina wheel (1.0), running dry leaves the hero exhausted until
+ * the wheel refills. Speeds in m/s, rates per second, slopes as ‖∇E‖.
+ */
+export const HERO = {
+  runSpeed: 5.4,
+  sprintSpeed: 8.6,
+  sneakSpeed: 1.7,
+  exhaustedSpeed: 2.4,
+  wadeFactor: 0.7,        // speed factor with the feet in shallow water
+  accel: 10.0,            // ground velocity approach rate
+  airAccel: 2.5,          // steering rate in the air
+  turnRate: 12.0,         // facing approach rate
+  jumpVelocity: 7.2,      // ≈ 1.2 m apex at PLAYER.gravity
+  terminalVelocity: 50.0, // skydiving fall speed (drops from fly mode)
+  walkSlope: 1.0,         // steeper ground (> 45°) cannot be run up: climb or slide
+  climbExitSlope: 0.85,   // hysteresis: a climb ends once the wall eases below this
+  fallSlope: 2.2,         // ground falling away faster than this per metre → airborne
+  slideAccel: 16.0,
+  climbSpeed: 1.6,        // along the surface
+  climbJump: 1.4,         // metres surged uphill per climb jump
+  climbJumpSpeed: 5.0,
+  glideMinHeight: 2.5,    // clearance needed to open the paraglider
+  glideSpeed: 7.0,        // with steering input
+  glideDrift: 3.0,        // hands off
+  glideSink: 2.2,
+  glideAccel: 2.0,
+  swimDepth: 1.3,         // water deeper than this swims; shallower wades
+  swimFloat: 1.12,        // root depth below the surface while swimming (head above water)
+  swimSpeed: 2.2,
+  swimDashSpeed: 4.2,
+  staminaSprint: 0.2,
+  staminaClimb: 0.1,
+  staminaHang: 0.035,
+  staminaClimbJump: 0.18,
+  staminaGlide: 0.06,
+  staminaSwimDash: 0.2,
+  staminaRegen: 0.34,
+  staminaRegenExhausted: 0.25,
+  staminaRegenSwim: 0.1,
+  staminaRegenDelay: 0.6,
+} as const;
+
+/**
+ * Hero body (src/lib/hero/rig.ts) and the extents the renderer needs. The
+ * *Reach / limbPad values bound every primitive of heroMap() in
+ * demoShader.ts around its anchor joint (mirrored there as HERO_*; the
+ * bounding sphere the CPU uploads is built from them, so they must cover the
+ * shader's geometry — tests/hero.test.ts pins the mirror).
+ */
+export const HERO_SHAPE = {
+  pelvisH: 0.93,
+  hipW: 0.095,
+  hipDrop: 0.03,
+  thigh: 0.42,
+  shin: 0.41,
+  ankleH: 0.075,
+  footLen: 0.15,
+  spine: 0.37,
+  neck: 0.2,
+  shoulderW: 0.172,
+  shoulderDrop: 0.035,
+  upperArm: 0.27,
+  forearm: 0.25,
+  limbPad: 0.09,
+  headReach: 0.46,
+  backReach: 0.52,
+  gliderReach: 1.3,
+} as const;
+
+/** Third-person camera (src/lib/hero/camera.ts). */
+export const HERO_CAMERA = {
+  distance: 4.6,
+  minDistance: 1.6,       // obstructions never pull the eye closer than this
+  maxDistance: 11.0,
+  targetH: 1.45,          // look-at height above the root
+  clearance: 0.45,        // camera stays this far above terrain and water
+  pitchMin: -1.2,
+  pitchMax: 0.85,
+  pitch: -0.24,           // default orbit pitch (looking slightly down)
+  followXZ: 16.0,
+  followY: 7.0,
+  maxLag: 0.6,            // metres the look-at point may trail the hero
+  boomOut: 3.0,           // boom regrowth rate after an obstruction clears
+} as const;
+
 export type QualityPreset = {
   id: "low" | "med" | "high";
   label: string;
@@ -264,6 +352,41 @@ export const QUALITY_PRESETS: QualityPreset[] = [
     note: "Discrete / M-Pro class",
   },
 ];
+
+/**
+ * Sky islands (TotK-style floating landmasses), placed by hash: at most one
+ * per `cell` square, never crossing its border. Top: grassy relief over a
+ * jagged outline; underside: a cliff wall then an inverted rocky mountain.
+ * Top and underside meet exactly at the rim. Mirrored by the WGSL twin
+ * (src/lib/gpu/skyIslands.wgsl.ts); src/lib/skyIslands.ts is the CPU twin.
+ */
+export const SKY_ISLANDS = {
+  cell: 2048,         // m (dyadic) — one candidate per cell
+  probability: 0.32,
+  radiusMin: 110,     // m — top radius before the outline's wobble
+  radiusMax: 320,
+  altitudeMin: 430,   // m — base height of the top surface
+  altitudeMax: 820,
+  depthMin: 0.55,     // underside depth, × radius
+  depthMax: 1.0,
+  hill: 16,           // m — relief of the top
+  cliff: 26,          // m — rim wall below the top
+  rimDrop: 2.5,       // m — the top rounds down this far at the rim
+  outline: 0.14,      // radial wobble of the outline
+  inset: 0.2,         // centres stay within [inset, 1 − inset] of their cell
+} as const;
+
+/**
+ * Ruins and shrines (Zonai-style), placed by hash: src/lib/ruins.ts builds
+ * each site's stone boxes, shared by the renderer and the hero's collision.
+ */
+export const RUINS = {
+  cell: 1024,         // m — one candidate site per cell
+  probability: 0.3,
+  maxRelief: 4,       // m — ground this uneven under the platform: no site
+  shrineShare: 0.3,   // share of sites with a glowing shrine monolith
+  drawRange: 1500,    // m — sites drawn around the camera
+} as const;
 
 /** Camera (spec §23, §24). */
 export const CAMERA = {

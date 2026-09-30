@@ -84,6 +84,8 @@ export type CameraFrame = {
   pitch: number;
   /** Nearest keyframe label, for per-scene reporting. */
   scene: string;
+  /** Packed hero uniforms (src/lib/hero/rig.ts HERO_UNIFORM), camera-relative to this frame. */
+  hero?: number[];
 };
 
 export function generateCameraPath(totalFrames = 60, clearance = 20, probe = 12): CameraFrame[] {

@@ -1043,8 +1043,15 @@ export type InputState = {
  * gate slides the player off steep warped ridges. Evaluated on fp64 global
  * coordinates; PLAYER.groundBias absorbs the GPU's fp32 divergence.
  */
+/**
+ * Walkable surfaces over the terrain for updatePlayer (sky islands, ruins):
+ * given the player and the height of its feet, the ground there, or −∞. It
+ * may push the player out of walls (x, z, and the velocity into them).
+ */
+type ExtraGround = (s: PlayerState, feetY: number, seed: number) => number;
+
 export function updatePlayer(
-  s: PlayerState, input: InputState, dt: number, seed: number,
+  s: PlayerState, input: InputState, dt: number, seed: number, extraGround?: ExtraGround,
 ): void {
   const speed = PLAYER.walkSpeed * (input.sprint ? PLAYER.sprintMul : 1.0);
   let wishX = 0, wishZ = 0;
@@ -1069,7 +1076,10 @@ export function updatePlayer(
   // precision on GLOBAL coordinates; the GPU evaluates fp32(local + origin).
   // The measured difference (constants.ts, PLAYER.groundBias) is absorbed by
   // GROUND_BIAS below.
-  const groundZ = elevation(s.x, s.z, seed, 0) + PLAYER.groundBias + PLAYER.height;
+  const extra = extraGround ? extraGround(s, s.y - PLAYER.height - PLAYER.groundBias, seed) : -Infinity;
+  const terrain = elevation(s.x, s.z, seed, 0);
+  const onExtra = extra > terrain;
+  const groundZ = (onExtra ? extra : terrain) + PLAYER.groundBias + PLAYER.height;
 
   s.grounded = false;
   if (s.y < groundZ) {
@@ -1079,7 +1089,7 @@ export function updatePlayer(
   }
 
   // Slope gate: slide off steep warped ridges (spec §31 insert, zero-allocation)
-  if (s.grounded) {
+  if (s.grounded && !onExtra) {
     const gx = (elevation(s.x + 0.25, s.z, seed, 0) - elevation(s.x - 0.25, s.z, seed, 0)) * 2.0;
     const gz = (elevation(s.x, s.z + 0.25, seed, 0) - elevation(s.x, s.z - 0.25, seed, 0)) * 2.0;
     const mSq = gx * gx + gz * gz;

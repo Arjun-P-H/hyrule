@@ -43,10 +43,13 @@ holding interactive frame rates. Reproduce with `bun run bench`.
 | 8 | In-Browser Engine Settings & Controls | Dynamic FOV adjustment (60°-90°), mouse look sensitivity, flight speed multiplier (1x-3x), seed randomizer, respawn hotkey (R) | DONE |
 | 9 | Automated Test Suite | `tests/terrainMath.test.ts` validating MurmurHash3, dyadic frequencies, quintic interpolation, noise bounds, $E(x, z)$, and physics | DONE |
 | 10| Launcher Script | `play.command` starts local server if needed and directly opens `http://localhost:3000/game` in the browser | DONE |
+| 11| Third-Person Hero | `/game` starts in third person: a procedural green-tunic hero (no mesh, no texture) with run / sprint / sneak / jump / paraglider / climb / swim locomotion and a stamina wheel; **V** switches to first person and back, **F** to flight — see [`docs/HERO.md`](docs/HERO.md) | DONE |
 
 ## Code Layout
 - `src/app/game/page.tsx`: Fullscreen browser game page, controls HUD, settings modal
-- `src/lib/engine/useTerrainEngine.ts`: Unified headless WebGL2 engine hook, locomotion physics, and leak-free resource lifecycle
+- `src/lib/engine/useTerrainEngine.ts`: React binding for the engine (lazy-loads the engine core chunk)
+- `src/lib/engine/engineCore.ts`: WebGL2 engine core — frame loop, camera modes (hero / walk / fly), uniforms, DRS
+- `src/lib/hero/`: third-person hero — locomotion (`locomotion.ts`), procedural animation rig (`rig.ts`), orbit camera (`camera.ts`)
 - `src/components/terrain/demoShader.ts`: WebGL2 / GLSL ES 3.00 procedural terrain raymarching shader
 - `src/lib/terrainMath.ts`: TypeScript procedural mathematics, $E(x, z)$, climate, raymarcher, and player physics
 - `src/lib/constants.ts`: Shared mathematical constants, dyadic frequencies, player physics parameters, quality presets
@@ -56,4 +59,4 @@ holding interactive frame rates. Reproduce with `bun run bench`.
 - `src/components/FileBrowser.tsx`: Code browser serving engine source files via `/api/files`
 - `src/app/api/files/route.ts`: Secure source file server for browser engine files in `src/`
 - `play.command`: Double-clickable macOS launcher for opening the browser game
-- `tests/terrainMath.test.ts`: Automated test suite runnable via `bun test`
+- `tests/`: automated test suites runnable via `bun test` (`terrainMath`, `mathCore`, `floatingOrigin`, `drs`, `statsStore`, `hero`)
