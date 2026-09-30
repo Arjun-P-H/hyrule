@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from 'react';
 import type { HeroAction } from '@/lib/hero/locomotion';
+import type { SkyMode } from '@/lib/gpu/engineGpu';
 
 /**
  * §30 HUD telemetry channel between the engine's rAF loop and React.
@@ -29,6 +30,13 @@ export type EngineStats = {
   stamina: number;           // hero stamina wheel, 0..1
   exhausted: boolean;
   api: RenderApi;
+  /** The sky drawn ('cycle' | 'classic'; null: this renderer has only the classic sky), and the one asked for. */
+  sky: SkyMode | null;
+  skyWanted: SkyMode;
+  /** The sky's clock: hour of the day (0–24), stopped, real minutes per game day. */
+  hour: number;
+  paused: boolean;
+  dayMinutes: number;
 };
 
 export type StatsStore = {
@@ -73,6 +81,23 @@ export function useEngineMode(store: StatsStore): CamMode | null {
 /** The graphics API slice: re-renders the caller only when it changes (once, at start). */
 export function useEngineApi(store: StatsStore): RenderApi | null {
   return useSyncExternalStore(store.subscribe, () => store.get()?.api ?? null, serverSnapshot);
+}
+
+/** The sky and its clock, to the minute (a string slice: React re-renders only when it changes). */
+function selectSky(store: StatsStore): string | null {
+  const s = store.get();
+  if (!s) return null;
+  return `${s.sky ?? 'none'}|${s.skyWanted}|${Math.floor(s.hour * 60)}|${s.paused ? 1 : 0}|${s.dayMinutes}`;
+}
+
+type SkyState = { sky: SkyMode | null; wanted: SkyMode; minutes: number; paused: boolean; dayMinutes: number };
+
+/** The sky and its clock: re-renders the caller once a game minute at most. */
+export function useSkyState(store: StatsStore): SkyState | null {
+  const key = useSyncExternalStore(store.subscribe, () => selectSky(store), serverSnapshot);
+  if (!key) return null;
+  const [sky, wanted, minutes, paused, dayMinutes] = key.split('|');
+  return { sky: sky === 'none' ? null : (sky as SkyMode), wanted: wanted as SkyMode, minutes: Number(minutes), paused: paused === '1', dayMinutes: Number(dayMinutes) };
 }
 
 /** Stamina in whole percent while in third person, else null (a primitive slice). */

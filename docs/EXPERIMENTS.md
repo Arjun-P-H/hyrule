@@ -418,9 +418,142 @@ trees per view in open country (a forest view: a few hundred near), and trees hi
 that is dearer to shade than they are. In game (production build, High, 2560×1440 canvas): 60.0 fps in a visible Chrome
 window (third and first person) and headless, dynamic resolution never reduced.
 
+### The day–night sky (the classic sky kept as an option)
+
+The game now draws time. A day lasts 24 real minutes by default (12 or 48 in the settings);
+the sun and the moon move, the sky is computed from the air, and the light on the land
+follows both. The classic fixed sky stays one click away (Settings → Sky → Classic) and draws
+exactly as before: every classic frame of the gallery sets is identical to the pixel to the
+frame before this work (15 views, largest channel difference 0).
+
+**What makes each hour scenic in this world.** The world is long sight lines over hills,
+peaks to 1.3 km, sky islands, lakes and forests, under a hazy, stylised air. The cycle is
+designed round what light does to land like that:
+
+- *Relief from a moving low sun.* The sun keeps a real path: 30° latitude on an equinox that
+  never ends, rising due east at 06:00, 60° high toward −z at noon, setting due west at 18:00.
+  Mornings and evenings rake the relief, and mountain shadows sweep across the valleys as it
+  moves.
+- *Colour from the air, not from a palette.* Light reaches each point through the air toward
+  that point's own horizon, so a low sun turns it gold, then orange, then red. Midday light is
+  a near-neutral white, and the golden hour lasts while the sun is below ~15°.
+- *The last light on high places.* The land's horizon dips with altitude over a small planet
+  (R = 300 km). After a valley loses the sun, peaks and sky islands keep a red-gold glow for
+  ~20 game minutes (alpenglow), and clouds at 1.5 km keep it longest.
+- *A luminous twilight.* The sky is Earth's atmosphere (Rayleigh, Mie and ozone, after
+  Hillaire 2020), so the orange horizon under the sun and the pink Belt of Venus over Earth's
+  blue shadow opposite it appear on their own. Ozone keeps the blue hour blue.
+- *A night worth looking up at.* Stars turn about a pole 30° above the north: about 7 % of
+  sky cells hold one, twice as many along the Milky Way, and ~1 % are brilliant, with a
+  twinkle near the horizon. The moon is a textured sphere lit by the sun, with maria and a
+  large storybook disc; its 8-day month starts on a waxing gibbous rising in the east at the
+  first sunset. Shooting stars cross now and then.
+- *Weather that suits the hour.* Fair-weather clouds build through the afternoon so the sunset
+  has something to light (their undersides glow pink and orange). They dissolve after dusk, so
+  nights are clear for the stars and mornings fresh. Mist settles over the low land before
+  dawn and burns off by ten.
+- *Time where it is beautiful.* Time lingers through golden hour, sunset and blue hour
+  (×0.55) and hurries through the deep night (×1.7). Of a 24-minute day, ~7 minutes are
+  twilight, 6 night and 11 day.
+- *Night that stays readable.* Moonlight is ~1/900 of sunlight, darker than the blue hour as
+  it should be. The camera adapts partly to the light on the land (displayed brightness ∝
+  light^0.22): a moonlit night shows at about a quarter of day and a moonless one at about a
+  fifth, bluer and less saturated, as the eye's night vision is.
+
+**How it is drawn.**
+
+- **Shadows for any hour, baked once.** The sun and the moon run on the same great circle, so
+  a direction on it is one angle. For every clipmap texel, a march in the path's tilted plane
+  (out to 8 km, the land falling away over the small planet) finds the angle where light
+  first clears the land (rising) and where it sinks behind it (setting). Two numbers per texel
+  (rgba16float) serve the sun or the moon at any hour with no re-bake, and the shadows sweep
+  continuously. Accuracy against a brute-force march of the CPU twin in the same plane
+  (`bun bench/webgpu.ts horizons`: steps of 1 % of the distance; 3 cameras, 160 texels each):
+
+| Clipmap level | Median error | 95th percentile | Within 1° (= 4 game minutes) |
+| :--- | ---: | ---: | ---: |
+| 0 (0.5 m) | 0.05–0.11° | 0.5–1.6° | 84–99.7 % |
+| 3 (4 m) | 0.09–0.13° | 1.3–1.9° | 90–94 % |
+| 6 (32 m) | 0.29–0.33° | 3.5–5.1° | 79–81 % |
+
+  The first bake stepped 9 % of the distance and read heights through the level blend: at
+  level 0 only 69 % of the peak camera's texels were within 1°, almost all of them *lower*
+  than the truth (shadows cut short). Halving the step fixed that, and reading one level per
+  step halved the fetches without losing accuracy. What remains at the coarse levels is
+  mostly how heights are stored: a 32 m lattice read bilinearly shaves the crests that the
+  exact CPU twin sees.
+- **The sky.** Transmittance and multiple-scattering LUTs are computed once. Each frame a
+  192 × 108 sky-view LUT (azimuth × elevation, dense at the horizon) is integrated for the
+  sun and the moon together from the camera's altitude, and one probe pass averages it into
+  the fill light (toward and away from the key light, overhead, off the ground), the
+  horizon's colour as a cosine series round the key light's azimuth (the haze's colour), and
+  the exposure.
+- **The light rig** (`src/lib/sky/lightRig.ts`, CPU, 1 µs a frame, allocation-free). The key
+  light is the sun until it is 7.5° down (no altitude sees it then) and the moon from 8° down,
+  fading in over 3°, so the switch happens in the dark. Its colour is tabulated at 8 altitudes
+  packed toward the ground, where the dip changes fastest. The rig also sets saturation,
+  night vision, haze, mist, the clouds' rhythm and the stars.
+- **One light API for every surface** (`sky.wgsl.ts`: `keyDir`, `keyCol(y)`, `skyAmb(n, w)`,
+  `bounceCol`, `glow`…). Terrain, grass, trees, ruins, islands, waterfalls, water and the hero
+  all call it. The classic implementation returns the classic constants, which is why the
+  classic sky's frames are unchanged. The day–night one keeps each shader's tuned balance of
+  sun and fill (their weights `w`) and changes the light's colour and level.
+- **Art direction on top of the physics.** A colour-keeping soft clip keeps a sunset's pink on
+  the clouds instead of burning to white at a dusk exposure. At twilight, when the camera
+  exposes for lit peaks, the dome and haze (not the land's light) are lifted toward a luminous
+  pastel. Ozone absorbs red at 0.64 of green, as measured (Hillaire's table has 0.35, which
+  turns the blue hour violet).
+- **In the game.** Settings → Sky offers *Day & night* or *Classic*. Switching builds the other
+  renderer in the background while the current one keeps drawing (4.4 s for the first build
+  of a sky in a dev session; ~0.25 s once Chrome has cached its pipelines). Also in Settings:
+  the time of day (slider, with the phase: Dawn, Sunrise, Morning glow, Morning, Midday,
+  Afternoon, Golden hour, Sunset, Dusk, Night), a pause and the day length. Holding **T** runs
+  time an hour a second. A clock sits beside the engine badge. `?time=18:30` and `?sky=classic`
+  start the page there. WebGL2 keeps the classic sky.
+
+**Cost** (1280×800, day–night against the classic sky on the same views, paired, 95 % CI):
+
+| Views | Hour | Day–night / classic |
+| :--- | :--- | :--- |
+| 20 gallery views | 15:30 | × 1.01 [0.93, 1.10] |
+| 12 scenic views | 12:30 | × 1.03 [0.93, 1.13] |
+| 12 scenic views | 18:09 | × 0.86 [0.79, 0.93] (fewer surfaces face the low sun) |
+| 12 scenic views | 21:00 | × 1.25 [1.10, 1.45] (stars and the Milky Way, ~0.2 ms; the classic sky pass is nearly free) |
+
+Two things cost far more than their size, as before:
+
+1. The sky-view LUT and the probe, written by a compute pass and read by the render passes in
+   the same frame: × 1.46 [1.37, 1.54] on the gallery. Double-buffered (each frame computes
+   one set and samples the other, a frame old): × 1.10.
+2. The terrain and grass fragment shaders sit at an occupancy cliff. Stubbing out any one of
+   the haze colour, the fill, the key-light lookup, the horizon read or the grade removed
+   most of the remaining cost, and those savings summed to more than twice the total. Taking
+   per-frame values off per-pixel work fixed it: the haze's forward glow now uses the key
+   light at the camera's altitude from the CPU instead of interpolating it per pixel, the
+   probe results are read as a uniform instead of a storage buffer, and the horizon colour is
+   a cosine series instead of a 16-entry ring indexed through `atan2`.
+
+Clipmap generation (the frame time it adds):
+
+| | Classic sun bake | Path horizons |
+| :--- | ---: | ---: |
+| Full rebuild (spawn, respawn, sky switch) | 16 ms | 67 ms |
+| Walking and sprinting (5–9 m/s) | +0.0 ms | +0.0–0.1 ms |
+| Flying (40 m/s) | +0.3 ms | +1.0 ms |
+| Fast flight (200 m/s) | +0.6 ms | +2.0 ms |
+
+In game (production build, High, 2560×1440 canvas, headed Chrome, third person): **60.0 fps**
+at 15:30, 60.0 at 18:06, 59.9 at 21:30, 60.0 with the classic sky. Dynamic resolution was
+never reduced. Tests: 16 more (`tests/sky.test.ts`) cover the sun's and the moon's paths, the
+pacing of the clock, the air's transmittance, the reddening and alpenglow of the key light,
+the sun-to-moon switch in the dark, the night's level and the morning mist.
+
 ## Next
 
-- Clouds with volume, and a bloom pass for the shrine lines and the sun.
+- Cloud shadows drifting over the land by day (a small texture of the cloud layer, once a frame).
+- The horizon bake when flying fast (+2 ms at 200 m/s): bake coarse levels at half rate, or
+  reuse the coarser level's far horizon with a height correction.
+- Clouds with volume, and a bloom pass for the shrine lines, the sun and the moon.
 - Leaf cards round the clumps of near trees for a fluffier outline.
 - Erosion-like gullies and cliff bands in the world function (each needs its generation
   cost measured against the E1 budget).

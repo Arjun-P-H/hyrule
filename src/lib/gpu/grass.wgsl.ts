@@ -18,7 +18,8 @@
  * clipmap's cached ground visibility at the blade's root.
  *
  * Needs, from the raster shader: u (Frame), heightAt, gradientAt, sunAt,
- * surfaceFog, display, heroShadowAt, hero, mesh (projection), project().
+ * surfaceFog, display, heroShadowAt, hero, mesh (projection), project(), and
+ * the light API (keyDir, keyCol, skyAmb: sky.wgsl.ts).
  */
 
 import { wgslF32 as f } from './worldgen.wgsl';
@@ -258,11 +259,14 @@ fn fsGrass(i: GOut) -> @location(0) vec4f {
   // Dark roots, sun-bleached tips.
   let albedo = mix(base * 0.4, base * 1.35 + vec3f(0.035, 0.03, 0.0), t * t);
   // Soft wrap lighting (stylized), translucency toward the sun, sky fill, a faint sheen.
-  let wrap = clamp((dot(n, SUN) + 0.5) / 1.5, 0.0, 1.0);
-  let trans = pow(max(dot(rd, SUN), 0.0), 3.0) * 0.6 * t;
-  let spec = pow(max(dot(reflect(rd, n), SUN), 0.0), 24.0) * 0.06 * t;
-  var col = albedo * (SUN_COL * (0.62 * wrap + trans) * sun + SKY_TINT * (0.34 + 0.3 * t))
-          + SUN_COL * spec * sun;
+  let L = keyDir();
+  let kc = keyCol(u.camPos.y + i.rel.y);
+  let wrap = clamp((dot(n, L) + 0.5) / 1.5, 0.0, 1.0);
+  let trans = pow(max(dot(rd, L), 0.0), 3.0) * 0.6 * t;
+  // (no sheen under a light at the horizon: the blades' glints would line up into a glitter path)
+  let spec = pow(max(dot(reflect(rd, n), L), 0.0), 24.0) * 0.06 * t * smoothstep(0.0, 0.2, L.y);
+  var col = albedo * (kc * (0.62 * wrap + trans) * sun + skyAmb(n, 0.34 + 0.3 * t))
+          + kc * spec * sun;
   col = surfaceFog(col, dist, u.camPos.y + i.rel.y, rd);
   return display(col);
 }

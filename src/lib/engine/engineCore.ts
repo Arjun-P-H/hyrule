@@ -13,6 +13,11 @@
  * and fly draw with the terrain-only program; third person with
  * withHero(TERRAIN_FS), compiled in the background
  * (KHR_parallel_shader_compile) so neither pays for the other.
+ *
+ * Time of day: the loop runs the sky's clock (src/lib/sky/clock.ts) and hands
+ * the WebGPU view the game time each frame; holding T runs it a game hour a
+ * second. The page picks the sky (the day–night cycle or the classic sky) and
+ * sets the hour, pause and day length through the handle.
  */
 
 import { assertNever } from '@/lib/utils';
@@ -23,7 +28,8 @@ import { DRS_HARDWARE, DRS_SOFTWARE, createDrsState, drsStep, updateFpsEma } fro
 import { createHeroState, firstPersonGround, heroAction, placeHero, updateHero, type HeroInput, type HeroState } from '@/lib/hero/locomotion';
 import { createHeroRig, packHeroUniforms, updateHeroRig, HERO_UNIFORM } from '@/lib/hero/rig';
 import { createHeroCamera, updateHeroCamera } from '@/lib/hero/camera';
-import type { GpuBackend } from '@/lib/gpu/engineGpu';
+import type { GpuBackend, SkyMode } from '@/lib/gpu/engineGpu';
+import { advanceClock, createSkyClock, hourOf, setHour } from '@/lib/sky/clock';
 import type { FrameParams } from '@/lib/gpu/frame';
 import {
   CHUNK_SIZE,
@@ -57,14 +63,26 @@ export type EngineInputs = {
   speedMultiplier: Ref<number>;
   onToggleHud: Ref<(() => void) | undefined>;
   onPointerLockChange: Ref<((locked: boolean) => void) | undefined>;
+  /** The sky wanted (drawn by the WebGPU view; the WebGL2 view has only the classic sky). */
+  sky: Ref<SkyMode>;
 };
+
+/** Where the day starts: the hour, and real minutes per game day. */
+export type ClockStart = { hour: number; dayMinutes: number };
 
 export type EngineHandle = {
   dispose: () => void;
   respawn: () => void;
   toggleMode: () => void;
   toggleView: () => void;
+  /** Time of day: jump to an hour (0–24), stop or run the clock, set real minutes per game day. */
+  setHour: (hour: number) => void;
+  setTimePaused: (paused: boolean) => void;
+  setDayMinutes: (minutes: number) => void;
 };
+
+/** Game hours per real second while T is held. */
+const FAST_TIME = 1;
 
 /** What the loop hands the view each frame: one object, refilled. */
 type DrawState = {
@@ -87,6 +105,8 @@ type DrawState = {
   thirdPerson: boolean;
   /** Internal resolution over canvas resolution (views that upscale; 1 otherwise). */
   renderScale: number;
+  /** Game days since day 0, 00:00 (the sky's clock). */
+  days: number;
   /** Pack the hero for this camera (rig.ts HERO_UNIFORM) and return the buffer. */
   packHero: () => Float32Array;
 };
@@ -99,6 +119,9 @@ type View = {
   /** The previous frame is still on the GPU: skip this one (input latency stays one frame). */
   busy(): boolean;
   draw(ds: DrawState): void;
+  /** The sky drawn, and a request for another (views without a day–night sky: null, no-op). */
+  sky(): SkyMode | null;
+  setSky(mode: SkyMode): void;
   dispose(): void;
 };
 
@@ -216,6 +239,8 @@ function createGlView(canvas: HTMLCanvasElement, initialMode: CamMode): View {
     software,
     upscales: false,
     busy: () => fence !== null && gl.clientWaitSync(fence, 0, 0) === gl.TIMEOUT_EXPIRED,
+    sky: () => null,
+    setSky: () => {},
     draw(ds) {
       // Third person draws with the hero program once it has compiled; until
       // then (a moment after start) the terrain program draws without the hero.
@@ -344,7 +369,7 @@ function createGlView(canvas: HTMLCanvasElement, initialMode: CamMode): View {
 function createGpuView(canvas: HTMLCanvasElement, gpu: GpuBackend): View {
   const fp: FrameParams = {
     x: 0, y: 0, z: 0, yaw: 0, pitch: 0, width: 2, height: 2, tanHalf: 1,
-    seed: 0, marchSteps: 0, shadowSteps: 0, time: 0, hero: null, renderScale: 1,
+    seed: 0, marchSteps: 0, shadowSteps: 0, time: 0, hero: null, renderScale: 1, days: 0,
   };
   let lastFov = -1;
   return {
@@ -352,6 +377,8 @@ function createGpuView(canvas: HTMLCanvasElement, gpu: GpuBackend): View {
     software: false,
     upscales: gpu.upscales,
     busy: () => gpu.inFlight() >= 2,
+    sky: () => gpu.sky(),
+    setSky: (mode) => gpu.setSky(mode),
     draw(ds) {
       if (ds.fov !== lastFov) {
         lastFov = ds.fov;
@@ -362,6 +389,7 @@ function createGpuView(canvas: HTMLCanvasElement, gpu: GpuBackend): View {
       fp.width = canvas.width; fp.height = canvas.height;
       fp.seed = ds.seed; fp.marchSteps = ds.marchSteps; fp.shadowSteps = ds.shadowSteps;
       fp.time = ds.time;
+      fp.days = ds.days;
       fp.renderScale = ds.renderScale;
       fp.hero = ds.thirdPerson ? ds.packHero() : null;
       ds.basisDirty = false;
@@ -383,6 +411,7 @@ export function startEngine(
   enablePointerLock: boolean,
   initialMode: CamMode = 'fly',
   gpu: GpuBackend | null = null,
+  clockStart: ClockStart = { hour: 15.5, dayMinutes: 24 },
 ): EngineHandle {
   const seedRef = inputs.seed;
   const presetRef = inputs.preset;
@@ -392,6 +421,9 @@ export function startEngine(
   const speedMultiplierRef = inputs.speedMultiplier;
   const hudToggleRef = inputs.onToggleHud;
   const onPointerLockChangeRef = inputs.onPointerLockChange;
+  const skyRef = inputs.sky;
+  const clock = createSkyClock(clockStart.hour, clockStart.dayMinutes);
+  let fastTime = false;
 
   let raf = 0;
   let ro: ResizeObserver | null = null;
@@ -598,6 +630,11 @@ export function startEngine(
         return;
       }
 
+      if (e.code === 'KeyT' && !e.metaKey && !e.ctrlKey) {
+        fastTime = down;
+        return;
+      }
+
       if (e.code === 'KeyH' && down && !e.metaKey && !e.ctrlKey) {
         hudToggleRef.current?.();
         return;
@@ -646,7 +683,7 @@ export function startEngine(
       }
     };
 
-    const clearKeys = () => { keyMask = 0; };
+    const clearKeys = () => { keyMask = 0; fastTime = false; };
 
     // Mouse wheel: third-person camera distance.
     const onWheel = (e: WheelEvent) => {
@@ -746,7 +783,7 @@ export function startEngine(
       time: 0, fov: 0, seed: 0, marchSteps: 0, shadowSteps: 0,
       yaw: 0, pitch: 0, basis: new Float32Array(9), basisDirty: true,
       x: 0, y: 0, z: 0, lx: 0, lz: 0, ox: 0, oz: 0,
-      thirdPerson: false, renderScale: 1,
+      thirdPerson: false, renderScale: 1, days: clock.days,
       packHero: () => {
         packHeroUniforms(rig, cam.hero, ds.x, ds.y, ds.z, heroBuf);
         return heroBuf;
@@ -772,6 +809,11 @@ export function startEngine(
         stamina: cam.hero.stamina,
         exhausted: cam.hero.exhausted,
         api: view.api,
+        sky: view.sky(),
+        skyWanted: skyRef.current,
+        hour: hourOf(clock.days),
+        paused: clock.paused,
+        dayMinutes: clock.dayMinutes,
       });
     };
 
@@ -808,6 +850,10 @@ export function startEngine(
 
       const s = seedRef.current;
       const p = PRESET_MAP[software ? 'low' : (presetRef.current ?? 'med')] ?? PRESET_MAP.med;
+      // The sky: the one wanted (the view builds it in the background), and the clock.
+      if (view.sky() !== null && skyRef.current !== view.sky()) view.setSky(skyRef.current);
+      if (fastTime) clock.days += (dt * FAST_TIME) / 24;
+      else advanceClock(clock, dt);
       // A new preset changes the render resolution now, not at the next DRS step.
       if (presetRef.current !== lastPreset) {
         lastPreset = presetRef.current;
@@ -914,6 +960,7 @@ export function startEngine(
       ds.oz = oz;
       ds.thirdPerson = cam.mode === 'hero';
       ds.renderScale = p.resScale * auto.scale;
+      ds.days = clock.days;
       view.draw(ds);
 
       const rdt = Math.min((now - lastRender) / 1000, 1.0);
@@ -950,7 +997,12 @@ export function startEngine(
 
       view.dispose();
     };
-    return { dispose, respawn: doRespawn, toggleMode: doToggleMode, toggleView: doToggleView };
+    return {
+      dispose, respawn: doRespawn, toggleMode: doToggleMode, toggleView: doToggleView,
+      setHour: (hour) => setHour(clock, hour),
+      setTimePaused: (paused) => { clock.paused = paused; },
+      setDayMinutes: (minutes) => { clock.dayMinutes = minutes; },
+    };
   } catch (e) {
     ro?.disconnect();
     throw e;

@@ -4,7 +4,7 @@
  * triangles per box), and the site list the grass and tree scatters use to
  * keep out of them.
  *
- * Needs, from the raster shader: u (Frame), vnoise, SUN, SUN_COL, SKY_TINT,
+ * Needs, from the raster shader: u (Frame), vnoise, the light API (sky.wgsl.ts),
  * sunVisibility, heroShadowAt, surfaceFog, display, underwater, project().
  */
 
@@ -144,9 +144,9 @@ fn fsRuin(i: ROut) -> @location(0) vec4f {
   let ao = mix(0.6, 1.0, smoothstep(0.0, 1.2, i.edge.x));
   var sun = sunVisibility(p, n * 0.1);
   if (sun > 0.0) { sun = min(sun, heroShadowAt(i.rel)); }
-  let ramp = smoothstep(-0.1, 0.45, dot(n, SUN));
-  let amb = SKY_TINT * (0.3 + 0.25 * max(n.y, 0.0)) + vec3f(0.07, 0.075, 0.04) * (1.0 - abs(n.y));
-  var col = albedo * (SUN_COL * 0.6 * ramp * sun + amb) * ao + emissive;
+  let ramp = smoothstep(-0.1, 0.45, dot(n, keyDir()));
+  let amb = skyAmb(n, 0.3 + 0.25 * max(n.y, 0.0)) + bounceCol(vec3f(0.07, 0.075, 0.04)) * (1.0 - abs(n.y));
+  var col = albedo * (keyCol(p.y) * 0.6 * ramp * sun + amb) * ao + glow(emissive);
   col = surfaceFog(col, dist, p.y, rd);
   return display(col);
 }

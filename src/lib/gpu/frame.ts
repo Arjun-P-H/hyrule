@@ -29,7 +29,12 @@ export type FrameParams = {
    * width × height and is upscaled into). Ignored without TAA. Default 1.
    */
   renderScale?: number;
+  /** The day–night sky's clock: game days since day 0, 00:00 (the hour is its fraction). Ignored by the classic sky. */
+  days?: number;
 };
+
+/** Game time a frame without a clock is drawn at: day 0, 15:30. */
+export const DEFAULT_DAYS = 15.5 / 24;
 
 type CacheOptions = {
   clip: ClipmapSpec;
@@ -54,6 +59,8 @@ export type TerrainVariant =
       msaa?: 1 | 4; taa?: boolean; renderScale?: number;
       /** TAA tuning: presented sharpening (0..1, default 0.5), history blend weight of a new frame (default 0.1). */
       taaSharpen?: number; taaAlpha?: number;
+      /** The classic fixed sky (default), or the day–night cycle (sky.wgsl.ts; FrameParams.days sets the hour). */
+      sky?: 'classic' | 'cycle';
     } & CacheOptions);
 
 export interface TerrainRendererLike {

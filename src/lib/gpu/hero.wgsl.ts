@@ -35,7 +35,7 @@ export function packHeroWgsl(src: Float32Array, out: Float32Array): void {
   }
 }
 
-/** Needs FRAME_WGSL (u), SUN, SUN_COL, SKY_TINT, SKY_HOR and surfaceFog. */
+/** Needs FRAME_WGSL (u), the light API (keyDir, keyCol, skyAmb, bounceCol, skyHorCol: sky.wgsl.ts) and surfaceFog. */
 export const HERO_WGSL = /* wgsl */ `
 struct Hero {
   j: array<vec4f, 18>, // joints (rig.ts J.*), camera-relative
@@ -202,7 +202,8 @@ fn heroTrace(rd: vec3f) -> f32 {
 // Soft shadow the hero casts on a camera-relative point (itself included).
 fn heroShadow(pr: vec3f) -> f32 {
   let oc = pr - hero.bound.xyz;
-  let b = dot(oc, SUN);
+  let L = keyDir();
+  let b = dot(oc, L);
   let c = dot(oc, oc) - hero.bound.w * hero.bound.w;
   var h = b * b - c;
   if (h < 0.0 || (b > 0.0 && c > 0.0)) { return 1.0; }
@@ -211,7 +212,7 @@ fn heroShadow(pr: vec3f) -> f32 {
   let s1 = -b + h;
   var res = 1.0;
   for (var k = 0; k < 24; k++) {
-    let d = heroMap(pr + SUN * s).x;
+    let d = heroMap(pr + L * s).x;
     res = min(res, 8.0 * d / s);
     if (res < 0.02) { return 0.0; }
     s += clamp(d, 0.02, 0.25);
@@ -284,7 +285,9 @@ fn heroShade(rd: vec3f, tH: f32, n: vec3f, sh: f32) -> vec3f {
   let pr = rd * tH;
   let alb = heroAlbedo(i32(heroMap(pr).y + 0.5), pr);
   let spec = alb.a;
-  let ndl = dot(n, SUN);
+  let L = keyDir();
+  let kc = keyCol(u.camPos.y + pr.y);
+  let ndl = dot(n, L);
   var occ = 0.0;
   for (var i = 1; i <= 3; i++) {
     let hp = 0.04 * f32(i);
@@ -292,15 +295,15 @@ fn heroShade(rd: vec3f, tH: f32, n: vec3f, sh: f32) -> vec3f {
   }
   let ao = clamp(1.0 - 3.0 * occ, 0.25, 1.0) * (0.55 + 0.45 * smoothstep(0.0, 0.8, pr.y - hero.misc.y));
   let lit = smoothstep(0.0, 0.25, ndl) * 0.7 + max(ndl, 0.0) * 0.3;
-  var col = alb.rgb * (SUN_COL * 0.85 * lit * sh
-    + SKY_TINT * (0.38 + 0.3 * n.y) * ao
-    + vec3f(0.10, 0.085, 0.05) * max(-n.y, 0.0) * ao);
+  var col = alb.rgb * (kc * 0.85 * lit * sh
+    + skyAmb(n, 0.38 + 0.3 * n.y) * ao
+    + bounceCol(vec3f(0.10, 0.085, 0.05)) * max(-n.y, 0.0) * ao);
   let rim = 1.0 - max(dot(n, -rd), 0.0);
-  col += SKY_HOR * 0.18 * rim * rim * rim * ao;
+  col += skyHorCol() * 0.18 * rim * rim * rim * ao;
   if (spec > 0.0) {
-    var sp = max(dot(n, normalize(SUN - rd)), 0.0);
+    var sp = max(dot(n, normalize(L - rd)), 0.0);
     sp *= sp; sp *= sp; sp *= sp; sp *= sp; sp *= sp;
-    col += SUN_COL * (0.5 * spec * sp * sh);
+    col += kc * (0.5 * spec * sp * sh);
   }
   return surfaceFog(col, tH, u.camPos.y + pr.y, rd);
 }

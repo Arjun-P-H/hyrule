@@ -46,6 +46,8 @@ export type PlayOptions = {
   renderer?: 'webgl2' | 'webgpu' | 'auto';
   /** Play in a visible Chrome window (real display, vsync) instead of headless. */
   headed?: boolean;
+  /** More URL parameters for /game, e.g. 'time=21' or 'sky=classic'. */
+  query?: string;
 };
 
 export type PlayResult = {
@@ -142,7 +144,8 @@ export async function runPlaySession(baseUrl: string, opts: PlayOptions): Promis
     await cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: INSTRUMENT(!!opts.fenceOff, !!opts.gpuTiming) });
     const loaded = new Promise<void>((r) => cdp.on('Page.loadEventFired', () => r()));
     const renderer = opts.renderer ?? 'webgl2';
-    await cdp.send('Page.navigate', { url: `${baseUrl}/game${renderer === 'auto' ? '' : `?renderer=${renderer}`}` });
+    const params = [renderer === 'auto' ? '' : `renderer=${renderer}`, opts.query ?? ''].filter(Boolean).join('&');
+    await cdp.send('Page.navigate', { url: `${baseUrl}/game${params ? `?${params}` : ''}` });
     await loaded;
     await Bun.sleep(1500);
     const load = await evalJson<{ fcp: number; firstDraw: number; domInteractive: number }>(cdp,

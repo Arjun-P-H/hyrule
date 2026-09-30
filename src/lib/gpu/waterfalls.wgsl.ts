@@ -7,7 +7,7 @@
  * where it lands. Both are blended (premultiplied) after the opaque world
  * and the water, test depth but do not write it.
  *
- * Needs, from the raster shader: u (Frame), vnoise, SUN, SUN_COL, SKY_TINT,
+ * Needs, from the raster shader: u (Frame), vnoise, the light API (sky.wgsl.ts),
  * surfaceFog, display, islandShadowAt, project().
  */
 
@@ -82,7 +82,7 @@ fn fsFall(i: FOut) -> @location(0) vec4f {
   let alpha = clamp((0.35 + 0.65 * streak) * edge * fadeTop * fadeBottom * 0.9, 0.0, 1.0);
   let p = u.camPos + i.rel;
   let sun = islandShadowAt(p, 0xffffffffu);
-  let lit = SUN_COL * 0.3 * (0.45 + 0.55 * sun) + SKY_TINT * 0.75;
+  let lit = keyCol(p.y) * 0.3 * (0.45 + 0.55 * sun) + skyAmb(vec3f(0.0, 1.0, 0.0), 0.75);
   let col = mix(vec3f(0.55, 0.7, 0.8), vec3f(0.95, 0.97, 1.0), streak) * lit;
   let shown = display(surfaceFog(col, dist, p.y, rd));
   return vec4f(shown.rgb * alpha, alpha);
@@ -124,7 +124,7 @@ fn fsMist(i: MOut) -> @location(0) vec4f {
   let t = u.time;
   let n = 0.5 + 0.5 * vnoise(i.q.x * 2.2 + t * 0.35, i.q.y * 2.2 - t * 0.6, 1211 + i32(i.k));
   let alpha = clamp((1.0 - smoothstep(0.25, 1.0, r + 0.25 * n)) * 0.55, 0.0, 1.0);
-  let col = vec3f(0.9, 0.93, 0.96) * (SUN_COL * 0.28 + SKY_TINT * 0.7);
+  let col = vec3f(0.9, 0.93, 0.96) * (keyCol(u.camPos.y + i.rel.y) * 0.28 + skyAmb(vec3f(0.0, 1.0, 0.0), 0.7));
   let shown = display(surfaceFog(col, dist, u.camPos.y + i.rel.y, rd));
   return vec4f(shown.rgb * alpha, alpha);
 }

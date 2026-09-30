@@ -28,13 +28,18 @@ const TILE = CELL * TILE_CELLS;
 const SHADOW_DEPTH = 400;
 
 type V3 = [number, number, number];
-const norm = (a: V3): V3 => { const l = Math.hypot(a[0], a[1], a[2]); return [a[0] / l, a[1] / l, a[2] / l]; };
-const cross = (a: V3, b: V3): V3 => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
 
-// Light axes: forward away from the sun, right and up across it.
-const LF = norm([-LIGHT.sunDir[0], -LIGHT.sunDir[1], -LIGHT.sunDir[2]]);
-const LR = norm(cross(LF, [0, 1, 0]));
-const LU = cross(LR, LF);
+/** The classic sky's fixed sun. */
+const CLASSIC_SUN: V3 = [LIGHT.sunDir[0], LIGHT.sunDir[1], LIGHT.sunDir[2]];
+
+/** Light axes for a light toward `to`: forward away from it (f), right (r) and up (u) across it. */
+function lightAxes(to: ArrayLike<number>, f: V3, r: V3, u: V3): void {
+  const l = Math.hypot(to[0], to[1], to[2]);
+  f[0] = -to[0] / l; f[1] = -to[1] / l; f[2] = -to[2] / l;
+  const rl = Math.hypot(f[2], f[0]) || 1; // right = normalize(f × up)
+  r[0] = -f[2] / rl; r[1] = 0; r[2] = f[0] / rl;
+  u[0] = r[1] * f[2] - r[2] * f[1]; u[1] = r[2] * f[0] - r[0] * f[2]; u[2] = r[0] * f[1] - r[1] * f[0];
+}
 
 export class Forest {
   readonly spec: ForestSpec;
@@ -74,6 +79,13 @@ export class Forest {
   private offsets = new Uint32Array(BUCKETS);
   private lastCentre = new Float64Array(3);
   private hasLast = false;
+  // Light axes of the map rendered this frame, and of the one sampled (drawn last frame).
+  private lf: V3 = [0, -1, 0];
+  private lr: V3 = [1, 0, 0];
+  private lu: V3 = [0, 0, 1];
+  private sf: V3 = [0, -1, 0];
+  private sr: V3 = [1, 0, 0];
+  private su: V3 = [0, 0, 1];
 
   constructor(device: GPUDevice, spec: ForestSpec) {
     this.device = device;
@@ -196,7 +208,8 @@ export class Forest {
     this.hasLast = false;
   }
 
-  setFrame(fp: FrameParams): void {
+  /** `toLight`: direction toward the light that casts the trees' shadows (default: the classic sun). */
+  setFrame(fp: FrameParams, toLight: ArrayLike<number> = CLASSIC_SUN): void {
     const tx = Math.floor(fp.x / TILE), tz = Math.floor(fp.z / TILE);
     const jobs = this.window.update(tx, tz, fp.seed);
     this.jobCount = jobs.length;
@@ -211,6 +224,10 @@ export class Forest {
     // Shadow box: ahead of the camera, on the surface under it, snapped to whole texels in light space.
     // This frame draws the map into one texture; surfaces sample the other, drawn last frame round lastCentre.
     this.renderIdx = 1 - this.renderIdx;
+    const sf = this.sf, sr = this.sr, su = this.su;
+    for (let k = 0; k < 3; k++) { sf[k] = this.lf[k]; sr[k] = this.lr[k]; su[k] = this.lu[k]; }
+    lightAxes(toLight, this.lf, this.lr, this.lu);
+    const LF = this.lf, LR = this.lr, LU = this.lu;
     const R = this.spec.shadowRange;
     const cx = fp.x + Math.sin(fp.yaw) * 0.35 * R, cz = fp.z + Math.cos(fp.yaw) * 0.35 * R;
     const isl = islandGround(fp.x, fp.y, fp.z, fp.seed);
@@ -229,6 +246,10 @@ export class Forest {
     f.set(LR, 12); f[15] = SHADOW_DEPTH;
     f.set(LU, 16); f[19] = texel;
     f.set(LF, 20); f[23] = 0;
+    // The map sampled was drawn last frame, along last frame's axes (a first frame samples nothing: see lastCentre).
+    f.set(sr, 32);
+    f.set(su, 36);
+    f.set(sf, 40);
     f[24] = 0.87; f[25] = 0.49; f[26] = 0.4; f[27] = fp.time;
     this.device.queue.writeBuffer(this.ubuf, 0, this.data);
     this.device.queue.writeBuffer(this.args, 0, this.argsTemplate);

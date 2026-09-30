@@ -6,14 +6,20 @@
  * texel (i mod n, j mod n) of layer l. The renderers bind `view`, `sampler`
  * and `clipBuf` (heightAt() in terrain.wgsl.ts) and call setCamera() /
  * encodeGenerate() once per frame. With `sun`, a second layer array holds the
- * ground's sun visibility, marched once per lattice point right after its
- * height is generated (sunShader), bound by the renderers as `sunView`.
+ * ground's light, marched once per lattice point right after its height is
+ * generated and bound by the renderers as `sunView`: for the classic sky its
+ * visibility of the fixed sun (sunShader, r32float); for the day–night sky
+ * its horizons along the sun's path (horizonShader, rgba16float), which serve
+ * a sun or moon anywhere on the path without being marched again.
  */
 
 import { ClipmapScheduler, levelSpacing, rectTexels, usableRadius, wrap, type ClipmapSpec, type UpdateRect } from './clipmap';
-import { GEN_BYTES, clipBytes, genShader, sunShader } from './terrain.wgsl';
+import { GEN_BYTES, clipBytes, genShader, horizonShader, sunShader } from './terrain.wgsl';
 
 export type PassTimestamps = { querySet: GPUQuerySet; begin: number; end: number };
+
+/** The sun layer: 'classic' (visibility of the fixed sun) or 'path' (horizons along the sun's path). */
+type SunLayer = { blend: number; mode: 'classic' | 'path' };
 
 const GEN_SLOT = 256;
 const GEN_SLOTS = 64;
@@ -37,13 +43,13 @@ export class ClipmapCache {
   private pending: UpdateRect[] = [];
   private origin: [number, number] = [0, 0];
   private seed: number | null = null;
-  private sunOpts: { blend: number } | null;
+  private sunOpts: SunLayer | null;
   sunTexture: GPUTexture | null = null;
   sunView: GPUTextureView | null = null;
   private sunPipe: GPUComputePipeline | null = null;
   private sunBind: GPUBindGroup | null = null;
 
-  constructor(device: GPUDevice, spec: ClipmapSpec, genDpScale: number, sun: { blend: number } | null = null) {
+  constructor(device: GPUDevice, spec: ClipmapSpec, genDpScale: number, sun: SunLayer | null = null) {
     this.device = device;
     this.spec = spec;
     this.genDpScale = genDpScale;
@@ -62,13 +68,14 @@ export class ClipmapCache {
         { binding: 1, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'write-only', format: 'r32float', viewDimension: '2d-array' } },
       ],
     });
+    const sunFormat: GPUTextureFormat = this.sunOpts?.mode === 'path' ? 'rgba16float' : 'r32float';
     const sunLayout = this.sunOpts ? d.createBindGroupLayout({
       entries: [
         { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform', hasDynamicOffset: true, minBindingSize: GEN_BYTES } },
         { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
         { binding: 2, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'float', viewDimension: '2d-array' } },
         { binding: 3, visibility: GPUShaderStage.COMPUTE, sampler: { type: 'filtering' } },
-        { binding: 4, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'write-only', format: 'r32float', viewDimension: '2d-array' } },
+        { binding: 4, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'write-only', format: sunFormat, viewDimension: '2d-array' } },
       ],
     }) : null;
     const [genPipe, sunPipe] = await Promise.all([
@@ -78,7 +85,10 @@ export class ClipmapCache {
       }),
       sunLayout && this.sunOpts ? d.createComputePipelineAsync({
         layout: d.createPipelineLayout({ bindGroupLayouts: [sunLayout] }),
-        compute: { module: d.createShaderModule({ code: sunShader({ n: spec.n, levels: spec.levels, blend: this.sunOpts.blend }) }), entryPoint: 'main' },
+        compute: {
+          module: d.createShaderModule({ code: (this.sunOpts.mode === 'path' ? horizonShader : sunShader)({ n: spec.n, levels: spec.levels, blend: this.sunOpts.blend }) }),
+          entryPoint: 'main',
+        },
       }) : Promise.resolve(null),
     ]);
     this.genPipe = genPipe;
@@ -103,8 +113,8 @@ export class ClipmapCache {
     if (sunLayout) {
       this.sunTexture = d.createTexture({
         size: [spec.n, spec.n, spec.levels],
-        format: 'r32float',
-        usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING,
+        format: sunFormat,
+        usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC,
       });
       this.sunView = this.sunTexture.createView({ dimension: '2d-array' });
       this.sunBind = d.createBindGroup({
@@ -186,7 +196,7 @@ export class ClipmapCache {
       pass.dispatchWorkgroups(Math.ceil(r.w / 8), Math.ceil(r.h / 8));
     });
     pass.end();
-    // Sun visibility of the same lattice points, once every level's heights are in.
+    // The sun layer at the same lattice points, once every level's heights are in.
     if (this.sunPipe && this.sunBind) {
       const sp = enc.beginComputePass();
       sp.setPipeline(this.sunPipe);
@@ -199,12 +209,49 @@ export class ClipmapCache {
     return rectTexels(rects);
   }
 
+  /**
+   * One level of the sun layer, texel (i, j) at (j · n + i) · channels: the
+   * classic visibility (1 channel) or the path horizons (rise, set, 0, 0).
+   * Debug readback; waits for the GPU.
+   */
+  async readSunLayer(level: number): Promise<{ channels: number; data: Float32Array }> {
+    const t = this.sunTexture;
+    if (!t) throw new Error('clipmap: no sun layer');
+    const n = this.spec.n;
+    const half = t.format === 'rgba16float';
+    const bpr = n * (half ? 8 : 4);
+    const rb = this.device.createBuffer({ size: bpr * n, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    const enc = this.device.createCommandEncoder();
+    enc.copyTextureToBuffer({ texture: t, origin: [0, 0, level] }, { buffer: rb, bytesPerRow: bpr }, [n, n, 1]);
+    this.device.queue.submit([enc.finish()]);
+    await rb.mapAsync(GPUMapMode.READ);
+    const raw = rb.getMappedRange();
+    let data: Float32Array;
+    if (half) {
+      const h = new Uint16Array(raw);
+      data = new Float32Array(h.length);
+      for (let i = 0; i < h.length; i++) data[i] = halfToFloat(h[i]);
+    } else {
+      data = new Float32Array(raw.slice(0));
+    }
+    rb.unmap();
+    rb.destroy();
+    return { channels: half ? 4 : 1, data };
+  }
+
   destroy(): void {
     this.texture?.destroy();
     this.sunTexture?.destroy();
     this.clipBuf?.destroy();
     this.genBuf?.destroy();
   }
+}
+
+function halfToFloat(h: number): number {
+  const e = (h >> 10) & 31, m = h & 1023, sgn = h & 0x8000 ? -1 : 1;
+  if (e === 0) return sgn * m * 2 ** -24;
+  if (e === 31) return m ? NaN : sgn * Infinity;
+  return sgn * (1 + m / 1024) * 2 ** (e - 15);
 }
 
 function wrapF(x: number, n: number): number {

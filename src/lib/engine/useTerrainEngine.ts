@@ -2,7 +2,8 @@
 
 import { useEffect, useRef, useState, type RefObject } from 'react';
 import { createStatsStore, type CamMode } from './statsStore';
-import type { EngineHandle } from './engineCore';
+import type { ClockStart, EngineHandle } from './engineCore';
+import type { SkyMode } from '@/lib/gpu/engineGpu';
 import { DEFAULT_SEED, CAMERA, type PresetId } from '@/lib/constants';
 
 export type { PresetId };
@@ -31,10 +32,10 @@ function wantsWebGpu(choice: RendererChoice): boolean {
   return want === 'webgpu' || (want === 'auto' && 'gpu' in navigator);
 }
 let gpuChain: Promise<unknown> = Promise.resolve();
-function createGpuBackendSerialized(canvas: HTMLCanvasElement) {
+function createGpuBackendSerialized(canvas: HTMLCanvasElement, sky: SkyMode) {
   const next = gpuChain.then(async () => {
     const { createGpuBackend } = await import('@/lib/gpu/engineGpu');
-    return createGpuBackend(canvas);
+    return createGpuBackend(canvas, sky);
   });
   gpuChain = next.catch(() => {});
   return next;
@@ -53,6 +54,10 @@ export type TerrainEngineOptions = {
   initialMode?: CamMode;
   /** Graphics API (default 'webgl2'); see RendererChoice. */
   renderer?: RendererChoice;
+  /** The sky: the day–night cycle (default) or the classic fixed sky (WebGPU; WebGL2 draws the classic sky). */
+  sky?: SkyMode;
+  /** Where the day starts (read at start). */
+  clockStart?: ClockStart;
   onPointerLockChange?: (locked: boolean) => void;
 };
 
@@ -73,6 +78,8 @@ export function useTerrainEngine({
   running = true,
   initialMode = 'fly',
   renderer = 'webgl2',
+  sky = 'cycle',
+  clockStart,
   onPointerLockChange,
   onToggleHud,
 }: TerrainEngineOptions & { onToggleHud?: () => void }) {
@@ -87,6 +94,8 @@ export function useTerrainEngine({
   const speedMultiplierRef = useRef(speedMultiplier);
   const hudToggleRef = useRef(onToggleHud);
   const onPointerLockChangeRef = useRef(onPointerLockChange);
+  const skyRef = useRef(sky);
+  const clockStartRef = useRef(clockStart);
   const handleRef = useRef<EngineHandle | null>(null);
 
   seedRef.current = seed;
@@ -97,13 +106,14 @@ export function useTerrainEngine({
   speedMultiplierRef.current = speedMultiplier;
   hudToggleRef.current = onToggleHud;
   onPointerLockChangeRef.current = onPointerLockChange;
+  skyRef.current = sky;
 
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     let cancelled = false;
     const gpu = wantsWebGpu(renderer)
-      ? createGpuBackendSerialized(canvas).catch((e: unknown) => {
+      ? createGpuBackendSerialized(canvas, skyRef.current).catch((e: unknown) => {
           console.warn('WebGPU unavailable, drawing with WebGL2:', e);
           return null;
         })
@@ -123,7 +133,8 @@ export function useTerrainEngine({
           speedMultiplier: speedMultiplierRef,
           onToggleHud: hudToggleRef,
           onPointerLockChange: onPointerLockChangeRef,
-        }, enablePointerLock, initialMode, backend);
+          sky: skyRef,
+        }, enablePointerLock, initialMode, backend, clockStartRef.current);
       })
       .catch((e: unknown) => {
         if (!cancelled) setError(e instanceof Error ? e.message : String(e));
@@ -141,5 +152,8 @@ export function useTerrainEngine({
     respawn: () => handleRef.current?.respawn(),
     toggleMode: () => handleRef.current?.toggleMode(),
     toggleView: () => handleRef.current?.toggleView(),
+    setHour: (hour: number) => handleRef.current?.setHour(hour),
+    setTimePaused: (paused: boolean) => handleRef.current?.setTimePaused(paused),
+    setDayMinutes: (minutes: number) => handleRef.current?.setDayMinutes(minutes),
   };
 }

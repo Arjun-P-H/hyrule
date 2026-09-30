@@ -8,7 +8,7 @@
  * (ring i, bearing j) on each island's outline with ρ = i / rings exactly, so
  * top and underside share their rim vertices bit for bit.
  *
- * Needs, from the raster shader: u (Frame), vnoise, SUN, SUN_COL, SKY_TINT,
+ * Needs, from the raster shader: u (Frame), vnoise, the light API (sky.wgsl.ts),
  * surfaceFog, display, underwater, heroShadowAt, project().
  */
 
@@ -95,18 +95,20 @@ fn islandTopAt(xz: vec2f, rhoMax: f32) -> f32 {
 // Sun visibility under the islands (all but island \`skip\`): the sun ray tested
 // against each island's top disc and a narrower disc half way down its cone.
 fn islandShadowAt(p: vec3f, skip: u32) -> f32 {
+  let L = keyDir();
+  if (L.y < 0.01) { return 1.0; } // a light on the horizon: no island stands between
   var vis = 1.0;
   for (var k = 0u; k < isl.count.x; k++) {
     if (k == skip) { continue; }
     let A = isl.a[k];
-    let t1 = (A.w - p.y) / SUN.y;
+    let t1 = (A.w - p.y) / L.y;
     if (t1 <= 0.0) { continue; }
-    let d1 = length(p.xz + SUN.xz * t1 - A.xy) / A.z;
+    let d1 = length(p.xz + L.xz * t1 - A.xy) / A.z;
     var occ = 1.0 - smoothstep(0.8, 1.05, d1);
     let ym = A.w - ISL_RIM - ISL_CLIFF - 0.45 * isl.b[k].x;
-    let t2 = (ym - p.y) / SUN.y;
+    let t2 = (ym - p.y) / L.y;
     if (t2 > 0.0) {
-      let d2 = length(p.xz + SUN.xz * t2 - A.xy) / (A.z * 0.55);
+      let d2 = length(p.xz + L.xz * t2 - A.xy) / (A.z * 0.55);
       occ = max(occ, 1.0 - smoothstep(0.7, 1.0, d2));
     }
     vis = min(vis, 1.0 - 0.88 * occ);
@@ -175,11 +177,11 @@ fn fsIsland(i: IOut) -> @location(0) vec4f {
   }
   var sun = islandShadowAt(p, k);
   if (sun > 0.0) { sun = min(sun, heroShadowAt(i.rel)); }
-  let ndl = dot(n, SUN);
+  let ndl = dot(n, keyDir());
   let ramp = smoothstep(-0.12, 0.45, ndl);
   // Sky from above, the green world's bounce from below.
-  let amb = SKY_TINT * (0.3 + 0.28 * max(n.y, 0.0)) + vec3f(0.06, 0.08, 0.04) * max(-n.y, 0.0);
-  var col = albedo * (SUN_COL * 0.62 * ramp * sun + amb);
+  let amb = skyAmb(n, 0.3 + 0.28 * max(n.y, 0.0)) + bounceCol(vec3f(0.06, 0.08, 0.04)) * max(-n.y, 0.0);
+  var col = albedo * (keyCol(p.y) * 0.62 * ramp * sun + amb);
   col = surfaceFog(col, dist, p.y, rd);
   return display(col);
 }

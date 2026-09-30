@@ -5,7 +5,10 @@
  * without it.
  */
 
-import { createTerrainRenderer, type FrameParams, type TerrainVariant } from './terrainRenderer';
+import { createTerrainRenderer, type FrameParams, type TerrainRendererLike, type TerrainVariant } from './terrainRenderer';
+
+/** The sky the game draws: the day–night cycle, or the classic fixed sky. */
+export type SkyMode = 'cycle' | 'classic';
 
 /**
  * The game's renderer (docs/EXPERIMENTS.md): E3's raster clipmap (8 rings of
@@ -16,6 +19,7 @@ import { createTerrainRenderer, type FrameParams, type TerrainVariant } from './
  * lattice cached out to ~1.1 km; a sun shadow map), E7's sky islands,
  * waterfalls, ruins and shrines, and E6's
  * temporal anti-aliasing, upscaling the internal resolution to the canvas.
+ * The sky (the day–night cycle or the classic sky) is chosen per backend.
  */
 export const GAME_VARIANT: TerrainVariant = {
   height: 'raster', k: 128, stride: 1, morphStart: 0.75, taa: true,
@@ -36,10 +40,20 @@ export type GpuBackend = {
   inFlight(): number;
   /** Generate what the camera exposed and draw one frame into the canvas. */
   draw(fp: FrameParams): void;
+  /** The sky being drawn. */
+  sky(): SkyMode;
+  /**
+   * Switch skies: the renderer for the new sky compiles in the background
+   * while the current one keeps drawing, then takes over (a request made
+   * meanwhile is served after it).
+   */
+  setSky(mode: SkyMode): void;
   dispose(): void;
 };
 
-export async function createGpuBackend(canvas: HTMLCanvasElement): Promise<GpuBackend> {
+const variantFor = (sky: SkyMode): TerrainVariant => ({ ...GAME_VARIANT, sky } as TerrainVariant);
+
+export async function createGpuBackend(canvas: HTMLCanvasElement, initialSky: SkyMode = 'cycle'): Promise<GpuBackend> {
   if (typeof navigator === 'undefined' || !navigator.gpu) throw new Error('WebGPU is unavailable in this browser');
   const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
   if (!adapter) throw new Error('No WebGPU adapter');
@@ -53,7 +67,8 @@ export async function createGpuBackend(canvas: HTMLCanvasElement): Promise<GpuBa
   }
   const format = navigator.gpu.getPreferredCanvasFormat();
   ctx.configure({ device, format, alphaMode: 'opaque' });
-  const renderer = createTerrainRenderer(device, format, GAME_VARIANT);
+  let renderer: TerrainRendererLike = createTerrainRenderer(device, format, variantFor(initialSky));
+  let current = initialSky;
   try {
     await renderer.init();
   } catch (e) {
@@ -64,6 +79,31 @@ export async function createGpuBackend(canvas: HTMLCanvasElement): Promise<GpuBa
 
   let inflight = 0;
   let lost = false;
+  let disposed = false;
+  let wanted = initialSky;
+  let switching: Promise<void> | null = null;
+  // Build renderers until the one drawing is the one wanted; the old one is
+  // destroyed once the frames it drew have left the GPU.
+  const switchSky = async () => {
+    while (wanted !== current && !lost && !disposed) {
+      const target = wanted;
+      const next = createTerrainRenderer(device, format, variantFor(target));
+      try {
+        await next.init();
+      } catch (e) {
+        console.error(`WebGPU: the ${target} sky failed to build`, e);
+        next.destroy();
+        wanted = current;
+        break;
+      }
+      if (lost || disposed) { next.destroy(); break; }
+      const old = renderer;
+      renderer = next;
+      current = target;
+      void device.queue.onSubmittedWorkDone().then(() => old.destroy());
+    }
+    switching = null;
+  };
   void device.lost.then((info) => {
     lost = true;
     if (info.reason !== 'destroyed') console.error(`WebGPU device lost: ${info.message}`);
@@ -75,6 +115,11 @@ export async function createGpuBackend(canvas: HTMLCanvasElement): Promise<GpuBa
     label: info.description || info.vendor || 'WebGPU',
     upscales: GAME_VARIANT.height === 'raster' && !!GAME_VARIANT.taa,
     inFlight: () => inflight,
+    sky: () => current,
+    setSky(mode) {
+      wanted = mode;
+      if (!switching && wanted !== current) switching = switchSky();
+    },
     draw(fp) {
       if (lost) return;
       renderer.setFrame(fp);
@@ -88,6 +133,7 @@ export async function createGpuBackend(canvas: HTMLCanvasElement): Promise<GpuBa
     dispose() {
       // No ctx.unconfigure(): a backend created after this one (StrictMode
       // remount) may already have configured the same canvas context.
+      disposed = true;
       renderer.destroy();
       device.destroy();
     },

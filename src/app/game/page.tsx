@@ -8,8 +8,13 @@ import {
   Eye,
   Maximize2,
   Minimize2,
+  Moon,
+  Pause,
   Sliders,
   Sparkles,
+  Sun,
+  Sunrise,
+  Sunset,
   ArrowLeft,
   Move,
   PersonStanding,
@@ -19,8 +24,10 @@ import {
 import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { useTerrainEngine, type PresetId } from '@/lib/engine/useTerrainEngine';
-import { useEngineApi, useEngineMode, useEngineStats, useHeroStamina, type CamMode, type StatsStore } from '@/lib/engine/statsStore';
+import { useEngineApi, useEngineMode, useEngineStats, useHeroStamina, useSkyState, type CamMode, type StatsStore } from '@/lib/engine/statsStore';
 import { useSeedState } from '@/lib/engine/useSeedState';
+import type { SkyMode } from '@/lib/gpu/engineGpu';
+import { clockText, dayPhase } from '@/lib/sky/clock';
 import {
   DEFAULT_SEED,
   CAMERA,
@@ -113,15 +120,50 @@ const StaminaWheel = React.memo(function StaminaWheel({ statsStore }: { statsSto
   );
 });
 
+// The time of day beside the engine badge, while the day–night sky is drawn.
+const SkyClock = React.memo(function SkyClock({ statsStore }: { statsStore: StatsStore }) {
+  const s = useSkyState(statsStore);
+  if (!s || s.sky !== 'cycle') return null;
+  const hour = s.minutes / 60;
+  const phase = dayPhase(hour);
+  const Icon = phase === 'Night' || phase === 'Dusk' ? Moon
+    : phase === 'Dawn' || phase === 'Sunrise' || phase === 'Morning glow' ? Sunrise
+      : phase === 'Golden hour' || phase === 'Sunset' ? Sunset : Sun;
+  return (
+    <span className="hidden sm:flex h-8 items-center gap-1.5 px-2.5 rounded-md bg-stone-950/80 backdrop-blur border border-stone-800 font-mono text-xs text-stone-200">
+      <Icon className="size-3.5 text-amber-300" />
+      <span className="tabular-nums">{clockText(hour)}</span>
+      <span className="text-stone-500">{phase}</span>
+      {s.paused && <Pause className="size-3 text-stone-500" aria-label="Time stopped" />}
+    </span>
+  );
+});
+
+// ?sky=classic|cycle and ?time=18.5 or ?time=18:30 start the page there (read in the browser only).
+function urlParam(name: string): string | null {
+  return typeof window === 'undefined' ? null : new URLSearchParams(window.location.search).get(name);
+}
+function urlSky(): SkyMode {
+  return urlParam('sky') === 'classic' ? 'classic' : 'cycle';
+}
+function urlHour(): number {
+  const v = urlParam('time');
+  if (!v) return 15.5;
+  const [h, m] = v.split(':').map(Number);
+  const hour = h + (m || 0) / 60;
+  return Number.isFinite(hour) ? ((hour % 24) + 24) % 24 : 15.5;
+}
+
 const MODE_LABEL: Record<CamMode, string> = { hero: 'HERO', walk: 'WALK', fly: 'FLY' };
 
-function ControlsBanner({ mode, isPointerLocked }: { mode: CamMode | null; isPointerLocked: boolean }) {
+function ControlsBanner({ mode, isPointerLocked, timeKey }: { mode: CamMode | null; isPointerLocked: boolean; timeKey: boolean }) {
   const keys: Array<[string, string]> =
     mode === 'fly'
       ? [['WASD', 'Move'], ['Shift', 'Boost'], ['Space', 'Up'], ['C', 'Down'], ['F', 'Land'], ['V', 'Hero'], ['R', 'Respawn']]
       : mode === 'walk'
         ? [['WASD', 'Move'], ['Shift', 'Sprint'], ['Space', 'Jump'], ['V', 'Third person'], ['F', 'Fly'], ['R', 'Respawn']]
         : [['WASD', 'Move'], ['Shift', 'Sprint'], ['Space', 'Jump · Glide'], ['C', 'Sneak'], ['Wheel', 'Zoom'], ['V', 'First person'], ['F', 'Fly'], ['R', 'Respawn']];
+  if (timeKey) keys.push(['T', 'Time ≫']);
   return (
     <div className="flex flex-wrap items-center justify-center gap-x-3 gap-y-1 px-4 py-2 rounded-full border border-stone-800/80 bg-stone-950/80 backdrop-blur-md font-mono text-[11px] text-stone-300 shadow-xl">
       {keys.map(([k, what]) => (
@@ -148,10 +190,12 @@ export default function GamePage() {
   const [fov, setFov] = useState<number>(CAMERA.fov);
   const [sensitivity, setSensitivity] = useState<number>(CAMERA.sensitivity);
   const [speedMultiplier, setSpeedMultiplier] = useState<number>(1);
+  const [sky, setSky] = useState<SkyMode>(urlSky);
+  const [clockStart] = useState(() => ({ hour: urlHour(), dayMinutes: 24 }));
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
-  const { statsStore, error, respawn, toggleMode, toggleView } = useTerrainEngine({
+  const { statsStore, error, respawn, toggleMode, toggleView, setHour, setTimePaused, setDayMinutes } = useTerrainEngine({
     canvasRef,
     seed,
     preset,
@@ -162,6 +206,8 @@ export default function GamePage() {
     running: true,
     initialMode: 'hero',
     renderer: 'auto',
+    sky,
+    clockStart,
     onPointerLockChange: setIsPointerLocked,
     onToggleHud: () => setShowHud((v) => !v),
   });
@@ -209,6 +255,7 @@ export default function GamePage() {
             <span className="hidden sm:flex h-8 items-center px-2.5 rounded-md bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 font-mono text-xs font-semibold">
               <Sparkles className="mr-1.5 size-3.5" /> {api === 'webgpu' ? 'WebGPU Engine' : 'WebGL2 Engine'}
             </span>
+            <SkyClock statsStore={statsStore} />
           </div>
 
           <HudOverlay statsStore={statsStore} preset={preset} showHud={showHud} />
@@ -347,12 +394,13 @@ export default function GamePage() {
             toggleView={toggleView}
             showHud={showHud}
             setShowHud={setShowHud}
+            skyControls={{ statsStore, api, sky, setSky, setHour, setTimePaused, setDayMinutes }}
           />
         )}
 
         {/* Bottom Center Controls Banner */}
         <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-20 pointer-events-none w-max max-w-[calc(100vw-32px)]">
-          <ControlsBanner mode={mode} isPointerLocked={isPointerLocked} />
+          <ControlsBanner mode={mode} isPointerLocked={isPointerLocked} timeKey={api === 'webgpu' && sky === 'cycle'} />
         </div>
 
         {/* Pointer lock hint on canvas initial click */}

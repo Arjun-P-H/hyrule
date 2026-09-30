@@ -23,7 +23,7 @@ type Probe = { id: string; origin: [number, number]; local0: [number, number]; s
 type GenCase = { name: string; speed: number; frames: number; heading: number };
 
 type Config = {
-  modes: Array<'timing' | 'shots' | 'probe' | 'gen' | 'seq'>;
+  modes: Array<'timing' | 'shots' | 'probe' | 'gen' | 'seq' | 'horizon'>;
   variants: VariantCfg[];
   presets: Preset[];
   frames: Frame[];
@@ -46,6 +46,14 @@ type Config = {
   seqFreeze?: boolean;
   /** With each shot, post the forest's placement window (kind=forest blobs). */
   forestDump?: boolean;
+  /** Day–night variants: shots at each of these hours (named variant@hour), timing at `hour`, on game day `day`. */
+  hours?: number[];
+  hour?: number;
+  day?: number;
+  /** horizon mode: the clipmap levels whose sun layer is read back at each camera. */
+  horizonLevels?: number[];
+  /** shots: the clock (s: wind, water, clouds, twinkle) for every shot, instead of frame / 60. */
+  time?: number;
 };
 
 const post = (path: string, body: BodyInit, headers: Record<string, string> = {}) => fetch(path, { method: 'POST', body, headers });
@@ -81,11 +89,15 @@ async function main(): Promise<void> {
   await postJSON('/compile', renderers.map((x) => ({ name: x.name, compileMs: x.r.compileMs })));
 
   const tanHalf = Math.tan((cfg.fov * Math.PI / 180) * 0.5);
-  const frameParams = (fr: Frame, p: Preset, time: number): FrameParams => ({
+  const dayOf = (hour: number) => (cfg.day ?? 0) + hour / 24;
+  const frameParams = (fr: Frame, p: Preset, time: number, days = dayOf(cfg.hour ?? 15.5)): FrameParams => ({
     x: fr.x, y: fr.y, z: fr.z, yaw: fr.yaw, pitch: fr.pitch, width: p.w, height: p.h, tanHalf,
     seed: cfg.seed, marchSteps: p.marchSteps, shadowSteps: p.shadowSteps, time,
     hero: fr.hero ? (fr.heroF32 ??= new Float32Array(fr.hero)) : null,
+    days,
   });
+  const shotHours = (r: TerrainRendererLike): Array<number | null> =>
+    r.variant.height === 'raster' && r.variant.sky === 'cycle' && cfg.hours?.length ? cfg.hours : [null];
 
   function makeTarget(w: number, h: number): GPUTexture {
     return device.createTexture({ size: [w, h], format: FORMAT, usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC });
@@ -228,15 +240,18 @@ async function main(): Promise<void> {
         const buf = device.createBuffer({ size: bpr * preset.h, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
         const packed = new Uint8Array(preset.w * preset.h * 4);
         for (const f of cfg.shotFrames) {
-          for (const x of renderers) {
+          for (const x of renderers) for (const hour of shotHours(x.r)) {
+            const days = hour === null ? undefined : dayOf(hour);
+            const name = hour === null ? x.name : `${x.name}@${hour}`;
+            const t = cfg.time ?? f / 60;
             for (let c = 1; c < (cfg.converge ?? 1); c++) {
-              x.r.setFrame(frameParams(cfg.frames[f], preset, f / 60));
+              x.r.setFrame(frameParams(cfg.frames[f], preset, t, days));
               const warm = device.createCommandEncoder();
               x.r.encodeGenerate(warm);
               x.r.encodeRender(warm, view);
               device.queue.submit([warm.finish()]);
             }
-            x.r.setFrame(frameParams(cfg.frames[f], preset, f / 60));
+            x.r.setFrame(frameParams(cfg.frames[f], preset, t, days));
             const enc = device.createCommandEncoder();
             x.r.encodeGenerate(enc);
             x.r.encodeRender(enc, view);
@@ -246,12 +261,14 @@ async function main(): Promise<void> {
             const src = new Uint8Array(buf.getMappedRange());
             for (let y = 0; y < preset.h; y++) packed.set(src.subarray(y * bpr, y * bpr + preset.w * 4), y * preset.w * 4);
             buf.unmap();
-            await post(`/blob?kind=shot&variant=${encodeURIComponent(x.name)}&preset=${preset.id}&frame=${f}&w=${preset.w}&h=${preset.h}`, packed);
+            await post(`/blob?kind=shot&variant=${encodeURIComponent(name)}&preset=${preset.id}&frame=${f}&w=${preset.w}&h=${preset.h}`, packed);
             const gc = (x.r as { grassCount?: () => Promise<number> }).grassCount;
             const blades = gc ? await gc.call(x.r) : undefined;
             const tc = (x.r as { treeCount?: () => Promise<[number, number]> }).treeCount;
             const trees = tc ? await tc.call(x.r) : undefined;
-            out.push({ variant: x.name, preset: preset.id, frame: f, w: preset.w, h: preset.h, blades, trees });
+            const sp = (x.r as { skyProbe?: () => Promise<unknown> }).skyProbe;
+            const sky = sp ? await sp.call(x.r) : undefined;
+            out.push({ variant: name, preset: preset.id, frame: f, w: preset.w, h: preset.h, blades, trees, sky });
             const fs = (x.r as { forestSlots?: () => Promise<{ side: number; data: ArrayBuffer } | null> }).forestSlots;
             const dump = cfg.forestDump && fs ? await fs.call(x.r) : null;
             if (dump) await post(`/blob?kind=forest&variant=${encodeURIComponent(x.name)}&frame=${f}&side=${dump.side}`, new Uint8Array(dump.data));
@@ -264,8 +281,8 @@ async function main(): Promise<void> {
     },
 
     async probe() {
-      const module = device.createShaderModule({ code: PROBE_WGSL });
-      const pipe = await device.createComputePipelineAsync({ layout: 'auto', compute: { module, entryPoint: 'main' } });
+      const probeModule = device.createShaderModule({ code: PROBE_WGSL });
+      const pipe = await device.createComputePipelineAsync({ layout: 'auto', compute: { module: probeModule, entryPoint: 'main' } });
       const ubuf = device.createBuffer({ size: PROBE_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
       const out = [];
       for (const pr of cfg.probes) {
@@ -351,6 +368,37 @@ async function main(): Promise<void> {
         buf.destroy();
         target.destroy();
       }
+      return out;
+    },
+
+    // The clipmap's sun layer at each camera, after a whole rebuild there
+    // (kind=horizon blobs: the layer's texels, channels per texel).
+    async horizon() {
+      const preset = cfg.presets[0];
+      const target = makeTarget(preset.w, preset.h);
+      const view = target.createView();
+      const out = [];
+      for (const x of renderers) {
+        const layer = (x.r as { sunLayer?: (l: number) => Promise<{ n: number; spacing: number; channels: number; data: Float32Array }> }).sunLayer;
+        if (!layer) continue;
+        for (let fi = 0; fi < cfg.frames.length; fi++) {
+          x.r.invalidate();
+          for (let k = 0; k < 2; k++) {
+            x.r.setFrame(frameParams(cfg.frames[fi], preset, 0));
+            const enc = device.createCommandEncoder();
+            x.r.encodeGenerate(enc);
+            x.r.encodeRender(enc, view);
+            device.queue.submit([enc.finish()]);
+          }
+          await device.queue.onSubmittedWorkDone();
+          for (const level of cfg.horizonLevels ?? [0]) {
+            const r = await layer.call(x.r, level);
+            await post(`/blob?kind=horizon&variant=${encodeURIComponent(x.name)}&frame=${fi}&level=${level}&n=${r.n}&spacing=${r.spacing}&channels=${r.channels}`, new Uint8Array(r.data.buffer as ArrayBuffer));
+            out.push({ variant: x.name, frame: fi, level });
+          }
+        }
+      }
+      target.destroy();
       return out;
     },
 

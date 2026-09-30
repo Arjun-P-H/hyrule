@@ -19,7 +19,8 @@
  *               used by every surface, the grass, the hero and the trees.
  *
  * Needs, from the raster shader: u (Frame), WORLD_WGSL (hash3, vnoise,
- * elevation, temperature, moisture, W_LEVEL, SUN, SUN_COL, SKY_TINT),
+ * elevation, temperature, moisture, W_LEVEL), the light API (keyDir, keyCol,
+ * skyAmb, bounceCol: sky.wgsl.ts),
  * heightAt, sunAt, islandTopAt, islandShadowAt, inRuinSite, project,
  * surfaceFog, display, underwater.
  */
@@ -41,7 +42,7 @@ export type ForestSpec = {
   fade?: boolean;
 };
 
-export const FOREST_BYTES = 128;
+export const FOREST_BYTES = 176;
 export const SLOT_BYTES = 16;
 export const INSTANCE_BYTES = 32;
 /** Draw arguments per bucket: indexCount, instanceCount, firstIndex, baseVertex, firstInstance. */
@@ -338,6 +339,9 @@ struct ForestU {
   shF: vec4f,      // light forward axis (away from the sun); unused
   wind: vec4f,     // direction x, z; strength (m of sway at the tips); time
   shN: vec4f,      // centre of the shadow map rendered now (camera-relative); unused
+  sR: vec4f,       // light axes of the map sampled now (the light may have moved since it was drawn)
+  sU: vec4f,
+  sF: vec4f,
 };
 @group(0) @binding(8) var<uniform> forest: ForestU;
 @group(0) @binding(9) var shadowTex: texture_depth_2d;
@@ -348,7 +352,7 @@ struct ForestU {
 fn treeShadowAt(p: vec3f) -> f32 {${spec.shadowRes ? '' : ' return 1.0;'}
   let q = p - u.camPos - forest.shC.xyz;
   let R = forest.shC.w;
-  let ls = vec3f(dot(q, forest.shR.xyz), dot(q, forest.shU.xyz), dot(q, forest.shF.xyz));
+  let ls = vec3f(dot(q, forest.sR.xyz), dot(q, forest.sU.xyz), dot(q, forest.sF.xyz));
   let uv = vec2f(0.5 + 0.5 * ls.x / R, 0.5 - 0.5 * ls.y / R);
   let edge = max(abs(uv.x - 0.5), abs(uv.y - 0.5));
   let z = 0.5 + 0.5 * ls.z / forest.shR.w - 0.00008;
@@ -613,12 +617,13 @@ fn fsTree(i: TreeOut, @builtin(front_facing) front: bool) -> @location(0) vec4f 
   // Light: a soft two-tone ramp, sun through the leaves when backlit, sky and ground fill.
   var sun = i.sunLod.x * i.shade;
   if (sun > 0.0 && i.sunLod.y < 0.5) { sun = min(sun, heroShadowAt(i.rel)); }
-  let ndl = dot(n, SUN);
+  let L = keyDir();
+  let ndl = dot(n, L);
   let ramp = smoothstep(-0.3 * leafy - 0.05, 0.7, ndl);
-  let back = pow(clamp(dot(rd, SUN), 0.0, 1.0), 3.0) * leafy * (1.0 - 0.4 * ao);
-  let amb = SKY_TINT * (0.3 + 0.24 * n.y) + vec3f(0.035, 0.04, 0.02) * (1.0 - n.y);
+  let back = pow(clamp(dot(rd, L), 0.0, 1.0), 3.0) * leafy * (1.0 - 0.4 * ao);
+  let amb = skyAmb(n, 0.3 + 0.24 * n.y) + bounceCol(vec3f(0.035, 0.04, 0.02)) * (1.0 - n.y);
   let fill = mix(0.55 + 0.45 * ao, 0.35 + 0.65 * ao, leafy);
-  var col = albedo * (SUN_COL * sun * (0.6 * ramp + 0.32 * back) + amb * fill);
+  var col = albedo * (keyCol(p.y) * sun * (0.6 * ramp + 0.32 * back) + amb * fill);
   col = surfaceFog(col, dist, p.y, rd);
   return display(col);
 }

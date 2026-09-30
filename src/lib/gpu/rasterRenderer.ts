@@ -24,12 +24,16 @@ import { FALLS_BYTES, FALL_SEGMENTS, MAX_FALLS } from './waterfalls.wgsl';
 import { MAX_RUIN_BOXES, MAX_RUIN_SITES, RUIN_BOX_BYTES, RUIN_SITES_BYTES } from './ruins.wgsl';
 import { ruinSitesNear } from '../ruins';
 import { elevation, hash01 } from '../terrainMath';
-import { floatingOrigin, packFrame, type FrameParams, type TerrainRendererLike, type TerrainVariant } from './frame';
+import { DEFAULT_DAYS, floatingOrigin, packFrame, type FrameParams, type TerrainRendererLike, type TerrainVariant } from './frame';
 import { ringIndices, ringLayout } from './rings';
 import { SCENE_FORMAT, TemporalResolve } from './taa';
 import { Forest } from './forest';
+import { SkyCycle, type SkyBindings } from './sky';
 
 type RasterVariant = Extract<TerrainVariant, { height: 'raster' }>;
+
+/** Where the day–night sky's resources sit in group 0 (sky.wgsl.ts cycleSkyWGSL). */
+const SKY_BINDINGS: SkyBindings = { sky: 17, light: 18, view: 19 };
 
 export class RasterTerrainRenderer implements TerrainRendererLike {
   readonly device: GPUDevice;
@@ -51,7 +55,8 @@ export class RasterTerrainRenderer implements TerrainRendererLike {
   private heroScissor: [number, number, number, number] | null = null;
   private bind!: GPUBindGroup;
   private computeBind!: GPUBindGroup;
-  // With the forest, group 0 comes in two versions, one per shadow map sampled (Forest.sampled()).
+  // With the forest or the day–night sky, group 0 comes in two versions, one per shadow map and sky set
+  // sampled (Forest.sampled(), SkyCycle.sampled(): both flip every frame, in step).
   private binds: GPUBindGroup[] = [];
   private computeBinds: GPUBindGroup[] = [];
   private terrainPipe!: GPURenderPipeline;
@@ -115,6 +120,8 @@ export class RasterTerrainRenderer implements TerrainRendererLike {
   private ruinsAt: [number, number, number, number, number] = [NaN, NaN, NaN, NaN, NaN];
   // trees (variant.forest): placement cache, culling, draws, shadow map
   private forest: Forest | null = null;
+  // the day–night sky (variant.sky = 'cycle'): its LUTs, the frame's light rig and the probe of the sky
+  private sky: SkyCycle | null = null;
 
   constructor(device: GPUDevice, format: GPUTextureFormat, variant: RasterVariant) {
     const { clip, k, stride } = variant;
@@ -124,7 +131,7 @@ export class RasterTerrainRenderer implements TerrainRendererLike {
     this.format = format;
     this.variant = variant;
     this.rings = clip.levels;
-    this.cache = new ClipmapCache(device, clip, variant.genDpScale, { blend: variant.blend });
+    this.cache = new ClipmapCache(device, clip, variant.genDpScale, { blend: variant.blend, mode: variant.sky === 'cycle' ? 'path' : 'classic' });
     this.frameBuf = device.createBuffer({ size: FRAME_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.heroBuf = device.createBuffer({ size: HERO_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.meshData = new ArrayBuffer(meshBytes(this.rings));
@@ -137,6 +144,9 @@ export class RasterTerrainRenderer implements TerrainRendererLike {
     const v = this.variant;
     const grass = v.grass ?? null;
     if (v.forest) this.forest = new Forest(d, v.forest);
+    const cycle = v.sky === 'cycle';
+    if (cycle) this.sky = new SkyCycle(d);
+    const skyReady = this.sky?.init();
     const islands = !!v.islands;
     const ruins = !!v.ruins;
     const t0 = performance.now();
@@ -154,6 +164,7 @@ export class RasterTerrainRenderer implements TerrainRendererLike {
       ...(islands ? [{ binding: 10, visibility: VFC, buffer: { type: 'uniform' as const } }] : []),
       ...(islands ? [{ binding: 11, visibility: VFC, buffer: { type: 'uniform' as const } }] : []),
       ...(ruins ? [{ binding: 13, visibility: VFC, buffer: { type: 'uniform' as const } }] : []),
+      ...(cycle ? SkyCycle.layoutEntries(SKY_BINDINGS) : []),
     ];
     // Group 0 for the compute passes, and for drawing: the latter adds the ruin boxes.
     const computeLayout = d.createBindGroupLayout({ entries: shared });
@@ -162,9 +173,9 @@ export class RasterTerrainRenderer implements TerrainRendererLike {
     ];
     const layout = renderOnly.length ? d.createBindGroupLayout({ entries: [...shared, ...renderOnly] }) : computeLayout;
     const pl = d.createPipelineLayout({ bindGroupLayouts: [layout] });
-    const module = d.createShaderModule({
+    const shaders = d.createShaderModule({
       code: rasterShader({ n: v.clip.n, levels: v.clip.levels, blend: v.blend, k: v.k, rings: this.rings, grass, islands, ruins, diag: !!v.diag,
-        forest: this.forest ? { spec: this.forest.spec, bounds: this.forest.models.bounds } : null }),
+        forest: this.forest ? { spec: this.forest.spec, bounds: this.forest.models.bounds } : null, sky: cycle ? 'cycle' : 'classic' }),
     });
     const target = [{ format: v.taa ? SCENE_FORMAT : this.format }];
     const depthState = (write: boolean, compare: GPUCompareFunction): GPUDepthStencilState => ({ format: 'depth32float', depthWriteEnabled: write, depthCompare: compare });
@@ -191,20 +202,20 @@ export class RasterTerrainRenderer implements TerrainRendererLike {
     } };
     const fallPipesP = islands ? Promise.all([
       d.createRenderPipelineAsync({
-        layout: pl, vertex: { module, entryPoint: 'vsFall' }, fragment: { module, entryPoint: 'fsFall', targets: [blended] },
+        layout: pl, vertex: { module: shaders, entryPoint: 'vsFall' }, fragment: { module: shaders, entryPoint: 'fsFall', targets: [blended] },
         primitive: { topology: 'triangle-strip', cullMode: 'none' }, depthStencil: depthState(false, 'greater'), multisample,
       }),
       d.createRenderPipelineAsync({
-        layout: pl, vertex: { module, entryPoint: 'vsMist' }, fragment: { module, entryPoint: 'fsMist', targets: [blended] },
+        layout: pl, vertex: { module: shaders, entryPoint: 'vsMist' }, fragment: { module: shaders, entryPoint: 'fsMist', targets: [blended] },
         primitive: { topology: 'triangle-strip', cullMode: 'none' }, depthStencil: depthState(false, 'greater'), multisample,
       }),
     ]) : Promise.resolve([null, null] as const);
     const ruinPipeP = ruins ? d.createRenderPipelineAsync({
-      layout: pl, vertex: { module, entryPoint: 'vsRuin' }, fragment: { module, entryPoint: 'fsRuin', targets: target },
+      layout: pl, vertex: { module: shaders, entryPoint: 'vsRuin' }, fragment: { module: shaders, entryPoint: 'fsRuin', targets: target },
       primitive: { topology: 'triangle-list', cullMode: 'none' }, depthStencil: depthState(true, 'greater'), multisample,
     }) : Promise.resolve(null);
     const islandPipeP = islands ? d.createRenderPipelineAsync({
-      layout: pl, vertex: { module, entryPoint: 'vsIsland' }, fragment: { module, entryPoint: 'fsIsland', targets: target },
+      layout: pl, vertex: { module: shaders, entryPoint: 'vsIsland' }, fragment: { module: shaders, entryPoint: 'fsIsland', targets: target },
       primitive: { topology: 'triangle-list', cullMode: 'none' }, depthStencil: depthState(true, 'greater'), multisample,
     }) : Promise.resolve(null);
     const ringJobLayout = v.diag ? d.createBindGroupLayout({
@@ -215,38 +226,38 @@ export class RasterTerrainRenderer implements TerrainRendererLike {
     }) : null;
     const diagPipeP = ringJobLayout ? d.createComputePipelineAsync({
       layout: d.createPipelineLayout({ bindGroupLayouts: [computeLayout, ringJobLayout] }),
-      compute: { module, entryPoint: 'ringTris' },
+      compute: { module: shaders, entryPoint: 'ringTris' },
     }) : Promise.resolve(null);
     const [terrain, water, heroP, sky, , scatterP, grassP] = await Promise.all([
       d.createRenderPipelineAsync({
-        layout: pl, vertex: { module, entryPoint: 'vsTerrain' }, fragment: { module, entryPoint: 'fsTerrain', targets: target },
+        layout: pl, vertex: { module: shaders, entryPoint: 'vsTerrain' }, fragment: { module: shaders, entryPoint: 'fsTerrain', targets: target },
         primitive: { topology: 'triangle-list', cullMode: 'none' }, depthStencil: depthState(true, 'greater'), multisample,
       }),
       d.createRenderPipelineAsync({
-        layout: pl, vertex: { module, entryPoint: 'vsWater' },
+        layout: pl, vertex: { module: shaders, entryPoint: 'vsWater' },
         // Premultiplied alpha over the lake bed already drawn.
-        fragment: { module, entryPoint: 'fsWater', targets: [{ format: target[0].format, blend: {
+        fragment: { module: shaders, entryPoint: 'fsWater', targets: [{ format: target[0].format, blend: {
           color: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
           alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
         } }] },
         primitive: { topology: 'triangle-list', cullMode: 'none' }, depthStencil: depthState(true, 'greater'), multisample,
       }),
       d.createRenderPipelineAsync({
-        layout: pl, vertex: { module, entryPoint: 'vsSky' }, fragment: { module, entryPoint: 'fsHero', targets: target },
+        layout: pl, vertex: { module: shaders, entryPoint: 'vsSky' }, fragment: { module: shaders, entryPoint: 'fsHero', targets: target },
         primitive: { topology: 'triangle-list' }, depthStencil: depthState(true, 'greater'), multisample,
       }),
       d.createRenderPipelineAsync({
-        layout: pl, vertex: { module, entryPoint: 'vsSky' }, fragment: { module, entryPoint: 'fsSky', targets: target },
+        layout: pl, vertex: { module: shaders, entryPoint: 'vsSky' }, fragment: { module: shaders, entryPoint: 'fsSky', targets: target },
         primitive: { topology: 'triangle-list' }, depthStencil: depthState(false, 'greater-equal'), multisample,
       }),
       this.cache.init(),
       scatterLayout ? d.createComputePipelineAsync({
         layout: d.createPipelineLayout({ bindGroupLayouts: [computeLayout, scatterLayout] }),
-        compute: { module, entryPoint: 'grassScatter' },
+        compute: { module: shaders, entryPoint: 'grassScatter' },
       }) : Promise.resolve(null),
       drawLayout ? d.createRenderPipelineAsync({
         layout: d.createPipelineLayout({ bindGroupLayouts: [layout, drawLayout] }),
-        vertex: { module, entryPoint: 'vsGrass' }, fragment: { module, entryPoint: 'fsGrass', targets: target },
+        vertex: { module: shaders, entryPoint: 'vsGrass' }, fragment: { module: shaders, entryPoint: 'fsGrass', targets: target },
         primitive: { topology: 'triangle-strip', cullMode: 'none' }, depthStencil: depthState(true, 'greater'), multisample,
       }) : Promise.resolve(null),
     ]);
@@ -260,7 +271,8 @@ export class RasterTerrainRenderer implements TerrainRendererLike {
     [this.fallPipe, this.mistPipe] = await fallPipesP;
     this.ruinPipe = await ruinPipeP;
     this.diagPipe = await diagPipeP;
-    if (this.forest) await this.forest.init(module, computeLayout, layout, this.frameBuf, target, depthState(true, 'greater'), multisample);
+    await skyReady;
+    if (this.forest) await this.forest.init(shaders, computeLayout, layout, this.frameBuf, target, depthState(true, 'greater'), multisample);
     if (ringJobLayout) {
       const k = v.k;
       for (let r = 0; r < this.rings; r++) {
@@ -339,8 +351,12 @@ export class RasterTerrainRenderer implements TerrainRendererLike {
     const renderEntries: GPUBindGroupEntry[] = [
       ...(this.ruinBoxBuf ? [{ binding: 12, resource: { buffer: this.ruinBoxBuf } }] : []),
     ];
-    for (const which of this.forest ? [0, 1] : [0]) {
-      const shared = [...sharedEntries, ...(this.forest ? this.forest.bindEntries(which) : [])];
+    for (const which of this.forest || this.sky ? [0, 1] : [0]) {
+      const shared = [
+        ...sharedEntries,
+        ...(this.forest ? this.forest.bindEntries(which) : []),
+        ...(this.sky ? this.sky.bindEntries(SKY_BINDINGS, which) : []),
+      ];
       const cb = d.createBindGroup({ layout: computeLayout, entries: shared });
       this.computeBinds.push(cb);
       this.binds.push(renderEntries.length ? d.createBindGroup({ layout, entries: [...shared, ...renderEntries] }) : cb);
@@ -458,9 +474,10 @@ export class RasterTerrainRenderer implements TerrainRendererLike {
 
     if (this.islandBuf) this.uploadIslands(fp, ox, oz);
     if (this.ruinBoxBuf) this.uploadRuins(fp, ox, oz);
-    if (this.forest) {
-      this.forest.setFrame(fp);
-      const which = this.forest.sampled();
+    if (this.sky) this.sky.setFrame(fp.days ?? DEFAULT_DAYS, fp.y, fp.time);
+    if (this.forest) this.forest.setFrame(fp, this.sky?.rig.key);
+    if (this.forest || this.sky) {
+      const which = this.forest ? this.forest.sampled() : this.sky!.sampled();
       [this.computeBind, this.bind] = [this.computeBinds[which], this.binds[which]];
     }
   }
@@ -555,7 +572,9 @@ export class RasterTerrainRenderer implements TerrainRendererLike {
 
   encodeRender(enc: GPUCommandEncoder, target: GPUTextureView, ts?: PassTimestamps): void {
     if (!this.depthView) throw new Error('raster: setFrame before encodeRender');
-    // Trees first: their shadow map is read by the grass scatter and every surface.
+    // The sky's LUT and light first: every surface and the fog read them.
+    this.sky?.encode(enc);
+    // Trees next: their shadow map is read by the grass scatter and every surface.
     this.forest?.encode(enc, this.computeBind);
     const grass = this.variant.grass;
     if (grass && this.scatterPipe && this.argsBuf && this.scatterBind) {
@@ -660,6 +679,20 @@ export class RasterTerrainRenderer implements TerrainRendererLike {
     return this.forest ? { side: this.forest.spec.side, data: await this.forest.readSlots() } : null;
   }
 
+  /** One level of the clipmap's sun layer and its spacing (debug readback; waits for the GPU). */
+  async sunLayer(level: number): Promise<{ n: number; spacing: number; channels: number; data: Float32Array }> {
+    const { channels, data } = await this.cache.readSunLayer(level);
+    return { n: this.variant.clip.n, spacing: this.variant.clip.spacing0 * 2 ** level, channels, data };
+  }
+
+  /** The day–night sky's probe of the last frame and its light rig (debug readback; waits for the GPU). */
+  async skyProbe(): Promise<{ light: number[]; exposure: number; hour: number; key: number[] } | null> {
+    if (!this.sky) return null;
+    const light = Array.from(await this.sky.readLight());
+    const r = this.sky.rig;
+    return { light, exposure: light[36], hour: r.hour, key: Array.from(r.keyCols) };
+  }
+
   /** Blades the last scatter kept (debug readback; waits for the GPU). */
   async grassCount(): Promise<number> {
     if (!this.argsBuf) return 0;
@@ -689,6 +722,7 @@ export class RasterTerrainRenderer implements TerrainRendererLike {
     this.msaaColor?.destroy();
     this.taa?.destroy();
     this.forest?.destroy();
+    this.sky?.destroy();
     this.cache.destroy();
   }
 }

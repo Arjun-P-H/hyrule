@@ -11,8 +11,13 @@
  *                                  incremental updates at walk … fast-fly speeds
  *   bun bench/webgpu.ts fidelity   every variant against the converged WebGL2
  *                                  ground truth (transformShader 'truth')
+ *   bun bench/webgpu.ts horizons   the day–night sky's terrain horizons (the
+ *                                  clipmap's sun layer read back) against a
+ *                                  brute-force march of the CPU twin
  *
  * Options: --res=1280x800 --reps=2 --frames=all|0,6,12 --variants=a,b
+ *          --hours=6,12,18.2 (stills of day–night variants at those hours; --day=n the game day)
+ *          --hour=18.2 (timing of day–night variants at that hour)
  * Results: bench/out/webgpu-<mode>.json, frames in bench/out/webgpu/.
  */
 
@@ -31,6 +36,8 @@ import { plantInCell, type PlaceWorld } from '../src/lib/forest/placement';
 import { SPECIES } from '../src/lib/forest/species';
 import { ruinSiteAt } from '../src/lib/ruins';
 import { islandAt, islandRho, islandTop } from '../src/lib/skyIslands';
+import { elevation } from '../src/lib/terrainMath';
+import { PATH_N, SKY } from '../src/lib/sky/celestial';
 
 const ROOT = path.resolve(import.meta.dir, '..');
 const OUT = path.join(ROOT, 'bench/out');
@@ -82,6 +89,12 @@ const VARIANTS: Record<string, TerrainVariant> = {
     height: 'raster', k: 128, stride: 1, morphStart: 0.75, clip: { n: 512, levels: 8, spacing0: 0.5, margin: 4 }, genDpScale: 1, blend: 0.25, taa: true,
     grass: { rings: 5, n: 256, spacing0: 0.125, blend: 0.3, height: [0.22, 0.62], width: 0.045, density: 1 },
     forest: { density: 1, side: 48, shadowRes: 2048, shadowRange: 90 }, islands: true, ruins: true, diag: true,
+  },
+  // The game's world under the day–night sky (the hour from --hours / --hour).
+  'world-cycle': {
+    height: 'raster', k: 128, stride: 1, morphStart: 0.75, clip: { n: 512, levels: 8, spacing0: 0.5, margin: 4 }, genDpScale: 1, blend: 0.25, taa: true,
+    grass: { rings: 5, n: 256, spacing0: 0.125, blend: 0.3, height: [0.22, 0.62], width: 0.045, density: 1 },
+    forest: { density: 1, side: 48, shadowRes: 2048, shadowRange: 90 }, islands: true, ruins: true, diag: true, sky: 'cycle',
   },
   // The forest's parts: without shadows, without the level-of-detail dither.
   'world-taa-noshadow': {
@@ -351,10 +364,24 @@ async function stills(): Promise<void> {
   const shotFrames = opt('frames', '1,3') === 'all' ? framed.map((_, i) => i) : opt('frames', '1,3').split(',').map(Number);
   const variants = pickVariants('world-noaa,world-taa-a1,world-taa-soft');
   const timed = !!opt('timing', '');
-  const gpu = await runWebGPU({ modes: timed ? ['shots', 'timing'] : ['shots'], variants, frames: framed, shotFrames, converge: Number(opt('converge', '32')) });
+  const hours = opt('hours', '').split(',').filter(Boolean).map(Number);
+  const gpu = await runWebGPU({
+    modes: timed ? ['shots', 'timing'] : ['shots'], variants, frames: framed, shotFrames, converge: Number(opt('converge', '32')),
+    hours, day: Number(opt('day', '0')), hour: Number(opt('hour', '15.5')),
+    ...(opt('time', '') ? { time: Number(opt('time', '0')) } : {}),
+  });
   saveShots(gpu, path.join(OUT, 'webgpu', config === 'gallery' ? 'fidelity' : `stills-${config}`), false);
   console.log('stills saved', variants.map((v) => v.name).join(', '));
-  const shotsInfo = gpu.results.shots as Array<{ variant: string; frame: number; trees?: [number, number] }>;
+  const shotsInfo = gpu.results.shots as Array<{ variant: string; frame: number; trees?: [number, number]; sky?: { light: number[]; exposure: number; hour: number } | null }>;
+  const skies = shotsInfo.filter((x) => x.sky);
+  if (skies.length) {
+    writeFileSync(path.join(OUT, `webgpu-sky-${config}.json`), JSON.stringify(skies.map((x) => ({ variant: x.variant, frame: x.frame, ...x.sky })), null, 1));
+    const v = (l: number[], i: number) => `(${[0, 1, 2].map((c) => l[4 * i + c].toFixed(3)).join(',')})`;
+    for (const x of skies) {
+      const l = x.sky!.light;
+      console.log(`  sky ${x.variant} f${x.frame}: exposure ${x.sky!.exposure.toFixed(2)} ambUp ${v(l, 0)} sun ${v(l, 1)} anti ${v(l, 2)} down ${v(l, 3)} bounce ${v(l, 4)} hor ${v(l, 5)} hor·cos ${v(l, 6)} hor·cos2 ${v(l, 7)} zenith ${v(l, 8)} grade ${v(l, 9)}`);
+    }
+  }
   const tr = shotsInfo.filter((x) => x.trees && (x.trees[0] || x.trees[1]));
   if (tr.length) console.log('  trees (near/far) per frame:', tr.map((x) => `${x.variant} f${x.frame}: ${x.trees![0]}/${x.trees![1]}`).join(', '));
   if (!timed) return;
@@ -369,6 +396,9 @@ async function stills(): Promise<void> {
     const s = summarize(t.filter((x) => x.v === vi).map((x) => x.ms));
     const r = vi ? pairedRatio(perFrame[0], perFrame[vi]) : null;
     console.log(`  ${v.name}: p50 ${fmt(s.p50, 2)} ms  p95 ${fmt(s.p95, 2)} ms` + (r ? `   × ${fmt(r.ratio, 3)} [${fmt(r.lo, 3)}, ${fmt(r.hi, 3)}] vs ${variants[0].name}` : ''));
+  }
+  if (opt('perframe', '')) {
+    console.log('  per frame (fastest rep, ms): ' + perFrame[0].map((_, f) => `f${f}: ${perFrame.map((pv) => fmt(pv[f], 2)).join(' / ')}`).join('  '));
   }
 }
 
@@ -522,6 +552,94 @@ async function parity(): Promise<void> {
   }
 }
 
-const modes: Record<string, () => Promise<void>> = { port, cost, gen, fidelity, hero, aa, stills, parity };
+/**
+ * The horizons the GPU baked along the sun's path (horizonShader) against a
+ * brute-force march of the CPU twin in the same tilted plane: every 1 % of
+ * the distance (the GPU steps ~9 %), the land's top found by a damped fixed
+ * point, the same curvature, sea-level dip and reach. Heights are the CPU
+ * twin's at the footprint of the clipmap level round each sample.
+ */
+async function horizons(): Promise<void> {
+  const variants = pickVariants('world-cycle');
+  const v = variants[0].variant;
+  if (v.height !== 'raster') throw new Error('horizons: needs a raster variant');
+  const config = opt('config', 'sky');
+  const all: CameraFrame[] = JSON.parse(readFileSync(path.join(OUT, '.cache', `framed-${config}.json`), 'utf8'));
+  const picks = opt('frames', '0,3,5').split(',').map(Number);
+  const cams = picks.map((i) => all[i]);
+  const levels = opt('levels', '0,3,6').split(',').map(Number);
+  const res = await runWebGPU({ modes: ['horizon'], variants, frames: cams, horizonLevels: levels });
+  const { n, spacing0, margin, levels: L } = v.clip;
+  const cosLat = Math.cos(SKY.latitude), sinLat = Math.sin(SKY.latitude);
+  const curv = 1 / (2 * SKY.planetRadius);
+  const DEG = 180 / Math.PI;
+  let seed0 = 20260930;
+  const rnd = () => { seed0 = (seed0 * 1664525 + 1013904223) >>> 0; return seed0 / 4294967296; };
+  type Row = { frame: number; level: number; samples: number; medianDeg: number; p95Deg: number; maxDeg: number; within1Deg: number };
+  const rows: Row[] = [];
+  for (const b of res.blobs.filter((x) => x.query.kind === 'horizon')) {
+    const fi = Number(b.query.frame), level = Number(b.query.level), s = Number(b.query.spacing);
+    const cam = cams[fi];
+    const data = new Float32Array(b.data.buffer, b.data.byteOffset, b.data.byteLength / 4);
+    // Height at the footprint of the finest level whose window holds the point, as the clipmap stores it.
+    const H = (x: number, z: number) => {
+      const d = Math.max(Math.abs(x - cam.x), Math.abs(z - cam.z));
+      let l = 0;
+      while (l < L - 1 && d > (n / 2 - margin) * spacing0 * 2 ** l) l++;
+      return elevation(x, z, DEFAULT_SEED, spacing0 * 2 ** l * v.genDpScale);
+    };
+    const edge = (n / 2 - margin) * spacing0 * 2 ** (L - 1);
+    const horizon = (px: number, py: number, pz: number, sgn: number) => {
+      let th = -Math.asin(Math.min(Math.sin(Math.sqrt(4 * Math.max(py, 0) * curv)) / cosLat, 1));
+      for (let a = Math.max(0.6, 1.5 * s); a < 8000; a += Math.max(0.25, a * 0.01)) {
+        let bb = a * Math.tan(th);
+        const qx = px + sgn * a;
+        if (Math.max(Math.abs(qx - cam.x), Math.abs(pz - cam.z)) > edge) break;
+        // the land's top in the plane at this distance: damped fixed point from the current horizon
+        let top = -Infinity;
+        for (let k = 0; k < 14; k++) {
+          const qz = pz + PATH_N[2] * bb;
+          const drop = (a * a + bb * bb * sinLat * sinLat) * curv;
+          const want = (H(qx, qz) - drop - py) / cosLat;
+          if (k === 0 && want <= bb) break; // below the current horizon here
+          top = want;
+          bb = bb + 0.6 * (want - bb);
+        }
+        if (top > -Infinity) th = Math.max(th, Math.atan2(top, a));
+        if (py + a * Math.tan(th) * cosLat + a * a * curv > 1300) break;
+      }
+      return th;
+    };
+    const errs: number[] = [];
+    const signed: number[] = [];
+    const lim = (n / 2 - margin - 2) * s;
+    for (let k = 0; k < Number(opt('samples', '160')); k++) {
+      const x = cam.x + (rnd() * 2 - 1) * lim, z = cam.z + (rnd() * 2 - 1) * lim;
+      const I = Math.round(x / s), J = Math.round(z / s);
+      const tx = ((I % n) + n) % n, tz = ((J % n) + n) % n;
+      const o = (tz * n + tx) * 4;
+      const gRise = data[o], gSet = data[o + 1];
+      const wx = I * s, wz = J * s;
+      const e = H(wx, wz);
+      const gx = (H(wx + s, wz) - H(wx - s, wz)) / (2 * s), gz = (H(wx, wz + s) - H(wx, wz - s)) / (2 * s);
+      const inv = 1 / Math.hypot(gx, 1, gz), off = 0.15 + 0.5 * s;
+      const px = wx - gx * inv * off, py = e + inv * off, pz = wz - gz * inv * off;
+      const cRise = horizon(px, py, pz, 1), cSet = Math.PI - horizon(px, py, pz, -1);
+      errs.push(Math.abs(gRise - cRise) * DEG, Math.abs(gSet - cSet) * DEG);
+      // signed: the GPU's horizon lower (shadows too short) or higher than the brute force's
+      signed.push((gRise - cRise) * DEG, (cSet - gSet) * DEG);
+    }
+    const low = signed.filter((x) => x < -1).length / signed.length, high = signed.filter((x) => x > 1).length / signed.length;
+    console.log(`    signed: GPU lower by > 1° ${(low * 100).toFixed(1)} %, higher by > 1° ${(high * 100).toFixed(1)} %`);
+    errs.sort((a, b) => a - b);
+    const q = (p: number) => errs[Math.min(errs.length - 1, Math.floor(p * errs.length))];
+    const row = { frame: picks[fi], level, samples: errs.length, medianDeg: q(0.5), p95Deg: q(0.95), maxDeg: errs[errs.length - 1], within1Deg: errs.filter((x) => x < 1).length / errs.length };
+    rows.push(row);
+    console.log(`  camera ${row.frame} level ${level} (${s} m): |Δθ| median ${row.medianDeg.toFixed(3)}°  p95 ${row.p95Deg.toFixed(2)}°  max ${row.maxDeg.toFixed(2)}°  within 1° ${(row.within1Deg * 100).toFixed(1)} %  (1° = 4 game minutes of shadow timing)`);
+  }
+  writeFileSync(path.join(OUT, 'webgpu-horizons.json'), JSON.stringify({ config, cameras: picks, levels, rows }, null, 1));
+}
+
+const modes: Record<string, () => Promise<void>> = { port, cost, gen, fidelity, hero, aa, stills, parity, horizons };
 if (!modes[mode]) throw new Error(`unknown mode ${mode}; one of ${Object.keys(modes).join(', ')}`);
 await modes[mode]();
