@@ -4,7 +4,7 @@ import { trunksNear } from '../src/lib/forest/collision';
 import { buildLeafAtlas, LEAF_MIPS, LEAF_SIZE, LEAF_STYLES } from '../src/lib/forest/leafAtlas';
 import { buildTreeModels, SURFACE_SPAN, trunkColliders, VERTEX_BYTES } from '../src/lib/forest/models';
 import { createHeroState, firstPersonGround, updateHero, type HeroInput } from '../src/lib/hero/locomotion';
-import { forestAt, plantInCell, RULES, type Plant } from '../src/lib/forest/placement';
+import { forestAt, forestCanopy, plantInCell, RULES, type Plant } from '../src/lib/forest/placement';
 import { CELL, LODS, SPECIES, SPECIES_INFO, VARIANTS } from '../src/lib/forest/species';
 import { TileWindow } from '../src/lib/forest/tiles';
 import { elevation, updatePlayer, type InputState, type PlayerState } from '../src/lib/terrainMath';
@@ -234,6 +234,42 @@ describe('where trees grow', () => {
     expect(temperate.perHa).toBeLessThan(45);
     expect(savanna.perHa).toBeLessThan(6);
     expect(desert.perHa).toBeLessThan(5);
+  });
+
+  test('the far canopy predicts the trees: forest trees grow where and as often as forestCanopy says, of its species', () => {
+    let predicted = 0, grown = 0, squares = 0, speciesHits = 0, speciesSquares = 0;
+    const errs: number[] = [];
+    for (const zone of ['temperate', 'autumn', 'mountain', 'jungle']) {
+      for (const s of inZone(zone).filter((x) => x.mask > 0.2).filter((_, k) => k % 5 === 0).slice(0, 12)) {
+        let p = 0, g = 0;
+        const count = new Map<string, number>();
+        const want = new Map<string, number>();
+        for (let iz = Math.floor((s.z - 30) / CELL); iz < (s.z + 30) / CELL; iz++) {
+          for (let ix = Math.floor((s.x - 30) / CELL); ix < (s.x + 30) / CELL; ix++) {
+            const c = forestCanopy((ix + 0.5) * CELL, (iz + 0.5) * CELL, SEED);
+            if (c) { p += c.forest; want.set(c.species, (want.get(c.species) ?? 0) + c.forest); }
+            const plant = plantInCell(ix, iz, SEED);
+            if (plant?.feature === 'forest') { g++; count.set(plant.species, (count.get(plant.species) ?? 0) + 1); }
+          }
+        }
+        predicted += p; grown += g; squares++;
+        errs.push(Math.abs(g - p) / Math.max(p, 4));
+        if (g >= 10) {
+          speciesSquares++;
+          const top = (m: Map<string, number>) => [...m.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
+          if (top(count) === top(want)) speciesHits++;
+        }
+      }
+    }
+    expect(squares).toBeGreaterThan(30);
+    expect(grown).toBeGreaterThan(400);
+    // Over all squares the expected count is the count (the draws are independent per cell) ...
+    expect(Math.abs(grown - predicted) / predicted).toBeLessThan(0.08);
+    // ... and square by square within the draws' own spread (a 100-cell square at a share of ~0.3: ±~15 %).
+    errs.sort((a, b) => a - b);
+    expect(errs[Math.floor(errs.length / 2)]).toBeLessThan(0.2);
+    // The species painted is the one grown (a stand mixes two near its borders).
+    expect(speciesHits / speciesSquares).toBeGreaterThan(0.8);
   });
 
   test('lone trees never crowd each other', () => {

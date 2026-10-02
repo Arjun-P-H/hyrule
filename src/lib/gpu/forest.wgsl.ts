@@ -29,6 +29,9 @@
  * vsTreeShadow  the same transform into the sun's orthographic shadow map.
  * treeShadowAt  sun visibility under the trees (5 filtered comparison taps),
  *               used by every surface, the grass, the hero and the trees.
+ * canopyAt      (canopyWGSL, compiled into the clipmap's material pass) the far
+ *               forest: the canopy the trees would make, per lattice point, which
+ *               the ground is painted with beyond the trees' drawing range.
  *
  * Needs, from the raster shader: u (Frame), WORLD_WGSL (hash3, vnoise,
  * elevation, temperature, moisture, W_LEVEL), the light API (keyDir, keyCol,
@@ -40,7 +43,7 @@
 
 import { LEAF_SIZE, LEAF_STYLES } from '../forest/leafAtlas';
 import { SURFACE_SPAN } from '../forest/models';
-import { PLACE, RULES, ZONES } from '../forest/placement';
+import { CANOPY_AVG, PLACE, RULES, ZONES } from '../forest/placement';
 import { CELL, SPECIES, SPECIES_INFO, VARIANTS, type Species } from '../forest/species';
 import { SKY_BIOMES, SKY_BIOME_INFO, SKY_FLORA, SKY_FLORA_COLOURS } from '../skyworld/biomes';
 import { SKY_PLACE } from '../skyworld/flora';
@@ -104,12 +107,17 @@ const PAINT: Partial<Record<Species, readonly [number, number, number, number]>>
 };
 const v3 = (a: readonly number[]) => `vec3f(${a.map(f).join(', ')})`;
 
-/** forest/placement.ts as WGSL: its tables, then its steps mirrored (keep the two in step). */
-function placementWGSL(islands: boolean): string {
-  const Z = ZONES.map((z) => RULES[z]);
-  const sp = (x: Species) => SPECIES.indexOf(x);
-  const pair = (p: readonly [Species, Species, number]) => `vec3f(${sp(p[0])}.0, ${sp(p[1])}.0, ${f(p[2])})`;
-  const noise = (wl: number, off: number) => `plNoise(x, z, ${f(wl)}, ${off})`;
+const ZONE_RULES = ZONES.map((z) => RULES[z]);
+const spIndex = (x: Species) => SPECIES.indexOf(x);
+const spPair = (p: readonly [Species, Species, number]) => `vec3f(${spIndex(p[0])}.0, ${spIndex(p[1])}.0, ${f(p[2])})`;
+
+/**
+ * forest/placement.ts's tables, its climate zones and its forest-body field (for a given seed), as
+ * WGSL: shared by the placement (placementWGSL) and the far forest's canopy (canopyWGSL).
+ */
+function forestFieldsWGSL(): string {
+  const Z = ZONE_RULES;
+  const pair = spPair, sp = spIndex;
   return /* wgsl */ `
 const Z_A: array<vec4f, ${Z.length}> = ${arr('vec4f', Z.map((r) => `vec4f(${f(r.forest)}, ${f(r.fill)}, ${f(r.shore)}, ${f(r.shrub)})`))};
 const Z_G: array<vec4f, ${Z.length}> = ${arr('vec4f', Z.map((r) => `vec4f(${f(r.groveGrid)}, ${f(r.groveP)}, ${f(r.groveR[0])}, ${f(r.groveR[1])})`))};
@@ -123,7 +131,6 @@ const PL_DESERT: i32 = ${ZONES.indexOf('desert')};
 const PL_BUSH: u32 = ${sp('bush')}u;
 
 fn plU16(h: u32, shift: u32) -> f32 { return f32((h >> shift) & 0xffffu) / 65535.0; }
-fn plNoise(x: f32, z: f32, wl: f32, off: i32) -> f32 { return 0.5 + 0.5 * vnoise(x / wl, z / wl, u.seed + off); }
 fn plFdiv(a: i32, b: i32) -> i32 { return i32(floor(f32(a) / f32(b))); }
 fn plPair(p: vec3f, v: f32) -> u32 { return select(u32(p.y), u32(p.x), v < 1.0 - p.z); }
 
@@ -142,12 +149,22 @@ fn zoneWeights(T: f32, M: f32, region: f32) -> array<f32, ${Z.length}> {
     dry * (1.0 - desert) * (1.0 - cold), desert * (1.0 - cold), cold * (1.0 - alpine), alpine * treeline);
 }
 
-fn forestField(x: f32, z: f32) -> f32 {
+fn forestFieldAt(x: f32, z: f32, seed: i32) -> f32 {
   let wl = ${f(PLACE.warp.wavelength)};
-  let wx = x + ${f(PLACE.warp.amount)} * vnoise(x / wl, z / wl, u.seed + ${PLACE.warp.seed});
-  let wz = z + ${f(PLACE.warp.amount)} * vnoise(x / wl + 17.3, z / wl - 9.1, u.seed + ${PLACE.warp.seed + 1});
-  return 0.5 + 0.5 * (${PLACE.field.map(([wl, amp, off]) => `${f(amp)} * vnoise(wx / ${f(wl)}, wz / ${f(wl)}, u.seed + ${off})`).join(' + ')});
+  let wx = x + ${f(PLACE.warp.amount)} * vnoise(x / wl, z / wl, seed + ${PLACE.warp.seed});
+  let wz = z + ${f(PLACE.warp.amount)} * vnoise(x / wl + 17.3, z / wl - 9.1, seed + ${PLACE.warp.seed + 1});
+  return 0.5 + 0.5 * (${PLACE.field.map(([wl, amp, off]) => `${f(amp)} * vnoise(wx / ${f(wl)}, wz / ${f(wl)}, seed + ${off})`).join(' + ')});
 }
+`;
+}
+
+/** forest/placement.ts as WGSL: its tables, then its steps mirrored (keep the two in step). */
+function placementWGSL(islands: boolean): string {
+  const Z = ZONE_RULES;
+  const noise = (wl: number, off: number) => `plNoise(x, z, ${f(wl)}, ${off})`;
+  return /* wgsl */ `${forestFieldsWGSL()}
+fn plNoise(x: f32, z: f32, wl: f32, off: i32) -> f32 { return 0.5 + 0.5 * vnoise(x / wl, z / wl, u.seed + off); }
+fn forestField(x: f32, z: f32) -> f32 { return forestFieldAt(x, z, u.seed); }
 
 struct PlSite {
   ok: bool, e: f32, slope: f32, hollow: f32, knoll: f32, T: f32,
@@ -384,6 +401,69 @@ fn skyPlantAt(ix: i32, iz: i32, lid: vec2f, corner: vec2f, bits: u32) -> vec4u {
   }
   if (bush < R.z) { return skyRecord(PL_BUSH, SKY_BUSHPAL[b], off, y, 0.8 + 0.4 * pick, BI_SNOW[b] > 0.5, bits); }
   return vec4u(0u);
+}
+`;
+}
+
+/**
+ * The far forest's look per species: its canopy's albedo seen from afar (its leaves' two tones,
+ * darkened by the shade inside and between the crowns), and the share of the ground one tree's crown
+ * covers, in cells (a crown fills about this much of its bounding disc).
+ */
+const CANOPY_LOOK = { dark: 0.6, shade: 0.8, fill: 0.7, snow: [0.62, 0.66, 0.72], snowCover: 0.45 } as const;
+
+/**
+ * The far forest (placement.ts canopyFrom, mirrored): where the renderer no longer draws trees it
+ * paints the canopy they would make onto the ground. Run once per clipmap lattice point, after its
+ * height (terrain.wgsl.ts horizonShader / sunShader); needs WORLD_WGSL (vnoise, temperature, W_LEVEL).
+ */
+export function canopyWGSL(): string {
+  const S = SPECIES.map((s) => SPECIES_INFO[s]);
+  const L = CANOPY_LOOK, A = CANOPY_AVG;
+  const noise = (wl: number, off: number) => `(0.5 + 0.5 * vnoise(g.x / ${f(wl)}, g.y / ${f(wl)}, seed + ${off}))`;
+  return /* wgsl */ `${forestFieldsWGSL()}
+const CN_COL: array<vec3f, ${S.length}> = ${arr('vec3f', S.map((s) => v3([0, 1, 2].map((c) => L.shade * (L.dark * s.leaf[0][c] + (1 - L.dark) * s.leaf[1][c])))))};
+const CN_AREA: array<f32, ${S.length}> = ${arr('f32', S.map((s) => f((L.fill * Math.PI * s.radius * s.radius) / (CELL * CELL))))};
+
+// The far forest at world g, from the ground the clipmap holds there (height e, slope, the relief
+// over the hills' step and its slope, moisture M): its canopy's albedo, premultiplied by its cover
+// and stored as square roots (8 bits keep the dark greens), and its cover, 1 − e^(−trees per cell ×
+// cells under one crown).
+fn canopyAt(g: vec2f, e: f32, slope: f32, hills: f32, hillSlope: f32, M: f32, seed: i32) -> vec4f {
+  if (e < W_LEVEL + 0.4) { return vec4f(0.0); }
+  let T = temperature(g, e);
+  var zw = zoneWeights(T, M, ${noise(PLACE.region.wavelength, PLACE.region.seed)});
+  var total = 0.0;
+  var level = 0.0;
+  var fill = 0.0;
+  var dom = 0;
+  for (var k = 0; k < ${ZONES.length}; k++) {
+    total += zw[k];
+    if (zw[k] > zw[dom]) { dom = k; }
+    level += zw[k] * Z_A[k].x;
+    fill += zw[k] * Z_A[k].y;
+  }
+  if (total < 1e-4) { return vec4f(0.0); }
+  level /= total;
+  fill /= total;
+  let suit = 0.1 * smoothstep(0.02, 0.12, hills) - 0.12 * smoothstep(0.02, 0.12, -hills) + 0.15 * (M - 0.62) - 0.3 * smoothstep(0.55, 0.9, hillSlope);
+  let mask = smoothstep(level - ${f(PLACE.edge)}, level + ${f(PLACE.edge)}, forestFieldAt(g.x, g.y, seed) + suit);
+  let open = 1.0 - smoothstep(0.15, 0.4, mask);
+  let glade = smoothstep(${f(PLACE.glade.lo)}, ${f(PLACE.glade.hi)}, ${noise(PLACE.glade.wavelength, PLACE.glade.seed)});
+  let park = ${f(PLACE.parkland.lo)} + ${f(PLACE.parkland.span)} * smoothstep(0.3, 0.7, ${noise(PLACE.parkland.wavelength, PLACE.parkland.seed)});
+  let G = Z_G[dom];
+  let grove = G.y * park * ${f(A.groveHollow)} * open * Z_GF[dom] * ${f(A.groveShape * Math.PI / 3)} * (G.z * G.z + G.z * G.w + G.w * G.w) / (G.x * G.x)
+    * (1.0 - smoothstep(0.5, 0.9, slope));
+  let lc = ${f(CELL)} / Z_L[dom].x;
+  let lone = Z_L[dom].y * park * ${f(PLACE.lone.flat + A.knolls * PLACE.lone.knoll)} * (1.0 - smoothstep(0.35, 0.6, slope)) * open * lc * lc;
+  let forest = fill * pow(mask, 1.4) * (1.0 - ${f(PLACE.glade.cut)} * glade) * (1.0 - smoothstep(0.8, 1.15, slope));
+  let sp = plPair(Z_FSP[dom], ${noise(PLACE.stand.wavelength, PLACE.stand.seed)});
+  let cover = 1.0 - exp(-(forest + grove + lone) * CN_AREA[sp]);
+  var col = CN_COL[sp];
+  if (T < 0.5 && (sp == ${spIndex('pine')}u || sp == ${spIndex('dead')}u || sp == ${spIndex('bush')}u || sp == ${spIndex('birch')}u)) {
+    col = mix(col, ${v3(L.snow)}, ${f(L.snowCover)});
+  }
+  return vec4f(sqrt(col) * cover, cover);
 }
 `;
 }

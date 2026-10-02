@@ -63,6 +63,18 @@ const VARIANTS: Record<string, TerrainVariant> = {
   // (QUALITY_PRESETS resScale; the output stays at --res, as the canvas does).
   'game-med': { ...GAME_VARIANT, sky: 'cycle', renderScale: 0.5 } as TerrainVariant,
   'game-high': { ...GAME_VARIANT, sky: 'cycle', renderScale: 0.75 } as TerrainVariant,
+  // The far forest against the trees it stands for (terrain.wgsl.ts CANOPY_MODE): the trees alone, no
+  // canopy painted; the canopy painted at every distance and no trees; the canopy's cover and the
+  // distance as raw colours (which pixels to compare).
+  'canopy-trees': { ...GAME, sky: 'cycle', renderScale: 0.75, stub: { CANOPY_MODE: 1 } } as TerrainVariant,
+  'canopy-paint': { ...GAME, sky: 'cycle', renderScale: 0.75, stub: { CANOPY_MODE: 2 }, skip: ['forest'] } as TerrainVariant,
+  'canopy-mask': { ...GAME, sky: 'cycle', renderScale: 0.75, stub: { CANOPY_MODE: 3 }, stubAll: ['STUB_DISPLAY'], skip: ['forest', 'grass', 'ruins'] } as TerrainVariant,
+  // The land's reach as before (8 levels: 8 km) against the game's (12: 131 km); without the far
+  // forest painted on; without the islands beyond REALM_NEAR.
+  'game-med-l8': { ...GAME, sky: 'cycle', renderScale: 0.5, clip: { ...GAME.clip, levels: 8 } } as TerrainVariant,
+  'game-high-l8': { ...GAME, sky: 'cycle', renderScale: 0.75, clip: { ...GAME.clip, levels: 8 } } as TerrainVariant,
+  'game-med-nocanopy': { ...GAME, sky: 'cycle', renderScale: 0.5, stub: { CANOPY_MODE: 1 } } as TerrainVariant,
+  'game-med-nofar': { ...GAME, sky: 'cycle', renderScale: 0.5, islands: { far: false } } as TerrainVariant,
   // Ablations of game-med: what each part of the frame costs is the difference.
   'game-med-nograss': { ...GAME_VARIANT, sky: 'cycle', renderScale: 0.5, grass: null } as TerrainVariant,
   'game-med-noforest': { ...GAME_VARIANT, sky: 'cycle', renderScale: 0.5, forest: null } as TerrainVariant,

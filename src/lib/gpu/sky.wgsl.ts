@@ -540,7 +540,8 @@ fn cloudColour(rd: vec3f, thick: f32, above: bool) -> vec3f {
 // island, or down through it on the land from one (its coverage there over the surface).
 fn cloudVeil(col: vec3f, t: f32, h: f32, rd: vec3f) -> vec3f {
   let y0 = u.camPos.y;
-  if ((y0 - CLOUD_PLANE) * (h - CLOUD_PLANE) >= 0.0 || abs(rd.y) < 1e-4) { return col; }
+  // (no cover at all within 0.02 of level: the fade below is 0 there, so the deck's noise is skipped)
+  if ((y0 - CLOUD_PLANE) * (h - CLOUD_PLANE) >= 0.0 || abs(rd.y) <= 0.02) { return col; }
   let tc = (CLOUD_PLANE - y0) / rd.y;
   if (tc <= 0.0 || tc >= t) { return col; }
   let cl = cloudDeck(u.camPos.xz + rd.xz * tc, tc);
@@ -711,6 +712,9 @@ fn softClip(c: vec3f, ex: f32) -> vec3f {
   return c * (fm / m);
 }
 fn shadeSky(ro: vec3f, rd: vec3f) -> vec3f {
+  // Below the horizon lies land beyond the rings' reach, as far off as land can be: only its haze
+  // shows, the colour the land and its water fade into before the rings end (terrain.wgsl.ts reachOd).
+  if (rd.y < 0.0) { return cloudVeil(fogInscatter(rd), 1e30, 0.0, rd); }
   let d = vec3f(rd.x, max(rd.y, 0.0), rd.z);
   var col = softClip(skyLut(d), skyLight.grade.x);
   let night = sky.star2.w;

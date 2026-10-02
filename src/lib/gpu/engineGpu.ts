@@ -11,9 +11,10 @@ import { createTerrainRenderer, type FrameParams, type TerrainRendererLike, type
 export type SkyMode = 'cycle' | 'classic';
 
 /**
- * The game's renderer (docs/EXPERIMENTS.md): E3's raster clipmap (8 rings of
- * 256² cells over 8 levels of 512², 0.5 m at level 0, each cell split along
- * the diagonal the heights favour) with E5's grass (5 rings of 256²
+ * The game's renderer (docs/EXPERIMENTS.md): E3's raster clipmap (12 rings of
+ * 256² cells over 12 levels of 512², 0.5 m at level 0, each cell split along
+ * the diagonal the heights favour; the land reaches 131 km, where the haze
+ * has long hidden it) with E5's grass (5 rings of 256²
  * candidates, 0.125 m cells near the camera), the forest (ten species; forest
  * bodies, groves and lone trees placed by climate zone and terrain on a 6 m
  * lattice cached out to ~1.1 km; a sun shadow map), E7's sky islands,
@@ -23,7 +24,7 @@ export type SkyMode = 'cycle' | 'classic';
  */
 export const GAME_VARIANT: TerrainVariant = {
   height: 'raster', k: 128, stride: 1, morphStart: 0.75, taa: true,
-  clip: { n: 512, levels: 8, spacing0: 0.5, margin: 4 }, genDpScale: 1, blend: 0.25,
+  clip: { n: 512, levels: 12, spacing0: 0.5, margin: 4 }, genDpScale: 1, blend: 0.25,
   grass: { rings: 5, n: 256, spacing0: 0.125, blend: 0.3, height: [0.22, 0.62], width: 0.045, density: 1 },
   forest: { density: 1, side: 48, shadowRes: 2048, shadowRange: 90 },
   islands: true,

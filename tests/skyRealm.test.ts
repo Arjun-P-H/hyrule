@@ -4,9 +4,10 @@ import { SKY_BIOMES } from '../src/lib/skyworld/biomes';
 import { insideBy, outline, topAt } from '../src/lib/skyworld/island';
 import { packRealm } from '../src/lib/gpu/skyRealm';
 import {
-  ARCH_SEGS, ARCH_SIDES, archIndices, POLAR_LODS, polarIndices, REALM_LAYOUT, REALM_MAX, RL_FLAGS, skyRealmWGSL,
+  ARCH_SEGS, ARCH_SIDES, archIndices, POLAR_LODS, polarIndices, REALM_FAR, REALM_LAYOUT, REALM_MAX, REALM_NEAR, RL_FLAGS, skyRealmWGSL,
 } from '../src/lib/gpu/skyRealm.wgsl';
 import { floatingOrigin } from '../src/lib/gpu/frame';
+import { buildCell, type PendingCell } from '../src/lib/skyworld/realm';
 
 const SEED = 1337;
 
@@ -64,8 +65,19 @@ describe('the sky realm on the GPU: its buffer', () => {
         expect(Math.hypot(f[io] - cx, f[io + 1] - cz) + f[io + 2]).toBeLessThanOrEqual(rad + 1e-3);
       }
     }
-    expect(nextIsl).toBe(ni);
     expect(nextArch).toBe(na);
+    // After the clusters, the islands out to REALM_FAR: past the near realm, none of them a floating
+    // rock or carrying a stream (nothing near the camera looks them up: they are in no cluster).
+    expect(ni - nextIsl).toBeGreaterThan(50);
+    for (let k = nextIsl; k < ni; k++) {
+      const e = islands[k];
+      const d = Math.hypot(e.x - SPAWN.x, e.z - SPAWN.z);
+      expect(d + SKY_REALM.archReach).toBeGreaterThan(REALM_NEAR);
+      // (an archipelago whose nearest edge is in range comes whole; past REALM_FAR the shaders fade it into the haze)
+      expect(d - e.reach).toBeLessThan(REALM_FAR + 2 * SKY_REALM.archReach);
+      expect(e.isl.kind).not.toBe('debris');
+      expect(e.stream).toBe(false);
+    }
     // Islands: chunk-local centre, shape, seed, biome, flags and the water each flag promises.
     for (let k = 0; k < ni; k++) {
       const isl = islands[k].isl;
@@ -104,6 +116,30 @@ describe('the sky realm on the GPU: its buffer', () => {
     // Floating rocks only in the archipelagos near the camera (their edge within 6 km).
     for (const e of islands) if (e.isl.kind === 'debris') expect(Math.hypot(e.x - SPAWN.x, e.z - SPAWN.z)).toBeLessThan(6000 + 2 * SKY_REALM.archReach);
     expect(islands.some((e) => e.isl.kind === 'debris')).toBe(true);
+  });
+
+  test('far cells come in a few at a time: the near realm whole at once, the rest as built, the same in the end', () => {
+    // (a seed no other test builds: every cell starts unbuilt)
+    const seed = 90210, x = SPAWN.x + 70000, z = SPAWN.z - 40000;
+    const { ox, oz } = floatingOrigin(x, z);
+    const pending: PendingCell[] = [];
+    const first = packRealm(x, z, seed, ox, oz, undefined, pending);
+    expect(pending.length).toBeGreaterThan(20);
+    // Nothing pending lies within the near realm (it is built at once), and the nearest comes first.
+    const cellD = (c: PendingCell) => {
+      const size = c.kind === 'arch' ? SKY_REALM.archCell : SKY_REALM.isleCell;
+      return Math.hypot((c.ix + 0.5) * size - x, (c.iz + 0.5) * size - z);
+    };
+    for (const c of pending) expect(cellD(c) + SKY_REALM.archCell).toBeGreaterThan(REALM_NEAR);
+    for (let k = 1; k < pending.length; k++) expect(cellD(pending[k])).toBeGreaterThanOrEqual(cellD(pending[k - 1]) - 1e-6);
+    for (const c of pending) buildCell(c, seed);
+    const again: PendingCell[] = [];
+    const second = packRealm(x, z, seed, ox, oz, undefined, again);
+    expect(again.length).toBe(0);
+    expect(second.islands.length).toBeGreaterThan(first.islands.length);
+    // Once all are built, the pack is the one a full build gives.
+    const full = packRealm(x, z, seed, ox, oz);
+    expect(new Uint8Array(second.data)).toEqual(new Uint8Array(full.data));
   });
 });
 

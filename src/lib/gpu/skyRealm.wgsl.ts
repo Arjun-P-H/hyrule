@@ -41,7 +41,13 @@ import { SKY_PLACE } from '../skyworld/flora';
 import { CHANNEL_REACH, STREAM_DEPTH } from '../skyworld/island';
 import { wgslF32 as f } from './worldgen.wgsl';
 
-export const REALM_MAX = { clusters: 48, islands: 256, points: 4096, arches: 96, falls: 64, instances: 512 } as const;
+export const REALM_MAX = { clusters: 48, islands: 512, points: 4096, arches: 96, falls: 64, instances: 1024 } as const;
+/**
+ * The realm is drawn out to this distance (m): whole within REALM_NEAR (clusters, arches, floating
+ * rocks nearby, streams and lakes), beyond it only the islands and their falls (skyRealm.ts packRealm).
+ */
+export const REALM_NEAR = 16000;
+export const REALM_FAR = 32000;
 /** Bytes per record in the realm buffer (see the structs below). */
 const ISL_BYTES = 9 * 16, ARCH_BYTES = 5 * 16, FALL_BYTES = 3 * 16, CLUSTER_BYTES = 2 * 16;
 /** Offsets (bytes) of each array in the realm buffer, and its size. */
@@ -56,6 +62,11 @@ export const REALM_LAYOUT = (() => {
 
 /** Polar meshes' levels of detail: rings (bunched toward the rim) × bearings. */
 export const POLAR_LODS: ReadonlyArray<readonly [number, number]> = [[8, 32], [24, 96], [64, 192]];
+/**
+ * And for an island a few pixels across (most of those out to REALM_FAR): each vertex works out the
+ * island's surface three times (its height and normal), so this level has a quarter of LOD 0's.
+ */
+export const POLAR_FAR: readonly [number, number] = [4, 16];
 /** Sky rings: cells per half ring, rings, the first ring's cell (m). */
 export const SKY_RINGS = { k: 64, rings: 6, spacing0: 1 } as const;
 /** Arch mesh: sections along it × points round its cross-section. */
@@ -543,10 +554,16 @@ fn rlLight(albedo: vec3f, p: vec3f, n: vec3f, rel: vec3f, open: f32) -> vec3f {
   return albedo * (keyCol(p.y) * 0.62 * ramp * sun + amb);
 }
 
+// The realm is drawn out to REALM_FAR (islands whose nearest edge lies that close): over its last
+// stretch they, their falls and their mist sink into the haze (this much more optical depth, or
+// this much less of a fall's cover), so none appears out of clear air as the camera comes on.
+fn rlReachOd(rel: vec3f) -> f32 { return 12.0 * smoothstep(${f(0.82 * REALM_FAR)}, ${f(REALM_FAR)}, length(rel.xz)); }
+fn rlReachFade(rel: vec3f) -> f32 { return 1.0 - smoothstep(${f(0.82 * REALM_FAR)}, ${f(REALM_FAR)}, length(rel.xz)); }
+
 fn rlShade(albedo: vec3f, p: vec3f, n: vec3f, rel: vec3f, open: f32) -> vec4f {
   let dist = length(rel);
   let rd = rel / dist;
-  return display(surfaceFog(rlLight(albedo, p, n, rel, open), dist, p.y, rd));
+  return display(surfaceFogOd(rlLight(albedo, p, n, rel, open), dist, p.y, rd, fogOd(dist, rd) + rlReachOd(rel)));
 }
 
 // A sky surface at rel behind fog too thick to see through: the fog alone (what rlShade would give,
@@ -554,7 +571,7 @@ fn rlShade(albedo: vec3f, p: vec3f, n: vec3f, rel: vec3f, open: f32) -> vec4f {
 fn rlFogged(rel: vec3f) -> vec4f {
   let dist = length(rel);
   let rd = rel / dist;
-  let od = fogOd(dist, rd);
+  let od = fogOd(dist, rd) + rlReachOd(rel);
   if (od > FOG_OPAQUE) { return display(surfaceFogOd(vec3f(0.0), dist, u.camPos.y + rel.y, rd, od)); }
   return vec4f(0.0, 0.0, 0.0, -1.0);
 }
@@ -627,6 +644,7 @@ fn rlPolar(vi: u32, ii: u32, nRings: u32, nSegs: u32) -> RlOut {
 @vertex fn vsRealmPolar0(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> RlOut { return rlPolar(vi, ii, ${POLAR_LODS[0][0]}u, ${POLAR_LODS[0][1]}u); }
 @vertex fn vsRealmPolar1(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> RlOut { return rlPolar(vi, ii, ${POLAR_LODS[1][0]}u, ${POLAR_LODS[1][1]}u); }
 @vertex fn vsRealmPolar2(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> RlOut { return rlPolar(vi, ii, ${POLAR_LODS[2][0]}u, ${POLAR_LODS[2][1]}u); }
+@vertex fn vsRealmPolarFar(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> RlOut { return rlPolar(vi, ii, ${POLAR_FAR[0]}u, ${POLAR_FAR[1]}u); }
 
 @fragment
 fn fsRealm(i: RlIn) -> @location(0) vec4f {

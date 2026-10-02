@@ -11,7 +11,7 @@
 
 import { SKY_REALM as S } from '../constants';
 import { archGround, type Arch } from './arches';
-import { archipelagoInCell, isleInCell, type Archipelago } from './archipelago';
+import { archipelagoInCell, cellBuilt, isleInCell, type Archipelago } from './archipelago';
 import { islandRho, lakeDist, nearWater, outline, outlineMax, topAt, waterAt, type SkyIsland } from './island';
 
 /** Something to stand on up here. */
@@ -82,13 +82,29 @@ export function skyWater(x: number, y: number, z: number, seed: number): number 
   return w === w && y >= topAt(isl, x, z) - 2 ? w : NaN;
 }
 
-/** The realm round (x, z): archipelagos and lone isles whose bounds come within `range` m, nearest first. */
-export function realmNear(x: number, z: number, range: number, seed: number): { archipelagos: Archipelago[]; isles: SkyIsland[] } {
+/** A cell of the realm not built yet: an archipelago's or a lone isle's. */
+export type PendingCell = { kind: 'arch' | 'isle'; ix: number; iz: number };
+
+/**
+ * The realm round (x, z): archipelagos and lone isles whose bounds come within `range` m, nearest
+ * first. With `pending`, cells not built yet are left out and listed there instead (to be built
+ * a few at a time: buildCell), nearest first.
+ */
+export function realmNear(x: number, z: number, range: number, seed: number, pending?: PendingCell[]): { archipelagos: Archipelago[]; isles: SkyIsland[] } {
   const archs: Array<{ a: Archipelago; d: number }> = [];
+  const later: Array<{ c: PendingCell; d: number }> = [];
+  // (an archipelago or isle never leaves its cell: a cell wholly out of range holds nothing in it)
+  const out = (ix: number, iz: number, size: number) =>
+    Math.hypot(Math.max(ix * size - x, 0, x - (ix + 1) * size), Math.max(iz * size - z, 0, z - (iz + 1) * size)) > range;
   const a0x = Math.floor((x - range - S.archReach) / S.archCell), a1x = Math.floor((x + range + S.archReach) / S.archCell);
   const a0z = Math.floor((z - range - S.archReach) / S.archCell), a1z = Math.floor((z + range + S.archReach) / S.archCell);
   for (let iz = a0z; iz <= a1z; iz++) {
     for (let ix = a0x; ix <= a1x; ix++) {
+      if (out(ix, iz, S.archCell)) continue;
+      if (pending && !cellBuilt('arch', ix, iz, seed)) {
+        later.push({ c: { kind: 'arch', ix, iz }, d: Math.hypot((ix + 0.5) * S.archCell - x, (iz + 0.5) * S.archCell - z) });
+        continue;
+      }
       const a = archipelagoInCell(ix, iz, seed);
       if (!a) continue;
       const d = Math.max(0, Math.hypot(a.cx - x, a.cz - z) - a.reach);
@@ -100,6 +116,11 @@ export function realmNear(x: number, z: number, range: number, seed: number): { 
   const i0z = Math.floor((z - range) / S.isleCell), i1z = Math.floor((z + range) / S.isleCell);
   for (let iz = i0z; iz <= i1z; iz++) {
     for (let ix = i0x; ix <= i1x; ix++) {
+      if (out(ix, iz, S.isleCell)) continue;
+      if (pending && !cellBuilt('isle', ix, iz, seed)) {
+        later.push({ c: { kind: 'isle', ix, iz }, d: Math.hypot((ix + 0.5) * S.isleCell - x, (iz + 0.5) * S.isleCell - z) });
+        continue;
+      }
       const i = isleInCell(ix, iz, seed);
       if (!i) continue;
       const d = Math.max(0, Math.hypot(i.cx - x, i.cz - z) - i.R * outlineMax(i));
@@ -108,7 +129,17 @@ export function realmNear(x: number, z: number, range: number, seed: number): { 
   }
   archs.sort((p, q) => p.d - q.d);
   isles.sort((p, q) => p.d - q.d);
+  if (pending) {
+    later.sort((p, q) => p.d - q.d);
+    for (const p of later) pending.push(p.c);
+  }
   return { archipelagos: archs.map((p) => p.a), isles: isles.map((p) => p.i) };
+}
+
+/** Build a pending cell (realmNear's `pending`): an archipelago takes ~5 ms, a lone isle ~1 ms. */
+export function buildCell(c: PendingCell, seed: number): void {
+  if (c.kind === 'arch') archipelagoInCell(c.ix, c.iz, seed);
+  else isleInCell(c.ix, c.iz, seed);
 }
 
 /**

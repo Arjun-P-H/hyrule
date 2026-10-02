@@ -947,6 +947,145 @@ headroom, and what a faster display would show.
 `PER_PIXEL_GROUND`, `CACHED_GRAD`, `NO_BLADE_CACHE`), `skip` (main-pass draws), `privateTables`,
 `taaF32`, `shadeF32`, `heroLate`, and `RealmSpec.stubGround`. Their pipelines fold the constants.
 
+### Far level of detail: the land to the horizon, its forests and islands with it
+
+What a player saw from 1.56 km up at sunset (reported with a screenshot):
+- **The land ended 8 km away**, at the edge of the last of 8 clipmap rings (64 m cells, ±128
+  cells). Below the horizon the sky showed through: a band of sky under the islands. From the
+  fly ceiling (3.4 km) the land was a square patch in a white void.
+- **The water ended 6 km away**, the old ray-march cutoff (`MAXDIST`) the water quad still used.
+- **Forests vanished past 1.15 km**, the trees' drawing range: from the air, bare land.
+- **The sky islands ended at 16 km**: the sky emptied beyond, and islands popped in at 16 km.
+
+**The land to 131 km** (`engineGpu.ts`: 12 clipmap levels and rings, from 8):
+- The four new rings have 128–1,024 m cells and reach 16, 33, 65 and 131 km. Like every ring,
+  a cell covers 0.45–0.9° of the view.
+- Each level's heights are prefiltered for its spacing (E's octaves fade with `dp`), so the far
+  levels are smooth rather than aliased.
+- The clipmap's four layers (height, sun, material, and the far forest's canopy below) take 24
+  bytes per texel: 75 MB for 12 levels of 512².
+
+**No edge where the land ends:**
+- **The sky below the horizon is the land too far to see.** A ray below the horizon would meet
+  land somewhere; past the rings it shows that land's haze, the fog's in-scatter, veiled by the
+  cloud deck like the land. Before, it showed the dome's horizon colour. Both skies.
+- **The last quarter of the rings' reach fades into that haze** (`reachOd`: extra optical depth).
+  The land and its water are wholly haze before they end. The fog alone has nearly done it by
+  then: from the fly ceiling it leaves ~2 % of a peak.
+- **The water reaches as far as the land.** Its points come from each pixel's own ray: interpolated
+  across a quad 262 km wide, a point would carry centimetres of rounding right under the camera.
+- **Longer evening shadows.** On the coarse levels the horizon march reaches 64 lattice spacings
+  (65 km on the coarsest), so long shadows cross far valleys. Levels 0–7 keep their 8 km.
+
+**The far forest** (forest.wgsl.ts `canopyAt`; its CPU twin is placement.ts `canopyFrom`):
+- **A fourth clipmap layer** (rgba8) holds, per lattice point, the canopy the trees would make,
+  from placement.ts's own rules before their random draws:
+  - the share of cells growing a forest tree (the body's fill, its glades, the slope);
+  - groves and lone trees on average;
+  - the stand's species, with snow where the trees carry it.
+  - Its cover is 1 − e^(−trees per cell × cells under one crown).
+- **Painted on the ground from 862 m out.** The drawn trees thin out past 420 m and shrink away
+  by 1.15 km, so the gaps they leave fill with canopy and none is left bare.
+- **Broken into crowns** (8 m) while they are bigger than a pixel.
+- **Lit as the trees are** (`treeLight`): light wrapped round a crown, light through the leaves
+  against the sun, sky light into the crowns. From above it shows their tops; aslant, more and
+  more their shaded flanks. Its cover grows aslant as a canopy's gap fraction does.
+- **Tested against the trees grown** (`tests/forest.test.ts`): over 48 squares in four climates,
+  forest trees grown against predicted came within ±6 % per climate. Groves and lone trees on open
+  land also came within 6 %, and the painted species matched the grown one in 34 of 36 squares.
+- **Matched to the trees' look** (bench variants `canopy-trees`, `canopy-paint`, `canopy-mask`):
+  - The views: 18, each 800 m from a forest, 40, 150 and 400 m above the ground, at 8:00, 12:00
+    and 17:30.
+  - The measure: the mean colour over the forest's pixels 600–1,000 m away, painted against
+    drawn.
+  - Result: 1.00 / 1.01 / 1.02 (R, G, B) overall; every hour and height between 0.96 and 1.10.
+  - The first try was lit like the ground and came out 5–50 % too bright at noon.
+
+**The sky islands to 32 km** (skyRealm.ts `packRealm`):
+- **Within 16 km all of the realm**, as before.
+- **Beyond, out to 32 km, the islands and their falls only.** No floating rocks, arches or streams
+  at that range, and no cluster: nothing near the camera looks them up.
+- **Built a few at a time.** Cells coming into range are built nearest first, ≤ 3 ms of each frame
+  (an archipelago takes ~5 ms), and packed once all are. The near realm is built at once as before.
+- **The cell caches are maps per seed.** The direct-mapped 64 slots would have thrashed at this
+  range (~80 archipelago cells, ~1,000 isle cells).
+- **No pop-in.** Over 26–32 km the islands, their falls and their mist sink into the haze.
+- **Coarsest mesh for tiny islands.** An island under 24 output pixels across draws a 4 × 16 polar
+  mesh, a quarter of LOD 0's 8 × 32. Each vertex works out the island's surface three times.
+  - Before this level, the islands past 16 km cost 0.40 ms of a 3.75 ms frame on the ground-level
+    path views (12 %); after it, 0.14 ms of 3.26 ms (4.5 %).
+- The buffer holds 512 islands and 1,024 draws.
+
+**The picture:**
+- **20 ground-level gallery views** (Medium, 15:30 and 18:12), against the code before:
+  - mean ΔE 0.00018;
+  - 0.15 % of pixels above a JND on average, 1.37 % in the worst view;
+  - all of it a strip at the horizon, where land past 8 km now shows instead of sky.
+- **Views from the islands and from altitude change a lot, as intended.**
+  - The land now reaches the horizon: the sea of clouds over it, distant lakes, forests (the
+    autumn woods as warm patches), and islands to 32 km.
+  - Where the land already showed, it is the same to the pixel: of the pixels whose unfogged land
+    matched, none differed fogged.
+
+**Generation** (`bun bench/webgpu.ts gen`, Medium, 1440×790; added to its frame):
+
+| | Full rebuild (spawn, teleport) | Moving at 40 m/s | At 200 m/s |
+| :--- | ---: | ---: | ---: |
+| Before (8 levels, no canopy) | 2.10 M texels: 76 ms | +1.1 ms | +2.2 ms |
+| 8 levels with the canopy layer | 2.10 M texels: 81 ms | +1.1 ms | +2.3 ms |
+| 12 levels with the canopy layer | 3.15 M texels: 104 ms | +1.15 ms | +2.2 ms |
+
+The coarse levels are rarely touched when moving: a level of 1 km spacing takes a new column
+every 25 s at 40 m/s.
+
+**Two exact savings on the far land:**
+- The canopy is blended in after the ground is lit, so its values are not held through the ground's
+  lighting (the big fragment shaders are register-bound).
+- The cloud deck's noise is skipped within 0.02 of level, where its veil fades to nothing.
+
+**Cost in game.** Production builds, uncapped, 2880×1580 canvas; 3 rounds alternated, 15 s
+cool-down between sessions, geometric means. Absolutes drifted with throttling between rounds;
+the ratios hold.
+
+| Scene | Medium, fps before → after | High, fps before → after |
+| :--- | ---: | ---: |
+| On the land (third person) | 127.8 → 126.3 (× 0.99) | 90.2 → 88.0 (× 0.98) |
+| On a sky hub (`?spawn=sky`) | 140.2 → 128.3 (× 0.92) | 102.9 → 98.4 (× 0.96) |
+| Flying at 1.5 km, just above the cloud deck | 157.1 → 135.4 (× 0.86) | 110.1 → 98.2 (× 0.89) |
+
+- **On the land it is nearly free.** The far land there is behind opaque fog, which the shading
+  skips.
+- **From up high the cost is the land newly in view.** About a quarter of the screen that was sky
+  is now ground: shaded, its far forest painted, and veiled by the cloud deck's noise.
+  - Medium stays above 120 fps in all three scenes. High was below 120 before this change too.
+
+**Where it went, and what brought it down:**
+- **Before the coarse island mesh and the two exact savings** the same A/B read × 0.89 / 0.86 /
+  0.88 (Medium land / hub / flight) and × 0.91 / 0.90 / 0.88 (High).
+- **On the ground the islands past 16 km cost most:** 12 % of a path frame (0.40 ms), almost all of
+  it their vertices. Each vertex works out the island's surface three times, at the full LOD-0 mesh,
+  however small the island. The coarse mesh took that to 4.5 %.
+- **The painted forest:** in game 0.8 % on the land and 3 % in flight; 2.5 % of a path frame.
+- **The land past 8 km** costs most of the rest up high: ~10 % of frames among the islands (in
+  the harness, ±10 %).
+
+**Measuring this:**
+- **In-harness stills timing could not resolve 5 % effects here:** 95 % CIs of ±10–20 %.
+  - The in-game A/B (production builds, alternated, cool-downs) and the generation benchmark's
+    still frames could.
+  - Three extra production builds, one part left out of each, attributed the cost.
+- **The user's game, open in the hidden browser pane,** kept drawing at 60 Hz through the first
+  A/B. It was closed before the rest.
+- **macOS's aerial screensaver (display sleep off) held the GPU at 15 %.** Under it every build
+  drew ~55 fps, and ratios read 1.00. Those runs were discarded.
+
+**Bench switches added** (the game never sets them):
+- `CANOPY_MODE` (none, everywhere, mask); `RealmSpec.far`;
+- variants `game-med-l8`, `game-high-l8`, `game-med-nocanopy`, `game-med-nofar`,
+  `canopy-trees`, `canopy-paint`, `canopy-mask`;
+- configs `vista`, `forest` and `canopy` (`bench/out/.cache/framed-*.json`);
+- `bench/play.ts` mode `fly` (climbs at full boost, then cruises).
+
 ## Next
 
 - High at 120 fps on this M1 Air: High is at 96–103 fps. What remains, each 4–12 % at High:
@@ -965,8 +1104,15 @@ headroom, and what a faster display would show.
 - The far level's crowns are still smooth lumps beyond ~120 m, where the middle level's cards
   have shrunk away.
 - Cloud shadows drifting over the land by day (a small texture of the cloud layer, once a frame).
+  The same texture would replace the deck's per-pixel noise (four octaves) over the far land seen
+  from above the deck, part of what flight costs since the land reaches the horizon.
 - The horizon bake when flying fast (+2 ms at 200 m/s): bake coarse levels at half rate, or
   reuse the coarser level's far horizon with a height correction.
+- The full clipmap rebuild (spawn, teleport) is 104 ms with 12 levels. Generate the four far levels
+  over the next frames instead; until then the land past 16 km would show as haze.
+- Far ring blocks that lie below the camera and wholly past opaque fog could be left undrawn: the
+  sky below the horizon is already that haze. It would save their vertices at altitude only, and the
+  water and the sky would then cover those pixels.
 - Clouds with volume, and a bloom pass for the shrine lines, the sun and the moon.
 - Erosion-like gullies and cliff bands in the world function (each needs its generation
   cost measured against the E1 budget).

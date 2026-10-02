@@ -231,31 +231,43 @@ function buildIsle(ix: number, iz: number, seed: number): SkyIsland | null {
   return isl;
 }
 
-// Both are pure functions of (cell, seed); recent ones are kept in direct-mapped
-// caches (no allocation on a hit: the hero asks every tick).
-type ArchSlot = { ix: number; iz: number; seed: number; arch: Archipelago | null };
-type IsleSlot = { ix: number; iz: number; seed: number; isle: SkyIsland | null };
-const archSlots: Array<ArchSlot | undefined> = new Array(64);
-const isleSlots: Array<IsleSlot | undefined> = new Array(256);
-const slotOf = (ix: number, iz: number, seed: number, n: number) =>
-  (Math.imul(ix, 73856093) ^ Math.imul(iz, 19349663) ^ Math.imul(seed, 83492791)) & (n - 1);
+// Both are pure functions of (cell, seed); once built they are kept, per seed, in maps keyed by
+// cell (no allocation on a hit: the hero asks every tick, the realm round the camera every re-pick,
+// out to 32 km: ~80 archipelago and ~1,000 isle cells), the oldest dropped past a bound.
+const MAX_ARCHS = 256, MAX_ISLES = 2048;
+type CellCaches = { arch: Map<number, Archipelago | null>; isle: Map<number, SkyIsland | null> };
+const bySeed = new Map<number, CellCaches>();
+const cellKey = (ix: number, iz: number) => (ix + 0x100000) * 0x200000 + (iz + 0x100000);
+function cachesFor(seed: number): CellCaches {
+  let c = bySeed.get(seed);
+  if (!c) {
+    if (bySeed.size >= 4) bySeed.clear();
+    c = { arch: new Map(), isle: new Map() };
+    bySeed.set(seed, c);
+  }
+  return c;
+}
+function keep<T>(m: Map<number, T>, key: number, v: T, max: number): T {
+  if (m.size >= max) m.delete(m.keys().next().value!);
+  m.set(key, v);
+  return v;
+}
 
-/** The archipelago of cell (ix, iz) (SKY_REALM.archCell squares), or null. */
+/** The archipelago of cell (ix, iz) (SKY_REALM.archCell squares), or null (built on first ask: ~5 ms). */
 export function archipelagoInCell(ix: number, iz: number, seed: number): Archipelago | null {
-  const k = slotOf(ix, iz, seed, archSlots.length);
-  const hit = archSlots[k];
-  if (hit && hit.ix === ix && hit.iz === iz && hit.seed === seed) return hit.arch;
-  const arch = buildArchipelago(ix, iz, seed);
-  archSlots[k] = { ix, iz, seed, arch };
-  return arch;
+  const m = cachesFor(seed).arch, key = cellKey(ix, iz);
+  const hit = m.get(key);
+  return hit !== undefined ? hit : keep(m, key, buildArchipelago(ix, iz, seed), MAX_ARCHS);
 }
 
 /** The lone isle of cell (ix, iz) (SKY_REALM.isleCell squares), or null. */
 export function isleInCell(ix: number, iz: number, seed: number): SkyIsland | null {
-  const k = slotOf(ix, iz, seed, isleSlots.length);
-  const hit = isleSlots[k];
-  if (hit && hit.ix === ix && hit.iz === iz && hit.seed === seed) return hit.isle;
-  const isle = buildIsle(ix, iz, seed);
-  isleSlots[k] = { ix, iz, seed, isle };
-  return isle;
+  const m = cachesFor(seed).isle, key = cellKey(ix, iz);
+  const hit = m.get(key);
+  return hit !== undefined ? hit : keep(m, key, buildIsle(ix, iz, seed), MAX_ISLES);
+}
+
+/** Whether cell (ix, iz)'s archipelago (kind 'arch') or lone isle ('isle') has been built already. */
+export function cellBuilt(kind: 'arch' | 'isle', ix: number, iz: number, seed: number): boolean {
+  return cachesFor(seed)[kind].has(cellKey(ix, iz));
 }

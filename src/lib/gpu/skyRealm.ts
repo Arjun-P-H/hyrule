@@ -2,9 +2,11 @@
  * The sky realm's GPU resources and passes (host side of skyRealm.wgsl.ts
  * and waterfalls.wgsl.ts).
  * ---------------------------------------------------------------------------
- * Every few hundred metres the camera moves, the realm within REALM_RANGE
+ * Every few hundred metres the camera moves, the realm within REALM_NEAR
  * (skyworld/realm.ts) is packed, chunk-local, into one storage buffer: the
- * nearest archipelagos and isles first, floating rocks left out far away.
+ * nearest archipelagos and isles first, floating rocks left out far away; and
+ * beyond it, out to REALM_FAR, the islands alone (built a few a frame as they
+ * come into range, and packed once all are).
  * Per frame (setFrame):
  *   - the sky rings: when the camera is up among the islands, nested grid
  *     rings round it draw the tops of the islands that reach into their
@@ -28,19 +30,23 @@ import { LIGHT } from '../constants';
 import type { Archipelago } from '../skyworld/archipelago';
 import { SKY_BIOMES } from '../skyworld/biomes';
 import { CHANNEL_REACH, maxDrop, outlineMax, type SkyIsland } from '../skyworld/island';
-import { realmNear } from '../skyworld/realm';
+import { buildCell, realmNear, type PendingCell } from '../skyworld/realm';
 import type { FrameParams, RealmSpec } from './frame';
 import { ringIndices } from './rings';
 import {
-  archIndices, LAKE_RINGS, LAKE_SEGS, POLAR_LODS, polarIndices, REALM_FRAME_BYTES, REALM_LAYOUT,
-  REALM_MAX, RL_FLAGS, SKY_RINGS, STREAM_SUB,
+  archIndices, LAKE_RINGS, LAKE_SEGS, POLAR_FAR, POLAR_LODS, polarIndices, REALM_FAR, REALM_FRAME_BYTES, REALM_LAYOUT,
+  REALM_MAX, REALM_NEAR, RL_FLAGS, SKY_RINGS, STREAM_SUB,
 } from './skyRealm.wgsl';
 import { FALL_SEGMENTS, MIST_PER_FALL } from './waterfalls.wgsl';
 import { stamped } from './profile';
 
-/** The realm packed within this range of the camera (m), re-picked after it moves REPICK. */
-const REALM_RANGE = 16000;
+/** The realm is re-picked after the camera moves this far (m); within REALM_NEAR all of it, its islands out to REALM_FAR. */
 const REPICK = 250;
+/**
+ * Far cells not built yet are built a few each frame, nearest first, for at most this long (ms; at
+ * least one: an archipelago takes ~5 ms), and the realm packed again once all are.
+ */
+const BUILD_BUDGET_MS = 3;
 /** Floating rocks are left out of archipelagos farther than this (m). */
 const DEBRIS_RANGE = 6000;
 /** Shadow map: texels per side, half width and half depth of its box (m). */
@@ -89,6 +95,10 @@ fn shadowMask(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_id) li
 
 /** Lakes and streams are drawn within this distance (m). */
 const WATER_RANGE = 6000;
+/** An island smaller than this on screen (output pixels) takes the coarsest polar mesh (POLAR_FAR). */
+const FAR_PX = 24;
+/** The instance lists: polar levels 0–2, lakes, streams, shadow casters, polar POLAR_FAR. */
+const LISTS = 7, FAR_LIST = 6;
 /** realmU: where the ring mask starts (u32 index), and the instance list after it. */
 const MASK = 4 * (10 + 2 * SKY_RINGS.rings + 1);
 const INST = MASK + 4;
@@ -119,6 +129,8 @@ export class SkyRealm {
   private uu = new Uint32Array(this.u);
   private polarIdx: GPUBuffer[] = [];
   private polarCount: number[] = [];
+  private farIdx: GPUBuffer;
+  private farCount: number;
   private ringFull!: GPUBuffer;
   private ringHoles: GPUBuffer[] = [];
   private ringCount = [0, 0];
@@ -145,20 +157,21 @@ export class SkyRealm {
   private drawIdx = -1;
   private sampleIdx = 1;
   private pipes!: {
-    polar: GPURenderPipeline[]; ring: GPURenderPipeline; arch: GPURenderPipeline; lake: GPURenderPipeline; stream: GPURenderPipeline;
+    polar: GPURenderPipeline[]; polarFar: GPURenderPipeline; ring: GPURenderPipeline; arch: GPURenderPipeline; lake: GPURenderPipeline; stream: GPURenderPipeline;
     fall: GPURenderPipeline; mist: GPURenderPipeline; shadow: GPURenderPipeline; archShadow: GPURenderPipeline;
   };
   private shadowLayout!: GPUBindGroupLayout;
   private shadowBind: GPUBindGroup | null = null;
-  // the uploaded realm
+  // the uploaded realm, and the far cells still to build (nearest first)
+  private pending: PendingCell[] = [];
   private islands: Uploaded[] = [];
   private arches: UploadedArch[] = [];
   private falls: UploadedFall[] = [];
   private at = new Float64Array(5).fill(NaN);
-  // this frame's draws: instance lists (polar levels 0–2, lakes, streams, shadow casters) and their ranges in realmU.inst
-  private lists = [0, 1, 2, 3, 4, 5].map(() => new Uint32Array(REALM_MAX.instances));
-  private listN = new Int32Array(6);
-  private ranges = new Int32Array(12);
+  // this frame's draws: instance lists (LISTS) and their ranges in realmU.inst
+  private lists = Array.from({ length: LISTS }, () => new Uint32Array(REALM_MAX.instances));
+  private listN = new Int32Array(LISTS);
+  private ranges = new Int32Array(2 * LISTS);
   private ringsOn = 0;
   // per frame, preallocated: the view, the rings (first vertex x, z, step, hole x, z per ring), their square, ring jobs
   private view = new Float64Array(10);
@@ -196,6 +209,9 @@ export class SkyRealm {
       this.polarIdx.push(upload(idx));
       this.polarCount.push(idx.length);
     }
+    const far = polarIndices(POLAR_FAR[0], POLAR_FAR[1]);
+    this.farIdx = upload(far);
+    this.farCount = far.length;
     const k = SKY_RINGS.k;
     const full = ringIndices(k, null);
     this.ringFull = upload(full);
@@ -302,10 +318,11 @@ export class SkyRealm {
       primitive: { topology: 'triangle-list', cullMode: 'none' },
       depthStencil: { format: 'depth32float', depthWriteEnabled: true, depthCompare: 'less', depthBiasSlopeScale: 1.5 },
     });
-    const [p0, p1, p2, ring, arch, lake, stream, fall, mist, shadow, archShadow] = await Promise.all([
+    const [p0, p1, p2, pFar, ring, arch, lake, stream, fall, mist, shadow, archShadow] = await Promise.all([
       d.createRenderPipelineAsync(opaque('vsRealmPolar0', 'fsRealm')),
       d.createRenderPipelineAsync(opaque('vsRealmPolar1', 'fsRealm')),
       d.createRenderPipelineAsync(opaque('vsRealmPolar2', 'fsRealm')),
+      d.createRenderPipelineAsync(opaque('vsRealmPolarFar', 'fsRealm')),
       d.createRenderPipelineAsync(ringDesc),
       d.createRenderPipelineAsync(opaque('vsArch', 'fsArch')),
       // Lakes write depth (ice is walked on, water hides what lies under it from the falls' mist).
@@ -316,7 +333,7 @@ export class SkyRealm {
       d.createRenderPipelineAsync(shadowDesc('vsRealmShadow')),
       d.createRenderPipelineAsync(shadowDesc('vsArchShadow')),
     ]);
-    this.pipes = { polar: [p0, p1, p2], ring, arch, lake, stream, fall, mist, shadow, archShadow };
+    this.pipes = { polar: [p0, p1, p2], polarFar: pFar, ring, arch, lake, stream, fall, mist, shadow, archShadow };
     this.ringGenPipe = await genP;
     this.maskPipe = await d.createComputePipelineAsync({ layout: 'auto', compute: { module: d.createShaderModule({ code: MASK_WGSL }), entryPoint: 'shadowMask' } });
     this.maskBinds = [0, 1].map((k) => d.createBindGroup({ layout: this.maskPipe.getBindGroupLayout(0), entries: [
@@ -334,7 +351,8 @@ export class SkyRealm {
 
   /** Re-pick and pack the realm round (x, z) into the storage buffer, chunk-local to (ox, oz). */
   private upload(x: number, z: number, seed: number, ox: number, oz: number): void {
-    const packed = packRealm(x, z, seed, ox, oz, this.data);
+    this.pending.length = 0;
+    const packed = packRealm(x, z, seed, ox, oz, this.data, this.pending, this.spec.far !== false);
     this.islands = packed.islands;
     this.arches = packed.arches;
     this.falls = packed.falls;
@@ -352,6 +370,13 @@ export class SkyRealm {
     if (!(Math.sqrt(mx * mx + mz * mz) < REPICK && at[2] === fp.seed && at[3] === ox && at[4] === oz)) {
       at[0] = fp.x; at[1] = fp.z; at[2] = fp.seed; at[3] = ox; at[4] = oz;
       this.upload(fp.x, fp.z, fp.seed, ox, oz);
+    } else if (this.pending.length) {
+      // Far cells that came into range: built a few a frame, nearest first; packed once all are.
+      const t0 = performance.now();
+      let built = 0;
+      while (built < this.pending.length && (built === 0 || performance.now() - t0 < BUILD_BUDGET_MS)) buildCell(this.pending[built++], fp.seed);
+      this.pending.splice(0, built);
+      if (!this.pending.length) this.upload(at[0], at[1], fp.seed, ox, oz);
     }
     const F = this.uf, I = this.ui, U = this.uu;
     // ---- the view (as the camera sees it), for culling ----
@@ -448,7 +473,7 @@ export class SkyRealm {
       const vx = dx * v[3] + dz * v[4], vy = dx * v[5] + dy * v[6] + dz * v[7];
       if (Math.abs(vx) - r * Math.sqrt(1 + v[8] * v[8]) > vz * v[8] || Math.abs(vy) - r * Math.sqrt(1 + v[9] * v[9]) > vz * v[9]) continue;
       const size = (e.reach / Math.max(d - r, 1)) * pxPerRad;
-      const lod = size < 60 ? 0 : size < 320 ? 1 : 2;
+      const lod = size < FAR_PX ? FAR_LIST : size < 60 ? 0 : size < 320 ? 1 : 2;
       this.put(lod, idx | (1 << 16));
       // The top: by the rings when they hold all of it, else here (clipped out of their square).
       const inside = dx - e.reach > sq[0] && dx + e.reach < sq[2] && dz - e.reach > sq[1] && dz + e.reach < sq[3];
@@ -461,7 +486,7 @@ export class SkyRealm {
     // Into realmU.inst, list after list; ranges[2l], ranges[2l + 1]: first instance and count of list l.
     let m = 0;
     const ranges = this.ranges;
-    for (let l = 0; l < 6; l++) {
+    for (let l = 0; l < LISTS; l++) {
       ranges[2 * l] = m;
       const c = Math.min(n[l], REALM_MAX.instances - m);
       for (let q = 0; q < c; q++) U[INST + m + q] = L[l][q];
@@ -569,6 +594,12 @@ export class SkyRealm {
       pass.setIndexBuffer(this.polarIdx[l], 'uint32');
       pass.drawIndexed(this.polarCount[l], count, 0, 0, first);
     }
+    const farFirst = this.ranges[2 * FAR_LIST], farN = this.ranges[2 * FAR_LIST + 1];
+    if (farN) {
+      pass.setPipeline(this.pipes.polarFar);
+      pass.setIndexBuffer(this.farIdx, 'uint32');
+      pass.drawIndexed(this.farCount, farN, 0, 0, farFirst);
+    }
     if (this.ringsOn) {
       pass.setPipeline(this.pipes.ring);
       pass.setBindGroup(1, this.ringDrawBind);
@@ -615,12 +646,12 @@ export class SkyRealm {
   stats(): { islands: number; arches: number; falls: number; polar: number[]; rings: number; lakes: number; streams: number; casters: number } {
     return {
       islands: this.islands.length, arches: this.arches.length, falls: this.falls.length,
-      polar: [this.ranges[1], this.ranges[3], this.ranges[5]], rings: this.ringsOn, lakes: this.ranges[7], streams: this.ranges[9], casters: this.ranges[11],
+      polar: [this.ranges[2 * FAR_LIST + 1], this.ranges[1], this.ranges[3], this.ranges[5]], rings: this.ringsOn, lakes: this.ranges[7], streams: this.ranges[9], casters: this.ranges[11],
     };
   }
 
   destroy(): void {
-    for (const b of [this.buf, this.ubuf, ...this.polarIdx, this.ringFull, ...this.ringHoles, this.archIdx, this.lakeIdx, this.ringCache, ...this.ringJobs]) b.destroy();
+    for (const b of [this.buf, this.ubuf, ...this.polarIdx, this.farIdx, this.ringFull, ...this.ringHoles, this.archIdx, this.lakeIdx, this.ringCache, ...this.ringJobs]) b.destroy();
     for (const t of this.shadows) t.destroy();
     for (const b of this.masks) b.destroy();
   }
@@ -633,79 +664,89 @@ type UploadedFall = { x: number; y: number; z: number; reach: number; w: number 
 
 /**
  * The realm round (x, z) packed, chunk-local to (ox, oz), into `data`
- * (REALM_LAYOUT; the realm buffer skyRealm.wgsl.ts reads): the nearest
- * archipelagos and isles first while they fit, each a cluster of its islands
- * and arches; floating rocks only within DEBRIS_RANGE; streams while their
- * points fit (an island whose stream does not is drawn dry). Returns what
- * the CPU keeps of it for culling.
+ * (REALM_LAYOUT; the realm buffer skyRealm.wgsl.ts reads). Within REALM_NEAR
+ * the nearest archipelagos and isles first while they fit, each a cluster of
+ * its islands and arches; floating rocks only within DEBRIS_RANGE; streams
+ * while their points fit (an island whose stream does not is drawn dry).
+ * Beyond it, out to REALM_FAR, the islands alone (no floating rocks, arches or
+ * streams; their falls while they fit), in no cluster: nothing near the camera
+ * looks them up. With `pending`, far cells not built yet are left out and
+ * listed there (SkyRealm builds them a few a frame); without, all are built.
+ * Returns what the CPU keeps of it for culling.
  */
 export function packRealm(
-  x: number, z: number, seed: number, ox: number, oz: number, data = new ArrayBuffer(REALM_LAYOUT.bytes),
+  x: number, z: number, seed: number, ox: number, oz: number, data = new ArrayBuffer(REALM_LAYOUT.bytes), pending?: PendingCell[], withFar = true,
 ): { data: ArrayBuffer; islands: Uploaded[]; arches: UploadedArch[]; falls: UploadedFall[] } {
-  const { archipelagos, isles } = realmNear(x, z, REALM_RANGE, seed);
+  const { archipelagos, isles } = realmNear(x, z, REALM_NEAR, seed);
   type Cluster = { islands: SkyIsland[]; arch: Archipelago | null; cx: number; cz: number; reach: number; d: number };
-  const clusters: Cluster[] = [
-    ...archipelagos.map((a) => ({ islands: a.islands, arch: a, cx: a.cx, cz: a.cz, reach: a.reach, d: Math.hypot(a.cx - x, a.cz - z) - a.reach })),
-    ...isles.map((i) => ({ islands: [i], arch: null, cx: i.cx, cz: i.cz, reach: i.R * outlineMax(i), d: Math.hypot(i.cx - x, i.cz - z) - i.R })),
+  const cluster = (a: Archipelago): Cluster => ({ islands: a.islands, arch: a, cx: a.cx, cz: a.cz, reach: a.reach, d: Math.hypot(a.cx - x, a.cz - z) - a.reach });
+  const lone = (i: SkyIsland): Cluster => ({ islands: [i], arch: null, cx: i.cx, cz: i.cz, reach: i.R * outlineMax(i), d: Math.hypot(i.cx - x, i.cz - z) - i.R });
+  const clusters: Cluster[] = [...archipelagos.map(cluster), ...isles.map(lone)].sort((a, b) => a.d - b.d);
+  const near = new Set<Archipelago | SkyIsland>([...archipelagos, ...isles]);
+  const far = withFar ? realmNear(x, z, REALM_FAR, seed, pending) : { archipelagos: [], isles: [] };
+  const farClusters: Cluster[] = [
+    ...far.archipelagos.filter((a) => !near.has(a)).map(cluster),
+    ...far.isles.filter((i) => !near.has(i)).map(lone),
   ].sort((a, b) => a.d - b.d);
   const L = REALM_LAYOUT;
   const f = new Float32Array(data), u = new Uint32Array(data), i32 = new Int32Array(data);
   u.fill(0);
   let nc = 0, ni = 0, np = 0, na = 0, nf = 0;
   const islands: Uploaded[] = [], arches: UploadedArch[] = [], falls: UploadedFall[] = [];
+  const put = (isl: SkyIsland, streams: boolean) => {
+    const k = ni++;
+    const o = (L.isl + k * L.islStride) / 4;
+    f[o] = isl.cx - ox; f[o + 1] = isl.cz - oz; f[o + 2] = isl.R; f[o + 3] = isl.y;
+    f.set(isl.a, o + 4);
+    f[o + 8] = isl.amp; f[o + 9] = isl.hill; f[o + 10] = isl.wl; f[o + 11] = isl.crag;
+    f[o + 12] = isl.peak; f[o + 13] = isl.cliff; f[o + 14] = isl.depth; f[o + 15] = 0;
+    i32[o + 16] = isl.seed;
+    u[o + 17] = SKY_BIOMES.indexOf(isl.biome);
+    let flags = isl.kind === 'debris' ? RL_FLAGS.debris : 0;
+    const Lk = isl.lake;
+    if (Lk) {
+      flags |= RL_FLAGS.lake | (Lk.frozen ? RL_FLAGS.frozen : 0);
+      f[o + 20] = Lk.x; f[o + 21] = Lk.z; f[o + 22] = Lk.r; f[o + 23] = Lk.level;
+      f[o + 24] = Lk.aspect; f[o + 25] = Lk.cos; f[o + 26] = Lk.sin; f[o + 27] = Lk.depth;
+      f[o + 28] = Lk.b0; f[o + 29] = Lk.b1;
+    }
+    f[o + 30] = -1;
+    const withStream = streams && !!isl.stream && np + isl.stream.pts.length <= REALM_MAX.points;
+    if (withStream) {
+      flags |= RL_FLAGS.stream;
+      const P = isl.stream!.pts;
+      u[o + 19] = np | (P.length << 16);
+      let mx = 0, mz = 0;
+      for (const p of P) { mx += p[0] / P.length; mz += p[1] / P.length; }
+      let rad = 0;
+      for (const p of P) {
+        f.set(p, (L.pts + np * 16) / 4);
+        np++;
+        rad = Math.max(rad, Math.hypot(p[0] - mx, p[1] - mz) + CHANNEL_REACH * p[3] + 1);
+      }
+      f[o + 32] = mx; f[o + 33] = mz; f[o + 34] = rad;
+    }
+    if (isl.fall && nf < REALM_MAX.falls) {
+      flags |= RL_FLAGS.fall;
+      const F = isl.fall;
+      const fo = (L.fall + nf * L.fallStride) / 4;
+      f[fo] = F.x - ox; f[fo + 1] = F.y; f[fo + 2] = F.z - oz; f[fo + 3] = F.width;
+      f[fo + 4] = F.dirX; f[fo + 5] = F.dirZ; f[fo + 6] = F.speed; f[fo + 7] = F.reach;
+      f[fo + 8] = F.seed & 0xffff; f[fo + 9] = k; f[fo + 10] = u[o + 17];
+      f[o + 30] = nf;
+      falls.push({ x: F.x, y: F.y, z: F.z, reach: F.reach, w: F.width });
+      nf++;
+    }
+    u[o + 18] = flags;
+    islands.push({ isl, x: isl.cx, z: isl.cz, reach: isl.R * outlineMax(isl), top: isl.y + 3 * isl.hill + 5, tip: isl.y - maxDrop(isl), stream: withStream });
+  };
   for (const c of clusters) {
     if (nc >= REALM_MAX.clusters) break;
     const list = c.islands.filter((isl) => isl.kind !== 'debris' || c.d < DEBRIS_RANGE);
     const archs = c.arch ? c.arch.arches.length : 0;
     if (ni + list.length > REALM_MAX.islands || na + archs > REALM_MAX.arches) continue;
     const firstIsl = ni, firstArch = na;
-    for (const isl of list) {
-      const k = ni++;
-      const o = (L.isl + k * L.islStride) / 4;
-      f[o] = isl.cx - ox; f[o + 1] = isl.cz - oz; f[o + 2] = isl.R; f[o + 3] = isl.y;
-      f.set(isl.a, o + 4);
-      f[o + 8] = isl.amp; f[o + 9] = isl.hill; f[o + 10] = isl.wl; f[o + 11] = isl.crag;
-      f[o + 12] = isl.peak; f[o + 13] = isl.cliff; f[o + 14] = isl.depth; f[o + 15] = 0;
-      i32[o + 16] = isl.seed;
-      u[o + 17] = SKY_BIOMES.indexOf(isl.biome);
-      let flags = isl.kind === 'debris' ? RL_FLAGS.debris : 0;
-      const Lk = isl.lake;
-      if (Lk) {
-        flags |= RL_FLAGS.lake | (Lk.frozen ? RL_FLAGS.frozen : 0);
-        f[o + 20] = Lk.x; f[o + 21] = Lk.z; f[o + 22] = Lk.r; f[o + 23] = Lk.level;
-        f[o + 24] = Lk.aspect; f[o + 25] = Lk.cos; f[o + 26] = Lk.sin; f[o + 27] = Lk.depth;
-        f[o + 28] = Lk.b0; f[o + 29] = Lk.b1;
-      }
-      f[o + 30] = -1;
-      const withStream = !!isl.stream && np + isl.stream.pts.length <= REALM_MAX.points;
-      if (withStream) {
-        flags |= RL_FLAGS.stream;
-        const P = isl.stream!.pts;
-        u[o + 19] = np | (P.length << 16);
-        let mx = 0, mz = 0;
-        for (const p of P) { mx += p[0] / P.length; mz += p[1] / P.length; }
-        let rad = 0;
-        for (const p of P) {
-          f.set(p, (L.pts + np * 16) / 4);
-          np++;
-          rad = Math.max(rad, Math.hypot(p[0] - mx, p[1] - mz) + CHANNEL_REACH * p[3] + 1);
-        }
-        f[o + 32] = mx; f[o + 33] = mz; f[o + 34] = rad;
-      }
-      if (isl.fall && nf < REALM_MAX.falls) {
-        flags |= RL_FLAGS.fall;
-        const F = isl.fall;
-        const fo = (L.fall + nf * L.fallStride) / 4;
-        f[fo] = F.x - ox; f[fo + 1] = F.y; f[fo + 2] = F.z - oz; f[fo + 3] = F.width;
-        f[fo + 4] = F.dirX; f[fo + 5] = F.dirZ; f[fo + 6] = F.speed; f[fo + 7] = F.reach;
-        f[fo + 8] = F.seed & 0xffff; f[fo + 9] = k; f[fo + 10] = u[o + 17];
-        f[o + 30] = nf;
-        falls.push({ x: F.x, y: F.y, z: F.z, reach: F.reach, w: F.width });
-        nf++;
-      }
-      u[o + 18] = flags;
-      islands.push({ isl, x: isl.cx, z: isl.cz, reach: isl.R * outlineMax(isl), top: isl.y + 3 * isl.hill + 5, tip: isl.y - maxDrop(isl), stream: withStream });
-    }
+    for (const isl of list) put(isl, true);
     for (const A of c.arch ? c.arch.arches : []) {
       const k = na++;
       const o = (L.arch + k * L.archStride) / 4;
@@ -721,6 +762,11 @@ export function packRealm(
     f[co] = c.cx - ox; f[co + 1] = c.cz - oz; f[co + 2] = c.reach + 10;
     u[co + 4] = firstIsl; u[co + 5] = ni - firstIsl; u[co + 6] = firstArch; u[co + 7] = na - firstArch;
     nc++;
+  }
+  for (const c of farClusters) {
+    const list = c.islands.filter((isl) => isl.kind !== 'debris');
+    if (ni + list.length > REALM_MAX.islands) break;
+    for (const isl of list) put(isl, false);
   }
   u[0] = nc; u[1] = ni; u[2] = na; u[3] = nf;
   return { data, islands, arches, falls };

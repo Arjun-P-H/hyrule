@@ -34,8 +34,13 @@ export type PlayOptions = {
   spector?: boolean;
   software?: boolean;
   dpr?: number;
-  /** 'walk' (first person, the default) or 'hero' (third person). */
-  mode?: 'walk' | 'hero';
+  /**
+   * 'walk' (first person, the default), 'hero' (third person), or 'fly': free flight, climbing at
+   * full boost for `climbSeconds` (default 15: ~1.5 km up, among the sky islands) before the
+   * settle, then flying on at cruise speed.
+   */
+  mode?: 'walk' | 'hero' | 'fly';
+  climbSeconds?: number;
   /** Seconds of play before the measured window (default 3: JIT tiers, DRS warm-up). */
   settleSeconds?: number;
   /**
@@ -200,9 +205,17 @@ export async function runPlaySession(baseUrl: string, opts: PlayOptions): Promis
       if (!mode) await Bun.sleep(200);
     }
     if (mode !== want) {
-      const [code, name, vk] = want === 'walk' && mode === 'fly' ? ['KeyF', 'f', 70] as const : ['KeyV', 'v', 86] as const;
+      const [code, name, vk] = (want === 'walk' && mode === 'fly') || want === 'fly' ? ['KeyF', 'f', 70] as const : ['KeyV', 'v', 86] as const;
       await key(cdp, code, name, vk, 'keyDown');
       await key(cdp, code, name, vk, 'keyUp');
+    }
+    if (want === 'fly') {
+      // Up at full boost (Shift: ×2.5), then on at cruise speed.
+      await key(cdp, 'ShiftLeft', 'Shift', 16, 'keyDown');
+      await key(cdp, 'Space', ' ', 32, 'keyDown');
+      await Bun.sleep((opts.climbSeconds ?? 15) * 1000);
+      await key(cdp, 'Space', ' ', 32, 'keyUp');
+      await key(cdp, 'ShiftLeft', 'Shift', 16, 'keyUp');
     }
     await key(cdp, 'KeyW', 'w', 87, 'keyDown');
     await Bun.sleep((opts.settleSeconds ?? 3) * 1000); // settle: JIT tiers, DRS warm-up window (2.5 s)

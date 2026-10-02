@@ -14,7 +14,9 @@
  * ground's gradient (the shading's normal). The same pass fills a third
  * array, `matView`: the noise fields under the ground's colour (moisture,
  * vegetation clumps, the grass's patches), which the shading would otherwise
- * evaluate per pixel every frame.
+ * evaluate per pixel every frame; and a fourth, `canopyView` (rgba8): the far
+ * forest the ground is painted with beyond the trees' reach (forest.wgsl.ts
+ * canopyAt).
  */
 
 import { ClipmapScheduler, levelSpacing, rectTexels, usableRadius, wrap, type ClipmapSpec, type UpdateRect } from './clipmap';
@@ -53,6 +55,8 @@ export class ClipmapCache {
   sunView: GPUTextureView | null = null;
   matTexture: GPUTexture | null = null;
   matView: GPUTextureView | null = null;
+  canopyTexture: GPUTexture | null = null;
+  canopyView: GPUTextureView | null = null;
   private sunPipe: GPUComputePipeline | null = null;
   private sunBind: GPUBindGroup | null = null;
 
@@ -84,6 +88,7 @@ export class ClipmapCache {
         { binding: 3, visibility: GPUShaderStage.COMPUTE, sampler: { type: 'filtering' } },
         { binding: 4, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'write-only', format: layerFormat, viewDimension: '2d-array' } },
         { binding: 5, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'write-only', format: layerFormat, viewDimension: '2d-array' } },
+        { binding: 6, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'write-only', format: 'rgba8unorm', viewDimension: '2d-array' } },
       ],
     }) : null;
     const [genPipe, sunPipe] = await Promise.all([
@@ -119,15 +124,17 @@ export class ClipmapCache {
       ],
     });
     if (sunLayout) {
-      const layer = () => d.createTexture({
+      const layer = (format: GPUTextureFormat = layerFormat) => d.createTexture({
         size: [spec.n, spec.n, spec.levels],
-        format: layerFormat,
+        format,
         usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC,
       });
       this.sunTexture = layer();
       this.sunView = this.sunTexture.createView({ dimension: '2d-array' });
       this.matTexture = layer();
       this.matView = this.matTexture.createView({ dimension: '2d-array' });
+      this.canopyTexture = layer('rgba8unorm');
+      this.canopyView = this.canopyTexture.createView({ dimension: '2d-array' });
       this.sunBind = d.createBindGroup({
         layout: sunLayout,
         entries: [
@@ -137,6 +144,7 @@ export class ClipmapCache {
           { binding: 3, resource: this.sampler },
           { binding: 4, resource: this.sunView },
           { binding: 5, resource: this.matView },
+          { binding: 6, resource: this.canopyView },
         ],
       });
     }
@@ -255,6 +263,7 @@ export class ClipmapCache {
     this.texture?.destroy();
     this.sunTexture?.destroy();
     this.matTexture?.destroy();
+    this.canopyTexture?.destroy();
     this.clipBuf?.destroy();
     this.genBuf?.destroy();
   }

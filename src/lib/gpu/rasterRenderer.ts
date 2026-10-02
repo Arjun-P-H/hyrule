@@ -170,6 +170,7 @@ export class RasterTerrainRenderer implements TerrainRendererLike {
       ...(grass ? [{ binding: 6, visibility: VFC, buffer: { type: 'uniform' as const } }] : []),
       { binding: 7, visibility: VFC, texture: { sampleType: 'float', viewDimension: '2d-array' } },
       { binding: 28, visibility: VFC, texture: { sampleType: 'float', viewDimension: '2d-array' } },
+      { binding: 25, visibility: VFC, texture: { sampleType: 'float', viewDimension: '2d-array' } },
       ...(this.forest ? Forest.layoutEntries() : []),
       ...(islands ? SkyRealm.layoutEntries() : []),
       ...(ruins ? [{ binding: 13, visibility: VFC, buffer: { type: 'uniform' as const } }] : []),
@@ -347,6 +348,7 @@ export class RasterTerrainRenderer implements TerrainRendererLike {
       ...(this.grassBuf ? [{ binding: 6, resource: { buffer: this.grassBuf } }] : []),
       { binding: 7, resource: this.cache.sunView! },
       { binding: 28, resource: this.cache.matView! },
+      { binding: 25, resource: this.cache.canopyView! },
       ...(this.ruinSitesBuf ? [{ binding: 13, resource: { buffer: this.ruinSitesBuf } }] : []),
     ];
     const renderEntries: GPUBindGroupEntry[] = [
@@ -405,7 +407,8 @@ export class RasterTerrainRenderer implements TerrainRendererLike {
     const aspect = W / Hh;
     f[4] = f0 / aspect; f[5] = f0; f[6] = CAMERA.near; f[7] = 0;
     const start = v.morphStart * k;
-    f[8] = start; f[9] = 1 / (k - 1 - start); f[10] = this.rings - 1; f[11] = 0;
+    // (and 1 / the outermost ring's reach: where the land, and the water with it, end)
+    f[8] = start; f[9] = 1 / (k - 1 - start); f[10] = this.rings - 1; f[11] = 1 / (k * s0 * v.stride * 2 ** (this.rings - 1));
     const ringsAt = 12, centerAt = ringsAt + 4 * this.rings, texAt = centerAt + 4 * this.rings;
     const layout = ringLayout(fp.x, fp.z, s0, k, v.stride, this.rings);
     this.holes.length = 0;

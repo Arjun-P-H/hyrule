@@ -232,6 +232,76 @@ function siteAt(x: number, z: number, seed: number, region: number, zoneR: numbe
   return { e, slope, hollow, knoll, T, M, zone: Math.min(zone, zw.length - 1), dom, level, fill, mask, open: 1 - smooth(0.15, 0.4, mask) };
 }
 
+/** What the far forest needs of the ground: its height, slope, hill-scale relief (84 m) and that relief's slope, moisture. */
+type CanopyGround = { e: number; slope: number; hills: number; hillSlope: number; M: number };
+type Canopy = {
+  /** Expected share of cells holding a forest tree, and the trees per cell groves and lone trees add on average. */
+  forest: number;
+  open: number;
+  /** The forest's species (the dominant zone's pair, by stand), and whether snow lies on it. */
+  species: Species;
+  snow: boolean;
+};
+
+/**
+ * Averages the far forest takes over what it cannot see: a grove's mean fill over its disc as a
+ * share of its core fill (its edge falls off from 0.45 r to r); a grove's chance factor (0.5 +
+ * hollow) over open land; the share of open land on knolls (lone trees favour them).
+ */
+export const CANOPY_AVG = { groveShape: 0.54, groveHollow: 0.7, knolls: 0.2 } as const;
+
+/**
+ * The forest seen from afar, where the renderer paints it onto the ground instead of drawing its
+ * trees (terrain.wgsl.ts shadeGround; WGSL twin forest.wgsl.ts canopyAt, run once per clipmap
+ * lattice point): at world (x, z), plantInCell's chances before its draws — a forest tree from the
+ * body's fill, its glades and the slope; groves and lone trees on average — and the forest's species.
+ * Null on water or above the tree line.
+ */
+function canopyFrom(x: number, z: number, seed: number, g: CanopyGround): Canopy | null {
+  if (g.e < W + 0.4) return null;
+  const T = temperature(x, z, g.e);
+  const zw = zoneWeights(T, g.M, noise01(x, z, PLACE.region.wavelength, seed + PLACE.region.seed));
+  let total = 0, dom = 0, level = 0, fill = 0;
+  ZONES.forEach((name, k) => {
+    total += zw[k];
+    if (zw[k] > zw[dom]) dom = k;
+    level += zw[k] * RULES[name].forest;
+    fill += zw[k] * RULES[name].fill;
+  });
+  if (total < 1e-4) return null;
+  level /= total;
+  fill /= total;
+  const suit = 0.1 * smooth(0.02, 0.12, g.hills) - 0.12 * smooth(0.02, 0.12, -g.hills) + 0.15 * (g.M - 0.62) - 0.3 * smooth(0.55, 0.9, g.hillSlope);
+  const mask = smooth(level - PLACE.edge, level + PLACE.edge, forestField(x, z, seed) + suit);
+  const open = 1 - smooth(0.15, 0.4, mask);
+  const glade = smooth(PLACE.glade.lo, PLACE.glade.hi, noise01(x, z, PLACE.glade.wavelength, seed + PLACE.glade.seed));
+  const D = RULES[ZONES[dom]];
+  const park = PLACE.parkland.lo + PLACE.parkland.span * smooth(0.3, 0.7, noise01(x, z, PLACE.parkland.wavelength, seed + PLACE.parkland.seed));
+  const [r0, r1] = D.groveR;
+  const A = CANOPY_AVG;
+  const grove = D.groveP * park * A.groveHollow * open * D.groveFill * A.groveShape * Math.PI * ((r0 * r0 + r0 * r1 + r1 * r1) / 3) / (D.groveGrid * D.groveGrid);
+  const lone = D.loneP * park * (PLACE.lone.flat + A.knolls * PLACE.lone.knoll) * (1 - smooth(0.35, 0.6, g.slope)) * open * (CELL / D.loneGrid) ** 2;
+  const species = pairPick(D.forestSp, noise01(x, z, PLACE.stand.wavelength, seed + PLACE.stand.seed));
+  return {
+    forest: fill * Math.pow(mask, 1.4) * (1 - PLACE.glade.cut * glade) * (1 - smooth(0.8, 1.15, g.slope)),
+    open: (grove * (1 - smooth(0.5, 0.9, g.slope)) + lone),
+    species,
+    snow: T < 0.5 && (species === 'pine' || species === 'dead' || species === 'bush' || species === 'birch'),
+  };
+}
+
+/** canopyFrom on the ground at (x, z) as plantInCell sees it (surveys, tests). */
+export function forestCanopy(x: number, z: number, seed: number): Canopy | null {
+  const e = elevation(x, z, seed, 1);
+  const slope = Math.hypot(elevation(x + 1.5, z, seed, 1) - e, elevation(x, z + 1.5, seed, 1) - e) / 1.5;
+  const H = PLACE.hills.step, hp = PLACE.hills.dp;
+  const h0 = elevation(x, z, seed, hp);
+  const hE = elevation(x + H, z, seed, hp), hW = elevation(x - H, z, seed, hp), hN = elevation(x, z + H, seed, hp), hS = elevation(x, z - H, seed, hp);
+  return canopyFrom(x, z, seed, {
+    e, slope, hills: (hE + hW + hN + hS - 4 * h0) / H, hillSlope: Math.hypot(hE - hW, hN - hS) / (2 * H), M: moisture(x, z, e, seed),
+  });
+}
+
 /** The dominant zone and the forest body at world (x, z) (surveys, tests); null on water or above the tree line. */
 export function forestAt(x: number, z: number, seed: number): { zone: Zone; mask: number } | null {
   const s = siteAt(x, z, seed, noise01(x, z, PLACE.region.wavelength, seed + PLACE.region.seed), 0);

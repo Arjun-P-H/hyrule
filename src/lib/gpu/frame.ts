@@ -13,6 +13,8 @@ export type RealmSpec = {
   shadows?: boolean; water?: boolean; falls?: boolean; rings?: boolean; arches?: boolean;
   /** Bench only: the tops' ground a constant colour (skyRealm.wgsl.ts STUB_RLGROUND), to measure its shading. */
   stubGround?: boolean;
+  /** Bench only: false leaves out the islands beyond REALM_NEAR (skyRealm.ts packRealm), to measure them. */
+  far?: boolean;
 };
 
 export type FrameParams = {
@@ -83,7 +85,7 @@ export type TerrainVariant =
       /** Bench only: draws left out of the main pass, to measure them. */
       skip?: Array<'terrain' | 'water' | 'sky' | 'hero' | 'forest' | 'grass' | 'realm' | 'ruins'>;
       /** Bench only: parts of the terrain's shading left out (terrain.wgsl.ts STUB_* constants), to measure them. */
-      stub?: Partial<Record<'STUB_BIOME' | 'STUB_GRAD' | 'STUB_SHADOW' | 'STUB_FOG' | 'STUB_SHADE' | 'PER_PIXEL_GROUND' | 'CACHED_GRAD', number>>;
+      stub?: Partial<Record<'STUB_BIOME' | 'STUB_GRAD' | 'STUB_SHADOW' | 'STUB_FOG' | 'STUB_SHADE' | 'PER_PIXEL_GROUND' | 'CACHED_GRAD' | 'CANOPY_MODE', number>>;
     } & CacheOptions);
 
 export interface TerrainRendererLike {

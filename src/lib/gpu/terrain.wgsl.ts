@@ -20,11 +20,16 @@ import { grassWGSL, type GrassSpec } from './grass.wgsl';
 import { skyRealmWGSL } from './skyRealm.wgsl';
 import { WATERFALLS_WGSL } from './waterfalls.wgsl';
 import { RUINS_WGSL, RUIN_SITES_WGSL } from './ruins.wgsl';
-import { forestWGSL, type ForestSpec } from './forest.wgsl';
+import { canopyWGSL, forestWGSL, type ForestSpec } from './forest.wgsl';
+import { PLACE } from '../forest/placement';
+import { SPECIES, SPECIES_INFO } from '../forest/species';
 import { CLASSIC_LIGHT_WGSL, cycleSkyWGSL } from './sky.wgsl';
 import { CAMERA, MARCH, SHADOW } from '../constants';
 import { RING_BLOCK, ringBlockOrder } from './rings';
 import { PATH_N, SKY } from '../sky/celestial';
+
+/** The farthest any tree is drawn (m): beyond it the forest is painted on the ground. */
+const TREE_REACH = Math.max(...SPECIES.map((s) => SPECIES_INFO[s].maxDist));
 
 type CachedOptions = {
   /** Clipmap texels per side. */
@@ -78,6 +83,26 @@ const GROUND_FIELDS_WGSL = /* wgsl */ `
 fn groundFields(g: vec2f, seed: i32) -> vec4f {
   return vec4f(moisture(g, seed), vnoise(g.x / VEG_WL, g.y / VEG_WL, seed + 171),
     0.5 + 0.5 * vnoise(g.x * 0.045, g.y * 0.045, seed + 7777), 0.5 + 0.5 * vnoise(g.x * 0.033, g.y * 0.033, seed + 7707));
+}
+`;
+
+/**
+ * The far forest's canopy at a lattice point (forest.wgsl.ts canopyAt), into the clipmap's canopy
+ * layer (binding 6), from the ground there: its height e, gradient, moisture M, and its relief over
+ * the forest bodies' hill step (placement.ts PLACE.hills; no finer than the lattice).
+ */
+const CANOPY_LAYER_WGSL = /* wgsl */ `
+@group(0) @binding(6) var canopyOut: texture_storage_2d_array<rgba8unorm, write>;
+${canopyWGSL()}
+fn writeCanopy(st: vec2u, xz: vec2f, e: f32, grad: vec2f, M: f32, s: f32) {
+  let H = max(${f(PLACE.hills.step)}, s);
+  let hE = heightAt(xz, vec2f(H, 0.0), s);
+  let hW = heightAt(xz, vec2f(-H, 0.0), s);
+  let hN = heightAt(xz, vec2f(0.0, H), s);
+  let hS = heightAt(xz, vec2f(0.0, -H), s);
+  let hills = (hE + hW + hN + hS - 4.0 * e) / H;
+  let hillSlope = length(vec2f(hE - hW, hN - hS)) / (2.0 * H);
+  textureStore(canopyOut, st, gen.level, canopyAt(xz + gen.origin, e, length(grad), hills, hillSlope, M, gen.seed));
 }
 `;
 
@@ -206,6 +231,9 @@ override STUB_FOGALL: bool = false;
 // Bench only: the raster ground's normal from the sun layer's cached gradient (smooth) instead of the
 // cached heights' own slopes at the pixel's footprint (gradientAt, as shadeSurface).
 override CACHED_GRAD: bool = false;
+// Bench only, to match the far forest to the trees it stands for: 1 no canopy painted (the trees
+// alone), 2 the canopy painted at every distance in full, 3 its cover and the distance as colours.
+override CANOPY_MODE: u32 = 0u;
 const SH_START: f32 = ${f(SHADOW.startT)};
 const SH_FOOT: f32 = ${f(SHADOW.footprintScale)};
 const SH_K: f32 = ${f(SHADOW.penumbraK)};
@@ -344,9 +372,9 @@ fn underwater(rd: vec3f) -> vec4f {
 }
 `;
 
-/** The classic sky dome (§20/§22): the fixed gradient and halo, and the cloud layer. */
-const CLASSIC_SHADE_SKY_WGSL = /* wgsl */ `
-fn shadeSky(ro: vec3f, rd: vec3f) -> vec3f {
+/** The classic sky dome (§20/§22): the fixed gradient and halo, and the cloud layer (as the function `name`). */
+const classicDomeWGSL = (name: string) => /* wgsl */ `
+fn ${name}(ro: vec3f, rd: vec3f) -> vec3f {
   var col = skyGrade(skyColor(rd), rd);
   if (rd.y > 0.02 && ro.y < CLOUD_PLANE) {
     let tc = (CLOUD_PLANE - ro.y) / rd.y;
@@ -372,7 +400,7 @@ ${FRAME_WGSL}
 ${heightSourceWGSL(opts)}
 ${CLASSIC_LIGHT_WGSL}
 ${SHADE_WGSL}
-${CLASSIC_SHADE_SKY_WGSL}
+${classicDomeWGSL('shadeSky')}
 ${NO_HERO_WGSL}
 fn groundTint(col: vec3f, veg: f32, slope: f32, g: vec2f, seed: i32) -> vec3f { return col; }
 fn sunVisibility(p: vec3f, so: vec3f) -> f32 { return softShadow(p + so, u.footprint); }
@@ -538,13 +566,16 @@ fn fogOd(t: f32, rd: vec3f) -> f32 {
   if (abs(k) > 1e-3) { along = (1.0 - exp(-k)) / k; }
   return SIGMA_FOG * t * exp(-y0 / FOG_H) * along;
 }
+// In-scatter: the sky's colour toward rd without the sun's disc (the halo stays); looking up
+// (at a sky island) the colour of the sky behind it rather than the horizon's haze.
+fn fogInscatter(rd: vec3f) -> vec3f {
+  let disc = SUN_COL * 6.0 * smoothstep(0.99955, 0.99985, max(dot(rd, SUN), 0.0));
+  return mix((skyColor(rd) - disc + SKY_HOR) * 0.5, skyGrade(skyColor(rd) - disc, rd), smoothstep(0.06, 0.45, rd.y));
+}
 fn surfaceFog(col: vec3f, t: f32, h: f32, rd: vec3f) -> vec3f { return surfaceFogOd(col, t, h, rd, fogOd(t, rd)); }
 fn surfaceFogOd(col: vec3f, t: f32, h: f32, rd: vec3f, od: f32) -> vec3f {
   if (od < 0.0005) { return cloudVeil(col, t, h, rd); }
-  // In-scatter: the sky's colour toward rd without the sun's disc (the halo stays); looking up
-  // (at a sky island) the colour of the sky behind it rather than the horizon's haze.
-  let disc = SUN_COL * 6.0 * smoothstep(0.99955, 0.99985, max(dot(rd, SUN), 0.0));
-  let inscatter = mix((skyColor(rd) - disc + SKY_HOR) * 0.5, skyGrade(skyColor(rd) - disc, rd), smoothstep(0.06, 0.45, rd.y));
+  let inscatter = fogInscatter(rd);
   if (od > FOG_OPAQUE) { return cloudVeil(inscatter, t, h, rd); }
   let T = exp(-vec3f(0.58, 0.72, 0.95) * od);
   return cloudVeil(col * T + inscatter * (1.0 - T), t, h, rd);
@@ -566,7 +597,8 @@ fn cloudColour(rd: vec3f, c: f32, above: bool) -> vec3f {
 // The deck between the camera and a surface at height h, t along rd (see the day–night sky's).
 fn cloudVeil(col: vec3f, t: f32, h: f32, rd: vec3f) -> vec3f {
   let y0 = u.camPos.y;
-  if ((y0 - CLOUD_PLANE) * (h - CLOUD_PLANE) >= 0.0 || abs(rd.y) < 1e-4) { return col; }
+  // (no cover at all within 0.02 of level: the fade below is 0 there, so the deck's noise is skipped)
+  if ((y0 - CLOUD_PLANE) * (h - CLOUD_PLANE) >= 0.0 || abs(rd.y) <= 0.02) { return col; }
   let tc = (CLOUD_PLANE - y0) / rd.y;
   if (tc <= 0.0 || tc >= t) { return col; }
   let cl = cloudDeck(u.camPos.xz + rd.xz * tc, tc);
@@ -578,7 +610,12 @@ fn cloudVeil(col: vec3f, t: f32, h: f32, rd: vec3f) -> vec3f {
 fn skyReflect(r: vec3f) -> vec3f {
   return skyGrade(mix(SKY_HOR, SKY_ZEN, pow(max(r.y, 0.0), 0.55)), r);
 }
-${CLASSIC_SHADE_SKY_WGSL}
+${classicDomeWGSL('shadeDome')}
+// Below the horizon lies land beyond the rings' reach: only its haze shows (see the day–night sky's).
+fn shadeSky(ro: vec3f, rd: vec3f) -> vec3f {
+  if (rd.y < 0.0) { return cloudVeil(fogInscatter(rd), 1e30, 0.0, rd); }
+  return shadeDome(ro, rd);
+}
 `;
 
 type RasterOptions = CachedOptions & {
@@ -732,7 +769,7 @@ ${islands ? skyRealmWGSL(!!opts.clip) + WATERFALLS_WGSL : 'fn skyShadowAt(p: vec
 struct Mesh {
   cam: vec4f,                        // camera rel. the reference lattice point: x, y (height), z; spacing0
   proj: vec4f,                       // f/aspect, f, near, unused
-  morph: vec4f,                      // morph start (cells from the ring centre), 1/morph width, last ring, unused
+  morph: vec4f,                      // morph start (cells from the ring centre), 1/morph width, last ring, 1/reach (m)
   rings: array<vec4i, ${opts.rings}>,    // corner (level-0 units rel. reference) x, z; level-0 units per cell; clipmap level
   center: array<vec4f, ${opts.rings}>,   // ring centre (level-0 units rel. reference) x, z
   texOff: array<vec4f, ${opts.rings + 1}>, // per clipmap level: reference / 2^l mod n (x, z), 2^-l, unused
@@ -743,9 +780,49 @@ const CAMERA_NEAR: f32 = ${f(CAMERA.near)};
 
 // The ground's material layer (clipmapCache.ts): its noise fields per lattice point (groundFields).
 @group(0) @binding(28) var matTex: texture_2d_array<f32>;
+// The far forest's canopy layer (forest.wgsl.ts canopyAt): its albedo (√, premultiplied by its cover), its cover.
+@group(0) @binding(25) var canopyTex: texture_2d_array<f32>;
+
+// The trees are drawn out to TREE_REACH, the farthest shrinking away over its last tenth; the forest
+// painted on the ground (shadeGround) comes in from CANOPY_NEAR, all of it by TREE_REACH, so the
+// gaps the shrinking trees leave fill with canopy and none is left bare.
+const TREE_REACH: f32 = ${f(TREE_REACH)};
+const CANOPY_NEAR: f32 = ${f(0.75 * TREE_REACH)};
+const CANOPY_ON: bool = ${opts.forest ? 'true' : 'false'};
+// The canopy's light, as treeLight's for a leafy crown: the ramp's start (wrapped round the crown),
+// light through the leaves against the sun, the share of the sky's light its depths get.
+const CANOPY_WRAP: f32 = -0.35;
+const CANOPY_BACK: f32 = 0.8;
+const CANOPY_FILL: f32 = 0.7;
+const CANOPY_FILL_SIDE: f32 = 0.5;
+const CANOPY_SIDE: f32 = 0.5;
+
+// The canopy layer at xz, from the level (or two, in a blend band) that holds it, as groundCacheAt.
+fn canopyFetch(xz: vec2f) -> vec4f {
+  let rel = xz - clip.cam.xy;
+  let lf = log2(max(max(abs(rel.x), abs(rel.y)) * clip.cam.z, 1e-6));
+  let lc = clamp(ceil(lf), 0.0, CLIP_LMAX);
+  let l = i32(lc);
+  let L = clip.lv[l];
+  var c = textureSampleLevel(canopyTex, hSamp, (rel * L.z + L.xy) * CLIP_INV_N, l, 0.0);
+  let b = clamp((lf - lc) / CLIP_BLEND + 1.0, 0.0, 1.0);
+  if (b > 0.0 && lc < CLIP_LMAX) {
+    let L1 = clip.lv[l + 1];
+    c = mix(c, textureSampleLevel(canopyTex, hSamp, (rel * L1.z + L1.xy) * CLIP_INV_N, l + 1, 0.0), b);
+  }
+  return c;
+}
 
 const GRAD_NEAR: f32 = 60.0;
 const GRAD_FAR: f32 = 120.0;
+
+// The land ends where the outermost ring does, a square ±reach round the camera (131 km). Over the
+// outer quarter of that the land and its water sink into the haze (this much more optical depth),
+// so they are wholly haze, the colour the sky shows below the horizon past them, before they end.
+// The fog alone has all but hidden them there: from the fly ceiling it leaves ~2 % of a peak.
+fn reachOd(rel: vec2f) -> f32 {
+  return 12.0 * smoothstep(0.75, 0.97, max(abs(rel.x), abs(rel.y)) * mesh.morph.w);
+}
 
 // Everything the ground's shading reads from the clipmap at xz, from the one level (or two, in a
 // blend band) that holds it: height, the sun layer (light, gradient) and the material.
@@ -776,7 +853,7 @@ fn groundCacheAt(xz: vec2f) -> GroundCache {
 // pixel; the biome and the grass's tint, which turn sharply with height and slope, per pixel.
 fn shadeGround(p: vec3f, rd: vec3f, tS: f32, gc: GroundCache) -> vec3f {
   // Behind fog too thick to see through, only the fog shows.
-  let od = fogOd(tS, rd);
+  let od = fogOd(tS, rd) + reachOd(p.xz - u.camPos.xz);
   if (od > FOG_OPAQUE && !STUB_FOG) { return surfaceFogOd(vec3f(0.0), tS, p.y, rd, od); }
   var n = vec3f(0.0, 1.0, 0.0);
   var grad = vec2f(0.0);
@@ -793,11 +870,15 @@ fn shadeGround(p: vec3f, rd: vec3f, tS: f32, gc: GroundCache) -> vec3f {
     }
     n = vec3f(-grad.x, 1.0, -grad.y) * inverseSqrt(dot(grad, grad) + 1.0);
   }
-  let ndl = max(dot(n, keyDir()), 0.0);
+  let L = keyDir();
+  let ndl = max(dot(n, L), 0.0);
+  // Past the trees' reach the forest is painted on (canopyAt), lit as its trees are: it needs the
+  // sun even where the ground faces away from it, its crowns' light wrapping round them.
+  let canopyFar = CANOPY_ON && (tS > CANOPY_NEAR || CANOPY_MODE >= 2u) && CANOPY_MODE != 1u && !STUB_BIOME;
   var sh = 0.0;
   if (STUB_SHADOW) {
     sh = 1.0;
-  } else if (ndl > 0.0) {
+  } else if (ndl > 0.0 || (canopyFar && L.y > CANOPY_WRAP)) {
     sh = sunFrom(gc.sun) * treeShadowAt(p) * skyShadowAt(p);
     if (sh > 0.0) { sh = min(sh, heroShadowAt(p - u.camPos)); }
   }
@@ -807,9 +888,40 @@ fn shadeGround(p: vec3f, rd: vec3f, tS: f32, gc: GroundCache) -> vec3f {
     let bio = biomeColor(temperature(p.xz + u.origin, p.y), gc.mat.x, p.y, slope, gc.mat.y);
     albedo = bedTint(groundTintFrom(bio.col, bio.veg, slope, gc.mat.z, gc.mat.w), p);
   }
-  let sunTerm = albedo * keyCol(p.y) * ndl * sh * causticsAt(p);
+  let kc = keyCol(p.y);
+  let sunTerm = albedo * kc * ndl * sh * causticsAt(p);
   let ambTerm = albedo * skyAmb(n, 0.22 + 0.28 * max(n.y, 0.0)) * heroAOAt(p - u.camPos);
   var col = sunTerm + ambTerm;
+  // The far forest over the ground (once the ground is lit, so little else is held meanwhile): its
+  // canopy by its cover, broken into crowns while they are bigger than a pixel.
+  if (canopyFar) {
+    let cn = canopyFetch(p.xz);
+    if (CANOPY_MODE == 3u) { return vec3f(cn.a, tS / 2000.0, 0.0); }
+    var a = cn.a * select(smoothstep(CANOPY_NEAR, TREE_REACH, tS), 1.0, CANOPY_MODE == 2u);
+    if (a > 0.004) {
+      let k = 1.0 - smoothstep(2.5, 8.0, tS * u.footprint);
+      var crowns = 0.5;
+      if (k > 0.0) {
+        let g = p.xz + u.origin;
+        crowns = mix(0.5, 0.5 + 0.5 * vnoise(g.x / 8.0, g.y / 8.0, u.seed + 7311), k);
+      }
+      a = min(a * (0.55 + 0.9 * crowns), 1.0);
+      // Seen aslant, the crowns hide the ground between them: the gaps left open from above, to the
+      // power of 1 / the sine of the view's descent (a canopy's gap fraction).
+      a = 1.0 - pow(1.0 - a, 1.0 / max(-rd.y, 0.2));
+      // Lit as the trees are (forest.wgsl.ts treeLight): the light wrapped round a crown, through
+      // its leaves against the sun, and the sky's into its depth. From above the crowns show their
+      // tops; aslant more and more their flanks toward the camera, deeper in their own shade.
+      let c = cn.rgb / cn.a;
+      let up = vec3f(0.0, 1.0, 0.0);
+      let vh = normalize(vec3f(-rd.x, 0.0, -rd.z) + vec3f(1e-5, 0.0, 0.0));
+      let side = CANOPY_SIDE * (1.0 - smoothstep(0.1, 0.8, -rd.y));
+      let ramp = mix(smoothstep(CANOPY_WRAP, 0.7, L.y), smoothstep(CANOPY_WRAP, 0.7, dot(vh, L)), side);
+      let back = pow(clamp(dot(rd, L), 0.0, 1.0), 3.0) * CANOPY_BACK;
+      let sky = mix(skyAmb(up, 0.54), skyAmb(vh, 0.3), side) * mix(CANOPY_FILL, CANOPY_FILL_SIDE, side);
+      col = mix(col, c * c * (0.75 + 0.5 * crowns) * (kc * sh * (0.6 * ramp + 0.32 * back) + sky), a);
+    }
+  }
   if (!STUB_FOG) { col = surfaceFogOd(col, tS, p.y, rd, od); }
   return col;
 }
@@ -870,11 +982,11 @@ fn fsTerrain(i: TOut) -> @location(0) vec4f {
   return display(shadeGround(p, rd, tS, gc));
 }
 
-// Water: one quad at W_LEVEL spanning the march distance around the camera.
+// Water: one quad at W_LEVEL as far round the camera as the land reaches.
 @vertex
 fn vsWater(@builtin(vertex_index) vi: u32) -> TOut {
   let c = array<vec2f, 6>(vec2f(-1.0, -1.0), vec2f(1.0, -1.0), vec2f(1.0, 1.0), vec2f(-1.0, -1.0), vec2f(1.0, 1.0), vec2f(-1.0, 1.0));
-  let xz = c[vi] * MAXDIST;
+  let xz = c[vi] / mesh.morph.w;
   let rel = vec3f(xz.x, W_LEVEL - u.camPos.y, xz.y);
   var o: TOut;
   o.pos = project(rel);
@@ -918,13 +1030,16 @@ fn waterNormal(g: vec2f, t: f32, strength: f32) -> vec3f {
 @fragment
 fn fsWater(i: TOut) -> @location(0) vec4f {
   let ro = u.camPos;
-  let tS = length(i.rel);
-  let rd = i.rel / tS;
+  // The point from the pixel's own ray: interpolated across a quad as wide as the land's reach, the
+  // position would carry centimetres of rounding right under the camera.
+  let rd = cameraRay(i.pos.xy);
   if (ro.y < W_LEVEL) { return underwater(rd); }
+  let tS = (ro.y - W_LEVEL) / max(-rd.y, 1e-7);
+  let rel = rd * tS;
   // Behind fog too thick to see through: the fog alone, laid on opaquely (as the full path would end).
-  let od = fogOd(tS, rd);
+  let od = fogOd(tS, rd) + reachOd(rel.xz);
   if (od > FOG_OPAQUE) { return display(surfaceFogOd(vec3f(0.0), tS, W_LEVEL, rd, od)); }
-  let p = ro + i.rel;
+  let p = ro + rel;
   let g = p.xz + u.origin;
   let depthV = max(W_LEVEL - heightAt(p.xz, vec2f(0.0), 0.0), 0.0);
   // Ripples: calmer at the shore, faded out with distance (no sub-pixel noise; none past 300 m,
@@ -1063,6 +1178,7 @@ ${heightSourceWGSL({ height: 'cached', ...opts, sun: undefined })}
 @group(0) @binding(4) var sunOut: texture_storage_2d_array<rgba16float, write>;
 @group(0) @binding(5) var matOut: texture_storage_2d_array<rgba16float, write>;
 ${GROUND_FIELDS_WGSL}
+${CANOPY_LAYER_WGSL}
 const SH_K: f32 = ${f(SHADOW.penumbraK)};
 const SH_CUTOFF: f32 = ${f(SHADOW.cutoff)};
 
@@ -1076,7 +1192,9 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   let gz = (heightAt(xz, vec2f(0.0, s), s) - heightAt(xz, vec2f(0.0, -s), s)) / (2.0 * s);
   let n = normalize(vec3f(-gx, 1.0, -gz));
   let st = (gen.store0 + id.xy) % vec2u(${opts.n}u);
-  textureStore(matOut, st, gen.level, groundFields(xz + gen.origin, gen.seed));
+  let fields = groundFields(xz + gen.origin, gen.seed);
+  textureStore(matOut, st, gen.level, fields);
+  writeCanopy(st, xz, e, vec2f(gx, gz), fields.x, s);
   let p = vec3f(xz.x, e, xz.y) + n * (0.15 + 0.5 * s);
   var res = 1.0;
   var t = max(0.6, 1.5 * s);
@@ -1102,8 +1220,10 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
  * front of the sky; a light on the path at angle θ (the sun, or the moon on
  * the same circle) reaches the point when r < θ < g (sunAt, softened). The
  * march runs in the path's own plane through the point, tilted like the path:
- * at distances growing ~9 % a step out to 8 km (or the edge of the coarsest
- * level), where the land rises above the current horizon it lifts the
+ * at distances growing ~9 % a step out to 8 km (64 lattice spacings on the
+ * coarse levels that shade the distant land: 65 km on the coarsest, for the
+ * long shadows of evening) or the edge of the coarsest level, where the land
+ * rises above the current horizon it lifts the
  * horizon to the land's top there. The land falls away with distance over the
  * small planet of celestial.ts, so from high ground the horizon lies below
  * the horizontal and peaks keep the sun after the valleys lose it; beyond the
@@ -1128,6 +1248,7 @@ ${heightSourceWGSL({ height: 'cached', ...opts, sun: undefined })}
 @group(0) @binding(4) var horizonOut: texture_storage_2d_array<rgba16float, write>;
 @group(0) @binding(5) var matOut: texture_storage_2d_array<rgba16float, write>;
 ${GROUND_FIELDS_WGSL}
+${CANOPY_LAYER_WGSL}
 const PATH_UP: vec3f = vec3f(${f(PATH_N[0])}, ${f(PATH_N[1])}, ${f(PATH_N[2])});
 const COS_LAT: f32 = ${f(cosLat)};
 const SIN_LAT: f32 = ${f(sinLat)};
@@ -1149,6 +1270,7 @@ fn pathHorizon(p: vec3f, sgn: f32, s: f32) -> f32 {
   var th = -asin(min(sin(dip) / COS_LAT, 1.0));
   var a = max(0.6, 1.5 * s);
   let edge = exp2(CLIP_LMAX) / clip.cam.z;
+  let reach = max(REACH, 64.0 * s);
   let minStep = max(0.5 * s, 0.5);
   for (var i = 0; i < 200; i++) {
     let b = a * tan(th);
@@ -1171,7 +1293,7 @@ fn pathHorizon(p: vec3f, sgn: f32, s: f32) -> f32 {
     // Past this the horizon's ray runs above anything the land can reach.
     if (p.y + a * tan(th) * COS_LAT + a * a * CURV > MAXH) { break; }
     a += max(minStep, max(a * 0.045, clear * 0.35));
-    if (a > REACH) { break; }
+    if (a > reach) { break; }
   }
   return th;
 }
@@ -1186,7 +1308,9 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   let gz = (heightAt(xz, vec2f(0.0, s), s) - heightAt(xz, vec2f(0.0, -s), s)) / (2.0 * s);
   let n = normalize(vec3f(-gx, 1.0, -gz));
   let st = (gen.store0 + id.xy) % vec2u(${opts.n}u);
-  textureStore(matOut, st, gen.level, groundFields(xz + gen.origin, gen.seed));
+  let fields = groundFields(xz + gen.origin, gen.seed);
+  textureStore(matOut, st, gen.level, fields);
+  writeCanopy(st, xz, e, vec2f(gx, gz), fields.x, s);
   let p = vec3f(xz.x, e, xz.y) + n * (0.15 + 0.5 * s);
   let rise = pathHorizon(p, 1.0, s);
   let sinks = 3.14159265 - pathHorizon(p, -1.0, s);

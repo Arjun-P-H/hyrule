@@ -84,7 +84,7 @@ fn fsFall(i: FOut) -> @location(0) vec4f {
   let spray = clumps * 0.55 * (1.0 - whole) * (1.0 - smoothstep(0.65 * reach, reach, d));
   let edge = 1.0 - smoothstep(mix(0.55, 0.2, 1.0 - whole), 1.0, abs(across));
   let lip = smoothstep(0.0, 2.0, d);
-  let alpha = clamp(((0.35 + 0.65 * streak) * whole + spray) * edge * lip * 0.9, 0.0, 1.0);
+  let alpha = clamp(((0.35 + 0.65 * streak) * whole + spray) * edge * lip * 0.9, 0.0, 1.0) * rlReachFade(i.rel);
   if (alpha < 0.003) { discard; }
   let p = u.camPos + i.rel;
   let sun = skyShadowAt(p);
@@ -140,7 +140,7 @@ fn fsMist(i: MOut) -> @location(0) vec4f {
   let t = u.time;
   let fm = f32(i.km.y);
   let n = 0.5 + 0.5 * vnoise(i.q.x * 2.2 + t * 0.12 + fm * 3.1, i.q.y * 2.2 - t * 0.2, 1211 + i32(i.km.x));
-  let alpha = clamp((1.0 - smoothstep(0.2, 1.0, r + 0.3 * n)) * 0.3 * (1.0 - fm / ${MIST_PER_FALL + 1}.0), 0.0, 1.0);
+  let alpha = clamp((1.0 - smoothstep(0.2, 1.0, r + 0.3 * n)) * 0.3 * (1.0 - fm / ${MIST_PER_FALL + 1}.0), 0.0, 1.0) * rlReachFade(i.rel);
   if (alpha < 0.003) { discard; }
   let p = u.camPos + i.rel;
   let L = keyDir();
