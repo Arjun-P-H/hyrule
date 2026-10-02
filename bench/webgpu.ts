@@ -14,8 +14,12 @@
  *   bun bench/webgpu.ts horizons   the day–night sky's terrain horizons (the
  *                                  clipmap's sun layer read back) against a
  *                                  brute-force march of the CPU twin
+ *   bun bench/webgpu.ts shimmer    temporal stability of chosen views: a slow
+ *                                  pan, flicker per variant (say, the trees'
+ *                                  surface detail against plain trees)
  *
- * Options: --res=1280x800 --reps=2 --frames=all|0,6,12 --variants=a,b
+ * Options: --res=1280x800 --reps=2 --frames=all|0,6,12 --variants=a,b --warmup=1 (a copy of the
+ *          first variant runs first and is left out of the ratios: see pickVariants)
  *          --hours=6,12,18.2 (stills of day–night variants at those hours; --day=n the game day)
  *          --hour=18.2 (timing of day–night variants at that hour)
  * Results: bench/out/webgpu-<mode>.json, frames in bench/out/webgpu/.
@@ -32,10 +36,13 @@ import { analyzeParity, probeSpecs } from './parity';
 import type { CameraFrame } from './spline';
 import { CAMERA, CHUNK_SIZE, DEFAULT_SEED, type QualityPreset } from '../src/lib/constants';
 import type { TerrainVariant } from '../src/lib/gpu/terrainRenderer';
+import { GAME_VARIANT } from '../src/lib/gpu/engineGpu';
+
+const GAME = GAME_VARIANT as Extract<TerrainVariant, { height: 'raster' }>;
 import { plantInCell, type PlaceWorld } from '../src/lib/forest/placement';
 import { SPECIES } from '../src/lib/forest/species';
 import { ruinSiteAt } from '../src/lib/ruins';
-import { islandAt, islandRho, islandTop } from '../src/lib/skyIslands';
+import { skyPlantInCell } from '../src/lib/skyworld/flora';
 import { elevation } from '../src/lib/terrainMath';
 import { PATH_N, SKY } from '../src/lib/sky/celestial';
 
@@ -52,6 +59,71 @@ const SHADOW_STEPS = Number(opt('shadow', '28'));
 const REPS = Number(opt('reps', '2'));
 
 const VARIANTS: Record<string, TerrainVariant> = {
+  // The game's renderer as it ships (engineGpu.ts), at the Medium and High presets' internal scales
+  // (QUALITY_PRESETS resScale; the output stays at --res, as the canvas does).
+  'game-med': { ...GAME_VARIANT, sky: 'cycle', renderScale: 0.5 } as TerrainVariant,
+  'game-high': { ...GAME_VARIANT, sky: 'cycle', renderScale: 0.75 } as TerrainVariant,
+  // Ablations of game-med: what each part of the frame costs is the difference.
+  'game-med-nograss': { ...GAME_VARIANT, sky: 'cycle', renderScale: 0.5, grass: null } as TerrainVariant,
+  'game-med-noforest': { ...GAME_VARIANT, sky: 'cycle', renderScale: 0.5, forest: null } as TerrainVariant,
+  'game-med-noislands': { ...GAME_VARIANT, sky: 'cycle', renderScale: 0.5, islands: false } as TerrainVariant,
+  'game-med-noruins': { ...GAME_VARIANT, sky: 'cycle', renderScale: 0.5, ruins: false } as TerrainVariant,
+  'game-med-classic': { ...GAME_VARIANT, sky: 'classic', renderScale: 0.5 } as TerrainVariant,
+  'game-med-bare': { ...GAME_VARIANT, sky: 'cycle', renderScale: 0.5, grass: null, forest: null, islands: false, ruins: false } as TerrainVariant,
+  // Draws of the main pass left out, one at a time (and the terrain's geometry at a quarter of the triangles).
+  ...Object.fromEntries((['terrain', 'water', 'sky', 'hero'] as const).map((k) => [`game-med-skip${k}`,
+    { ...GAME_VARIANT, sky: 'cycle', renderScale: 0.5, skip: [k] } as TerrainVariant])),
+  'game-med-k64': { ...GAME_VARIANT, sky: 'cycle', renderScale: 0.5, k: 64, stride: 2 } as TerrainVariant,
+  // The fixed (resolution-independent) part of the frame: the game at a quarter of the canvas, and its parts left out.
+  'game-q': { ...GAME, sky: 'cycle', renderScale: 0.25 } as TerrainVariant,
+  'game-q-nograss': { ...GAME, sky: 'cycle', renderScale: 0.25, grass: null } as TerrainVariant,
+  'game-q-noforest': { ...GAME, sky: 'cycle', renderScale: 0.25, forest: null } as TerrainVariant,
+  'game-q-noislands': { ...GAME, sky: 'cycle', renderScale: 0.25, islands: false } as TerrainVariant,
+  'game-q-k64': { ...GAME, sky: 'cycle', renderScale: 0.25, k: 64, stride: 2 } as TerrainVariant,
+  'game-q-bare': { ...GAME, sky: 'cycle', renderScale: 0.25, grass: null, forest: null, islands: false, ruins: false } as TerrainVariant,
+  ...Object.fromEntries((['grass', 'forest', 'hero', 'sky', 'water', 'realm'] as const).map((k) => [`game-q-skip${k}`,
+    { ...GAME, sky: 'cycle', renderScale: 0.25, skip: [k] } as TerrainVariant])),
+  // The lookup tables as var<private> (before), against const.
+  'game-med-private': { ...GAME, sky: 'cycle', renderScale: 0.5, privateTables: true } as TerrainVariant,
+  'game-q-private': { ...GAME, sky: 'cycle', renderScale: 0.25, privateTables: true } as TerrainVariant,
+  'game-high-private': { ...GAME, sky: 'cycle', renderScale: 0.75, privateTables: true } as TerrainVariant,
+  // Every surface without tone mapping and gamma, without fog.
+  'game-high-nodisplay': { ...GAME, sky: 'cycle', renderScale: 0.75, stubAll: ['STUB_DISPLAY'] } as TerrainVariant,
+  'game-high-nofogall': { ...GAME, sky: 'cycle', renderScale: 0.75, stubAll: ['STUB_FOGALL'] } as TerrainVariant,
+  // The sky's blades made afresh every frame (as before the blade cache).
+  'game-high-nocache': { ...GAME, sky: 'cycle', renderScale: 0.75, stubAll: ['NO_BLADE_CACHE'] } as TerrainVariant,
+  'game-high-notreeshadow': { ...GAME, sky: 'cycle', renderScale: 0.75, forest: { ...GAME.forest!, shadowRes: 0 } } as TerrainVariant,
+  // The surfaces' colour arithmetic in f32 (TAA in f16 as the game), against f16.
+  'game-high-shade32': { ...GAME, sky: 'cycle', renderScale: 0.75, shadeF32: true } as TerrainVariant,
+  // The TAA's colour arithmetic in f32 (as before) instead of f16.
+  'game-med-taa32': { ...GAME, sky: 'cycle', renderScale: 0.5, taaF32: true } as TerrainVariant,
+  'game-high-taa32': { ...GAME, sky: 'cycle', renderScale: 0.75, taaF32: true } as TerrainVariant,
+  // The sky realm at High: without its draws, with its tops' ground a constant colour.
+  'game-high-skiprealm': { ...GAME, sky: 'cycle', renderScale: 0.75, skip: ['realm'] } as TerrainVariant,
+  'game-high-rlstub': { ...GAME, sky: 'cycle', renderScale: 0.75, islands: { stubGround: true } } as TerrainVariant,
+  // The hero drawn after the trees and grass (as before) instead of first.
+  'game-high-herolate': { ...GAME, sky: 'cycle', renderScale: 0.75, heroLate: true } as TerrainVariant,
+  'game-med-herolate': { ...GAME, sky: 'cycle', renderScale: 0.5, heroLate: true } as TerrainVariant,
+  // High: the terrain's shading part by part (STUB_*), and the draws left out.
+  ...Object.fromEntries((['BIOME', 'GRAD', 'SHADOW', 'FOG', 'SHADE'] as const).map((k) => [`game-high-no${k.toLowerCase()}`,
+    { ...GAME, sky: 'cycle', renderScale: 0.75, stub: { [`STUB_${k}`]: 1 } } as TerrainVariant])),
+  ...Object.fromEntries((['grass', 'forest', 'hero', 'water', 'realm', 'sky'] as const).map((k) => [`game-high-skip${k}`,
+    { ...GAME, sky: 'cycle', renderScale: 0.75, skip: [k] } as TerrainVariant])),
+  // The sky realm's parts at the Medium preset: without its lakes and streams, falls and mist, rings, arches.
+  ...Object.fromEntries((['water', 'falls', 'rings', 'arches'] as const).map((part) => [`game-med-sky-no${part}`,
+    { ...GAME, sky: 'cycle', renderScale: 0.5, islands: { [part]: false } } as TerrainVariant])),
+  ...Object.fromEntries((['realm', 'grass', 'forest', 'hero', 'terrain'] as const).map((k) => [`game-med-skip${k}`,
+    { ...GAME, sky: 'cycle', renderScale: 0.5, skip: [k] } as TerrainVariant])),
+  // Without the sky realm's shadow map (its pass and every surface's taps), without the trees' shadow map.
+  'game-med-noskyshadow': { ...GAME_VARIANT, sky: 'cycle', renderScale: 0.5, islands: { shadows: false } } as TerrainVariant,
+  'game-med-notreeshadow': { ...GAME_VARIANT, sky: 'cycle', renderScale: 0.5, forest: { ...GAME.forest!, shadowRes: 0 } } as TerrainVariant,
+  // The ground shaded per pixel as before the clipmap's material layer (terrain.wgsl.ts PER_PIXEL_GROUND).
+  'game-med-pixel': { ...GAME_VARIANT, sky: 'cycle', renderScale: 0.5, stub: { PER_PIXEL_GROUND: 1 } } as TerrainVariant,
+  // Its normal from the sun layer's cached (smooth) gradient instead of gradientAt (terrain.wgsl.ts CACHED_GRAD).
+  'game-med-cgrad': { ...GAME_VARIANT, sky: 'cycle', renderScale: 0.5, stub: { CACHED_GRAD: 1 } } as TerrainVariant,
+  // The terrain's shading, part by part (STUB_* in terrain.wgsl.ts): its biome colours, normals, shadows, fog; none of it.
+  ...Object.fromEntries((['BIOME', 'GRAD', 'SHADOW', 'FOG', 'SHADE'] as const).map((k) => [`game-med-no${k.toLowerCase()}`,
+    { ...GAME_VARIANT, sky: 'cycle', renderScale: 0.5, stub: { [`STUB_${k}`]: 1 } } as TerrainVariant])),
   direct: { height: 'direct' },
   'clip512': { height: 'cached', clip: { n: 512, levels: 8, spacing0: 0.5, margin: 4 }, genDpScale: 1, blend: 0.25 },
   'clip512-dp2': { height: 'cached', clip: { n: 512, levels: 8, spacing0: 0.5, margin: 4 }, genDpScale: 2, blend: 0.25 },
@@ -96,6 +168,24 @@ const VARIANTS: Record<string, TerrainVariant> = {
     grass: { rings: 5, n: 256, spacing0: 0.125, blend: 0.3, height: [0.22, 0.62], width: 0.045, density: 1 },
     forest: { density: 1, side: 48, shadowRes: 2048, shadowRange: 90 }, islands: true, ruins: true, diag: true, sky: 'cycle',
   },
+  // The day–night world with the trees' surfaces plain (no leaf clusters, needles, leaflets or bark): their cost.
+  'world-cycle-plain': {
+    height: 'raster', k: 128, stride: 1, morphStart: 0.75, clip: { n: 512, levels: 8, spacing0: 0.5, margin: 4 }, genDpScale: 1, blend: 0.25, taa: true,
+    grass: { rings: 5, n: 256, spacing0: 0.125, blend: 0.3, height: [0.22, 0.62], width: 0.045, density: 1 },
+    forest: { density: 1, side: 48, shadowRes: 2048, shadowRange: 90, detail: false }, islands: true, ruins: true, diag: true, sky: 'cycle',
+  },
+  // The day–night world without the sky realm (its cost is the difference).
+  'world-cycle-nosky': {
+    height: 'raster', k: 128, stride: 1, morphStart: 0.75, clip: { n: 512, levels: 8, spacing0: 0.5, margin: 4 }, genDpScale: 1, blend: 0.25, taa: true,
+    grass: { rings: 5, n: 256, spacing0: 0.125, blend: 0.3, height: [0.22, 0.62], width: 0.045, density: 1 },
+    forest: { density: 1, side: 48, shadowRes: 2048, shadowRange: 90 }, islands: false, ruins: true, diag: true, sky: 'cycle',
+  },
+  // The sky realm's parts (its cost, piece by piece): without its shadow map, its lakes and streams, its falls, the sky rings, the arches.
+  ...Object.fromEntries((['shadows', 'water', 'falls', 'rings', 'arches'] as const).map((part) => [`world-cycle-sky-no${part}`, {
+    height: 'raster', k: 128, stride: 1, morphStart: 0.75, clip: { n: 512, levels: 8, spacing0: 0.5, margin: 4 }, genDpScale: 1, blend: 0.25, taa: true,
+    grass: { rings: 5, n: 256, spacing0: 0.125, blend: 0.3, height: [0.22, 0.62], width: 0.045, density: 1 },
+    forest: { density: 1, side: 48, shadowRes: 2048, shadowRange: 90 }, islands: { [part]: false }, ruins: true, diag: true, sky: 'cycle',
+  } as TerrainVariant])),
   // The forest's parts: without shadows, without the level-of-detail dither.
   'world-taa-noshadow': {
     height: 'raster', k: 128, stride: 1, morphStart: 0.75, clip: { n: 512, levels: 8, spacing0: 0.5, margin: 4 }, genDpScale: 1, blend: 0.25, taa: true,
@@ -146,12 +236,18 @@ const VARIANTS: Record<string, TerrainVariant> = {
   },
 };
 
+/**
+ * The variants named by --variants. With --warmup=1 a copy of the first one, named 'warm-up',
+ * runs ahead of them: on some views whichever variant renders a view first pays for arriving
+ * there (measured: ×1.01 in one order, ×1.14 in the other), and the copy absorbs that.
+ */
 function pickVariants(def: string): Array<{ name: string; variant: TerrainVariant }> {
-  return opt('variants', def).split(',').map((name) => {
+  const picked = opt('variants', def).split(',').map((name) => {
     const variant = VARIANTS[name];
     if (!variant) throw new Error(`unknown variant ${name}; known: ${Object.keys(VARIANTS).join(', ')}`);
     return { name, variant };
   });
+  return opt('warmup', '') ? [{ name: 'warm-up', variant: picked[0].variant }, ...picked] : picked;
 }
 
 function frameList(def: number[]): number[] {
@@ -282,7 +378,21 @@ async function port(): Promise<void> {
   writeFileSync(path.join(OUT, 'webgpu-port.json'), JSON.stringify({ res: [W, H], env: gpu.env, compile: gpu.compile, image: d, probes: probeRows }, null, 1));
 }
 
-type TSample = { v: number; f: number; r: number; s: number; ms: number; first: number; rawRender: number; gen: number | null; texels: number };
+type TSample = { v: number; f: number; r: number; s: number; ms: number; first: number; rawRender: number; gen: number | null; texels: number; passes?: Record<string, number>; raw?: Record<string, number> };
+
+/** Per variant, each pass's median cost over the samples (ms), in the order the passes run. */
+function passTable(t: TSample[], variants: Array<{ name: string }>): void {
+  const med = (xs: number[]) => { const q = [...xs].sort((a, b) => a - b); return q[Math.floor(q.length / 2)]; };
+  for (const [vi, v] of variants.entries()) {
+    const own = t.filter((x) => x.v === vi && x.passes);
+    const labels: string[] = [];
+    for (const x of own) for (const k of Object.keys(x.passes!)) if (!labels.includes(k)) labels.push(k);
+    const cells = labels.map((k) => `${k} ${fmt(med(own.map((x) => x.passes![k] ?? 0)), 2)}`);
+    console.log(`    ${v.name} passes (ms, median gap from the pass before): ${cells.join(' · ')}`);
+    const raw = labels.map((k) => `${k} ${fmt(med(own.map((x) => x.raw?.[k] ?? 0)), 2)}`);
+    console.log(`    ${v.name} passes (ms, median begin → end): ${raw.join(' · ')}`);
+  }
+}
 
 async function cost(): Promise<void> {
   const variants = pickVariants('direct,clip512,clip512-dp2');
@@ -361,18 +471,25 @@ async function gen(): Promise<void> {
 async function stills(): Promise<void> {
   const config = opt('config', 'gallery');
   const framed: CameraFrame[] = JSON.parse(readFileSync(path.join(OUT, '.cache', `framed-${config}.json`), 'utf8'));
-  const shotFrames = opt('frames', '1,3') === 'all' ? framed.map((_, i) => i) : opt('frames', '1,3').split(',').map(Number);
+  const step = Number(opt('every', '1'));
+  const shotFrames = opt('frames', '1,3') === 'all' ? framed.map((_, i) => i).filter((i) => i % step === 0) : opt('frames', '1,3').split(',').map(Number);
   const variants = pickVariants('world-noaa,world-taa-a1,world-taa-soft');
   const timed = !!opt('timing', '');
+  // --noshots=1: timing only (over the frames picked), no images
+  const noShots = !!opt('noshots', '');
   const hours = opt('hours', '').split(',').filter(Boolean).map(Number);
   const gpu = await runWebGPU({
-    modes: timed ? ['shots', 'timing'] : ['shots'], variants, frames: framed, shotFrames, converge: Number(opt('converge', '32')),
+    modes: noShots ? ['timing'] : timed ? ['shots', 'timing'] : ['shots'], variants,
+    frames: noShots ? shotFrames.map((i) => framed[i]) : framed, shotFrames: noShots ? [] : shotFrames, converge: Number(opt('converge', '32')),
     hours, day: Number(opt('day', '0')), hour: Number(opt('hour', '15.5')),
     ...(opt('time', '') ? { time: Number(opt('time', '0')) } : {}),
   });
-  saveShots(gpu, path.join(OUT, 'webgpu', config === 'gallery' ? 'fidelity' : `stills-${config}`), false);
-  console.log('stills saved', variants.map((v) => v.name).join(', '));
-  const shotsInfo = gpu.results.shots as Array<{ variant: string; frame: number; trees?: [number, number]; sky?: { light: number[]; exposure: number; hour: number } | null }>;
+  if (opt('env', '')) console.log('  env:', JSON.stringify(gpu.env));
+  if (!noShots) {
+    saveShots(gpu, path.join(OUT, 'webgpu', config === 'gallery' ? 'fidelity' : `stills-${config}`), false);
+    console.log('stills saved', variants.map((v) => v.name).join(', '));
+  }
+  const shotsInfo = (gpu.results.shots ?? []) as Array<{ variant: string; frame: number; trees?: [number, number]; sky?: { light: number[]; exposure: number; hour: number } | null }>;
   const skies = shotsInfo.filter((x) => x.sky);
   if (skies.length) {
     writeFileSync(path.join(OUT, `webgpu-sky-${config}.json`), JSON.stringify(skies.map((x) => ({ variant: x.variant, frame: x.frame, ...x.sky })), null, 1));
@@ -382,6 +499,8 @@ async function stills(): Promise<void> {
       console.log(`  sky ${x.variant} f${x.frame}: exposure ${x.sky!.exposure.toFixed(2)} ambUp ${v(l, 0)} sun ${v(l, 1)} anti ${v(l, 2)} down ${v(l, 3)} bounce ${v(l, 4)} hor ${v(l, 5)} hor·cos ${v(l, 6)} hor·cos2 ${v(l, 7)} zenith ${v(l, 8)} grade ${v(l, 9)}`);
     }
   }
+  const bl = (shotsInfo as Array<{ variant: string; frame: number; blades?: number }>).filter((x) => x.blades);
+  if (bl.length) console.log('  grass blades per frame:', bl.map((x) => `${x.variant} f${x.frame}: ${x.blades}`).join(', '));
   const tr = shotsInfo.filter((x) => x.trees && (x.trees[0] || x.trees[1]));
   if (tr.length) console.log('  trees (near/far) per frame:', tr.map((x) => `${x.variant} f${x.frame}: ${x.trees![0]}/${x.trees![1]}`).join(', '));
   if (!timed) return;
@@ -392,13 +511,37 @@ async function stills(): Promise<void> {
     for (const x of t) if (x.v === vi) byF.set(x.f, [...(byF.get(x.f) ?? []), x.ms]);
     return [...byF.entries()].sort((a, b) => a[0] - b[0]).map(([, xs]) => Math.min(...xs));
   });
+  // Ratios against the first variant measured (not the warm-up).
+  const b0 = variants[0].name === 'warm-up' ? 1 : 0;
   for (const [vi, v] of variants.entries()) {
     const s = summarize(t.filter((x) => x.v === vi).map((x) => x.ms));
-    const r = vi ? pairedRatio(perFrame[0], perFrame[vi]) : null;
-    console.log(`  ${v.name}: p50 ${fmt(s.p50, 2)} ms  p95 ${fmt(s.p95, 2)} ms` + (r ? `   × ${fmt(r.ratio, 3)} [${fmt(r.lo, 3)}, ${fmt(r.hi, 3)}] vs ${variants[0].name}` : ''));
+    const r = vi > b0 ? pairedRatio(perFrame[b0], perFrame[vi]) : null;
+    console.log(`  ${v.name}: p50 ${fmt(s.p50, 2)} ms  p95 ${fmt(s.p95, 2)} ms` + (r ? `   × ${fmt(r.ratio, 3)} [${fmt(r.lo, 3)}, ${fmt(r.hi, 3)}] vs ${variants[b0].name}` : ''));
   }
   if (opt('perframe', '')) {
     console.log('  per frame (fastest rep, ms): ' + perFrame[0].map((_, f) => `f${f}: ${perFrame.map((pv) => fmt(pv[f], 2)).join(' / ')}`).join('  '));
+  }
+  passTable(t, variants);
+}
+
+/** The TAA passes alone (webgpu-page.ts taa mode): resolve and present per variant, over the gallery's views. */
+async function taa(): Promise<void> {
+  const config = opt('config', 'gallery');
+  const framed: CameraFrame[] = JSON.parse(readFileSync(path.join(OUT, '.cache', `framed-${config}.json`), 'utf8'));
+  const variants = pickVariants('game-med');
+  const gpu = await runWebGPU({ modes: ['taa'], variants, frames: framed, repeat: Number(opt('repeat', '8')) });
+  const t = (gpu.results.taa as Array<{ samples: Array<{ v: number; f: number; ms: number; resolve: number; present: number }> }>)[0].samples;
+  const b0 = variants[0].name === 'warm-up' ? 1 : 0;
+  const per = (vi: number, k: 'ms' | 'resolve' | 'present') => {
+    const byF = new Map<number, number[]>();
+    for (const x of t) if (x.v === vi) byF.set(x.f, [...(byF.get(x.f) ?? []), x[k]]);
+    return [...byF.entries()].sort((a, b) => a[0] - b[0]).map(([, xs]) => Math.min(...xs));
+  };
+  for (const [vi, v] of variants.entries()) {
+    const s = (k: 'ms' | 'resolve' | 'present') => summarize(per(vi, k)).p50;
+    const r = vi > b0 ? pairedRatio(per(b0, 'ms'), per(vi, 'ms')) : null;
+    console.log(`  ${v.name}: TAA ${fmt(s('ms'), 3)} ms (resolve ${fmt(s('resolve'), 3)}, present ${fmt(s('present'), 3)})` +
+      (r ? `   × ${fmt(r.ratio, 3)} [${fmt(r.lo, 3)}, ${fmt(r.hi, 3)}] vs ${variants[b0].name}` : ''));
   }
 }
 
@@ -511,7 +654,8 @@ function pickVariantsFrom(names: string[]): Array<{ name: string; variant: Terra
 
 /**
  * Forest placement: the GPU's window of plants (forestGen, read back after a
- * shot) against the CPU twin (forest/placement.ts, plantInCell), cell by cell.
+ * shot) against the CPU twins, cell by cell: the land's layer (forest/placement.ts,
+ * plantInCell) and the sky islands' (skyworld/flora.ts, skyPlantInCell).
  */
 async function parity(): Promise<void> {
   const config = opt('config', 'biomes');
@@ -521,34 +665,36 @@ async function parity(): Promise<void> {
   const seed = DEFAULT_SEED;
   const world: PlaceWorld = {
     onRuin: (x, z) => { const r = ruinSiteAt(x, z, seed); return !!r && Math.hypot(x - r.x, z - r.z) < r.radius; },
-    islandTop: (x, z) => { const i = islandAt(x, z, seed); return i && islandRho(i, x, z) < 0.82 ? islandTop(i, x, z) : -Infinity; },
   };
-  console.log('forest placement, GPU vs CPU twin: cells, plants (GPU / CPU), agree, only GPU, only CPU, other species, moved (> 5 cm)');
+  console.log('forest placement, GPU vs CPU twin (land, then sky): cells, plants (GPU / CPU), agree, only GPU, only CPU, other species, moved (> 5 cm)');
   for (const b of gpu.blobs.filter((x) => x.query.kind === 'forest')) {
     const side = Number(b.query.side);
     const buf = b.data.buffer.slice(b.data.byteOffset, b.data.byteOffset + b.data.byteLength);
     const tiles = new Int32Array(buf, 0, side * side * 4);
     const slots = new Uint32Array(buf, side * side * 16);
     const slotF = new Float32Array(buf, side * side * 16);
-    let cells = 0, gpuN = 0, cpuN = 0, agree = 0, onlyG = 0, onlyC = 0, other = 0, moved = 0;
-    for (let t = 0; t < side * side; t++) {
-      const tx = tiles[4 * t], tz = tiles[4 * t + 1];
-      for (let c = 0; c < 64; c++) {
-        const i = (t * 64 + c) * 4;
-        const valid = (slots[i + 3] & 0x40000000) !== 0;
-        const p = plantInCell(tx * 8 + (c % 8), tz * 8 + Math.floor(c / 8), seed, world);
-        cells++;
-        if (valid) gpuN++;
-        if (p) cpuN++;
-        if (!valid && !p) { agree++; continue; }
-        if (valid && !p) { onlyG++; continue; }
-        if (!valid && p) { onlyC++; continue; }
-        if (SPECIES[slots[i + 3] & 15] !== p!.species) { other++; continue; }
-        agree++;
-        if (Math.hypot(tx * 48 + slotF[i] - p!.x, tz * 48 + slotF[i + 1] - p!.z) > 0.05) moved++;
+    for (const layer of [0, 1]) {
+      let cells = 0, gpuN = 0, cpuN = 0, agree = 0, onlyG = 0, onlyC = 0, other = 0, moved = 0;
+      for (let t = 0; t < side * side; t++) {
+        const tx = tiles[4 * t], tz = tiles[4 * t + 1];
+        for (let c = 0; c < 64; c++) {
+          const i = (layer * side * side * 64 + t * 64 + c) * 4;
+          const valid = (slots[i + 3] & 0x40000000) !== 0;
+          const ix = tx * 8 + (c % 8), iz = tz * 8 + Math.floor(c / 8);
+          const p = layer === 0 ? plantInCell(ix, iz, seed, world) : skyPlantInCell(ix, iz, seed);
+          cells++;
+          if (valid) gpuN++;
+          if (p) cpuN++;
+          if (!valid && !p) { agree++; continue; }
+          if (valid && !p) { onlyG++; continue; }
+          if (!valid && p) { onlyC++; continue; }
+          if (SPECIES[slots[i + 3] & 15] !== p!.species) { other++; continue; }
+          agree++;
+          if (Math.hypot(tx * 48 + slotF[i] - p!.x, tz * 48 + slotF[i + 1] - p!.z) > 0.05) moved++;
+        }
       }
+      console.log(`  f${b.query.frame} ${layer ? 'sky ' : 'land'}: ${cells} cells, ${gpuN} / ${cpuN} plants, ${(100 * agree / cells).toFixed(3)} % agree, ${onlyG} only GPU, ${onlyC} only CPU, ${other} other species, ${moved} moved`);
     }
-    console.log(`  f${b.query.frame}: ${cells} cells, ${gpuN} / ${cpuN} plants, ${(100 * agree / cells).toFixed(3)} % agree, ${onlyG} only GPU, ${onlyC} only CPU, ${other} other species, ${moved} moved`);
   }
 }
 
@@ -640,6 +786,32 @@ async function horizons(): Promise<void> {
   writeFileSync(path.join(OUT, 'webgpu-horizons.json'), JSON.stringify({ config, cameras: picks, levels, rows }, null, 1));
 }
 
-const modes: Record<string, () => Promise<void>> = { port, cost, gen, fidelity, hero, aa, stills, parity, horizons };
+/**
+ * Temporal stability of chosen views (say, the trees' surface detail against plain trees): at each
+ * view 24 frames held still (TAA settles), then a slow pure yaw of 32 frames (≈ 0.3 px per frame at
+ * 1280 px), time frozen. Per view and variant: the pan's mean |ΔY| between consecutive frames and the
+ * share of pixels changing by more than 24 (flicker); what the variants add beyond the drift is shimmer.
+ */
+async function shimmer(): Promise<void> {
+  const config = opt('config', 'biomes');
+  const framed: CameraFrame[] = JSON.parse(readFileSync(path.join(OUT, '.cache', `framed-${config}.json`), 'utf8'));
+  const views = opt('frames', '0').split(',').map(Number);
+  const variants = pickVariants('world-cycle-plain,world-cycle');
+  const HOLD = 24, PAN = 32;
+  const seq: CameraFrame[] = [];
+  for (const v of views) for (let k = 0; k < HOLD + PAN; k++) seq.push({ ...framed[v], frame: seq.length, yaw: framed[v].yaw + 0.0004 * Math.max(0, k - HOLD) });
+  const gpu = await runWebGPU({ modes: ['seq'], variants, frames: framed, seq, seqFreeze: true, hour: Number(opt('hour', '15.5')) });
+  const res = gpu.results.seq as Array<{ variant: string; meanDelta: number[]; flicker: number[] }>;
+  const mean = (xs: number[]) => xs.reduce((a, b) => a + b, 0) / Math.max(xs.length, 1);
+  console.log(`shimmer at ${W}×${H}, ${config} views ${views.join(',')}: pan mean |ΔY| (0–255) / flicker (% of pixels changing > 24)`);
+  views.forEach((v, vi) => {
+    // Step i compares frame i + 1 with frame i: the pan's steps within this view's block.
+    const from = vi * (HOLD + PAN) + HOLD, to = from + PAN - 1;
+    console.log(`  view ${String(v).padStart(2)} ${String(framed[v].scene ?? '').padEnd(22)} ` + res.map((r) =>
+      `${r.variant}: ${fmt(mean(r.meanDelta.slice(from, to)), 3)} / ${(mean(r.flicker.slice(from, to)) * 100).toFixed(3)} %`).join('   '));
+  });
+}
+
+const modes: Record<string, () => Promise<void>> = { port, cost, gen, fidelity, hero, aa, stills, parity, horizons, shimmer, taa };
 if (!modes[mode]) throw new Error(`unknown mode ${mode}; one of ${Object.keys(modes).join(', ')}`);
 await modes[mode]();

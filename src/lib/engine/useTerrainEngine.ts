@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState, type RefObject } from 'react';
 import { createStatsStore, type CamMode } from './statsStore';
-import type { ClockStart, EngineHandle } from './engineCore';
+import type { ClockStart, EngineHandle, SpawnAt } from './engineCore';
 import type { SkyMode } from '@/lib/gpu/engineGpu';
 import { DEFAULT_SEED, CAMERA, type PresetId } from '@/lib/constants';
 
@@ -58,6 +58,8 @@ export type TerrainEngineOptions = {
   sky?: SkyMode;
   /** Where the day starts (read at start). */
   clockStart?: ClockStart;
+  /** Where the hero starts: on the land (default) or up on the nearest sky archipelago (read at start). */
+  spawnAt?: SpawnAt;
   onPointerLockChange?: (locked: boolean) => void;
 };
 
@@ -80,6 +82,7 @@ export function useTerrainEngine({
   renderer = 'webgl2',
   sky = 'cycle',
   clockStart,
+  spawnAt,
   onPointerLockChange,
   onToggleHud,
 }: TerrainEngineOptions & { onToggleHud?: () => void }) {
@@ -96,6 +99,7 @@ export function useTerrainEngine({
   const onPointerLockChangeRef = useRef(onPointerLockChange);
   const skyRef = useRef(sky);
   const clockStartRef = useRef(clockStart);
+  const spawnAtRef = useRef(spawnAt);
   const handleRef = useRef<EngineHandle | null>(null);
 
   seedRef.current = seed;
@@ -134,7 +138,7 @@ export function useTerrainEngine({
           onToggleHud: hudToggleRef,
           onPointerLockChange: onPointerLockChangeRef,
           sky: skyRef,
-        }, enablePointerLock, initialMode, backend, clockStartRef.current);
+        }, enablePointerLock, initialMode, backend, clockStartRef.current, spawnAtRef.current);
       })
       .catch((e: unknown) => {
         if (!cancelled) setError(e instanceof Error ? e.message : String(e));

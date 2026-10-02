@@ -4,7 +4,8 @@
  * the hero's collision.
  * ---------------------------------------------------------------------------
  * One candidate site per RUINS.cell square, at a hashed spot away from its
- * border; kept on walkable ground above the water, or on a sky island's top.
+ * border; kept on walkable ground above the water, or on a sky island's top
+ * (well inside its rim and clear of its lake and stream).
  * A site is a stone platform bedded into the slope, pillars round its edge
  * (some broken), lintels over neighbouring intact pillars, a flight of steps,
  * low wall fragments and, for shrines, a dark monolith with glowing lines.
@@ -13,7 +14,8 @@
 
 import { RUINS, VALLEY } from './constants';
 import { elevation, hash01 } from './terrainMath';
-import { islandAt, islandRho, islandTop } from './skyIslands';
+import { islandAt } from './skyworld/realm';
+import { islandRho, nearWater, topAt } from './skyworld/island';
 
 /** Materials: weathered stone, mossy stone, shrine stone (glowing lines). */
 type RuinMaterial = 0 | 1 | 2;
@@ -50,10 +52,11 @@ function buildSite(ix: number, iz: number, seed: number): RuinSite | null {
   // Site-local (u along width, v along depth) → world.
   const at = (u: number, v: number) => [x + cs * u + sn * v, z - sn * u + cs * v] as const;
 
-  // Ground: a sky island's top when the site is well inside one, else the terrain.
+  // Ground: a sky island's top when the site is well inside one (and clear of its water), else the terrain.
   const isl = islandAt(x, z, seed);
-  const onIsland = !!isl && islandRho(isl, x, z) < 0.55;
-  const ground = (px: number, pz: number) => (onIsland ? islandTop(isl!, px, pz) : elevation(px, pz, seed, 0));
+  if (isl && (isl.kind === 'debris' || islandRho(isl, x, z) >= 0.6 || nearWater(isl, x, z, 30))) return null;
+  const onIsland = !!isl;
+  const ground = (px: number, pz: number) => (onIsland ? topAt(isl!, px, pz) : elevation(px, pz, seed, 0));
   const corners = [at(-w / 2, -d / 2), at(w / 2, -d / 2), at(-w / 2, d / 2), at(w / 2, d / 2), at(0, 0)];
   const hs = corners.map(([px, pz]) => ground(px, pz));
   const gMin = Math.min(...hs), gMax = Math.max(...hs);

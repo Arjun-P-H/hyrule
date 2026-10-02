@@ -4,16 +4,20 @@
  *   const sky = new SkyCycle(device); await sky.init();  // transmittance and multiple-scattering LUTs, once
  *   sky.setFrame(days, camY, time)   // this frame's light rig (lightRig.ts), packed into the sky uniform
  *   sky.encode(enc)                  // the sky-view LUT, then the probe of it
- * The sky-view LUT and the probe's results are double-buffered: each frame
- * computes one set while the frame's passes read the other, finished the
- * frame before (reading a texture in the frame that writes it stalls the M1;
- * a sky a frame old is invisible). The renderer binds the uniform and set
- * sampled() in its group 0 (layoutEntries / bindEntries). The rig stays
- * readable (sky.rig: the key light for the tree shadow map, the hour for the HUD).
+ * The sky-view LUT and the probe's results are double-buffered: a frame
+ * computes one set while its passes read the other, finished before (reading
+ * a texture in the frame that writes it stalls the M1; a sky a frame old is
+ * invisible). A set is made only when what it depends on has moved past
+ * LUT_TOLERANCE since the last (the sun turning, the camera climbing: a day
+ * of 12 real minutes needs a new one every few frames, a still sky none).
+ * The renderer binds the uniform and set sampled() in its group 0
+ * (layoutEntries / bindEntries). The rig stays readable (sky.rig: the key
+ * light for the tree shadow map, the hour for the HUD).
  */
 
 import { computeLightRig, createLightRig, KEY_ALTS, KEY_TOP, MOON_E, SUN_E, moonLightShare, type LightRig } from '../sky/lightRig';
 import { MS_LUT, SKY_BYTES, SKY_LIGHT_BYTES, SKY_LUT_WGSL, TRANS_LUT, VIEW_LUT } from './sky.wgsl';
+import { stamped } from './profile';
 
 const DEG = Math.PI / 180;
 /**
@@ -38,6 +42,19 @@ const MIST_HEIGHT = 38;
 
 export type SkyBindings = { sky: number; light: number; view: number };
 
+/**
+ * What the sky-view LUT and the probe read of the sky uniform (float index, tolerance; a negative
+ * tolerance is relative): the sun, the moon and the key light (directions to 0.01°, path angles),
+ * the light above the air, the camera's altitude (5 m), the night, the exposure bias, the twilight,
+ * the key light at the camera and at the ground. The clock, the discs, the fog and the clouds are
+ * read by the passes from the uniform itself, every frame.
+ */
+const LUT_TOLERANCE: ReadonlyArray<readonly [number, number]> = [
+  ...[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11].map((i) => [i, 2e-4] as const),
+  ...[12, 13, 14, 16, 17, 18, 56, 57, 58, 60, 61, 62].map((i) => [i, -2e-3] as const),
+  [15, 0.005], [19, 2e-3], [39, 2e-3], [40, 1e-4], [51, 2e-3],
+];
+
 /** Write a vec4 (xyz = a × k, w) at float offset o. */
 function put(D: Float32Array, o: number, a: ArrayLike<number>, w: number, k = 1): void {
   D[o] = a[0] * k; D[o + 1] = a[1] * k; D[o + 2] = a[2] * k; D[o + 3] = w;
@@ -56,9 +73,12 @@ export class SkyCycle {
   private probePipe!: GPUComputePipeline;
   private viewBinds: GPUBindGroup[] = [];
   private probeBinds: GPUBindGroup[] = [];
-  /** The set computed this frame (the other is sampled); both are computed on the first frame. */
-  private cur = 0;
+  /** The set made this frame (−1: none) and the set sampled; both are made on the first frame. */
+  private making = -1;
+  private sampleSet = 1;
   private fresh = true;
+  /** The uniform the last set was made from. */
+  private made = new Float32Array(SKY_BYTES / 4);
 
   constructor(device: GPUDevice) {
     this.device = device;
@@ -120,7 +140,6 @@ export class SkyCycle {
 
   /** The light at `days` (game days since day 0, 00:00) for a camera at altitude camY (m); `time` (s) moves the stars' twinkle. */
   setFrame(days: number, camY: number, time: number): void {
-    this.cur = 1 - this.cur;
     const r = computeLightRig(days, camY, this.rig);
     const D = this.data;
     put(D, 0, r.sun, r.sunTheta);
@@ -144,18 +163,36 @@ export class SkyCycle {
     for (let c = 0; c < 3; c++) D[56 + c] = r.keyCols[ki * 4 + c] * (1 - kt) + r.keyCols[(ki + 1) * 4 + c] * kt;
     D[59] = 0;
     D.set(r.keyCols, 60);
+    // A set made last frame is sampled from now on; make another only if the sky has moved.
+    if (this.making >= 0) this.sampleSet = this.making;
+    this.making = -1;
+    if (this.fresh || this.moved()) {
+      this.making = 1 - this.sampleSet;
+      this.made.set(D);
+    }
     this.device.queue.writeBuffer(this.uniform, 0, D);
+  }
+
+  /** Has what the LUT and the probe read moved past its tolerance since the last set was made? */
+  private moved(): boolean {
+    const D = this.data, M = this.made;
+    for (const [i, tol] of LUT_TOLERANCE) {
+      const lim = tol < 0 ? -tol * Math.max(Math.abs(M[i]), 1e-6) : tol;
+      if (Math.abs(D[i] - M[i]) > lim) return true;
+    }
+    return false;
   }
 
   /** The set this frame's passes sample (pick the group-0 bind group made with it). */
   sampled(): number {
-    return 1 - this.cur;
+    return this.sampleSet;
   }
 
-  /** This frame's sky-view LUT and the probe of it, into the set not sampled (the first frame fills both). */
+  /** The sky-view LUT and the probe of it, into the set not sampled, when this frame makes one (the first fills both). */
   encode(enc: GPUCommandEncoder): void {
-    const p = enc.beginComputePass();
-    for (const k of this.fresh ? [0, 1] : [this.cur]) {
+    if (this.making < 0) return;
+    const p = enc.beginComputePass(stamped('sky'));
+    for (const k of this.fresh ? [0, 1] : [this.making]) {
       p.setPipeline(this.viewPipe);
       p.setBindGroup(0, this.viewBinds[k]);
       p.dispatchWorkgroups(Math.ceil(VIEW_LUT[0] / 8), Math.ceil(VIEW_LUT[1] / 8));
@@ -172,7 +209,7 @@ export class SkyCycle {
     const d = this.device;
     const rb = d.createBuffer({ size: SKY_LIGHT_BYTES, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     const enc = d.createCommandEncoder();
-    enc.copyBufferToBuffer(this.lights[this.cur], 0, rb, 0, SKY_LIGHT_BYTES);
+    enc.copyBufferToBuffer(this.lights[this.making >= 0 ? this.making : this.sampleSet], 0, rb, 0, SKY_LIGHT_BYTES);
     d.queue.submit([enc.finish()]);
     await rb.mapAsync(GPUMapMode.READ);
     const out = new Float32Array(rb.getMappedRange().slice(0));

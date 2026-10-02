@@ -3,7 +3,8 @@ import { RUINS, PLAYER } from '../src/lib/constants';
 import { ruinSiteAt, ruinSitesNear, toBoxLocal, type RuinSite } from '../src/lib/ruins';
 import { createHeroState, firstPersonGround, placeHero, updateHero, type HeroInput } from '../src/lib/hero/locomotion';
 import { elevation, updatePlayer, type InputState, type PlayerState } from '../src/lib/terrainMath';
-import { islandTop, islandsNear } from '../src/lib/skyIslands';
+import { realmNear } from '../src/lib/skyworld/realm';
+import { nearWater, outline, topAt } from '../src/lib/skyworld/island';
 
 const SEED = 1337;
 
@@ -98,9 +99,13 @@ describe('ruins', () => {
     }
     expect(closest).toBeLessThan(0.4);
 
-    const isl = islandsNear(0, 0, 20_000, SEED, 1)[0];
-    const top = islandTop(isl, isl.cx, isl.cz);
-    const f: PlayerState = { x: isl.cx, y: top + 20, z: isl.cz, vx: 0, vy: 0, vz: 0, grounded: false };
+    // A dry spot half way out on the nearest hub.
+    const isl = realmNear(0, 0, 20_000, SEED).archipelagos[0].islands[0];
+    const th = Array.from({ length: 16 }, (_, k) => (k / 16) * Math.PI * 2)
+      .find((a) => !nearWater(isl, isl.cx + 0.5 * isl.R * outline(isl, a) * Math.cos(a), isl.cz + 0.5 * isl.R * outline(isl, a) * Math.sin(a), 20))!;
+    const fx = isl.cx + 0.5 * isl.R * outline(isl, th) * Math.cos(th), fz = isl.cz + 0.5 * isl.R * outline(isl, th) * Math.sin(th);
+    const top = topAt(isl, fx, fz);
+    const f: PlayerState = { x: fx, y: top + 20, z: fz, vx: 0, vy: 0, vz: 0, grounded: false };
     for (let i = 0; i < 180; i++) updatePlayer(f, idle, 1 / 60, SEED, firstPersonGround);
     expect(f.grounded).toBe(true);
     expect(Math.abs(f.y - (top + eye))).toBeLessThan(1e-6);

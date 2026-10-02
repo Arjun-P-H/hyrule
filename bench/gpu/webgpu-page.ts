@@ -15,6 +15,7 @@
 
 import { createTerrainRenderer, type FrameParams, type PassTimestamps, type TerrainRendererLike, type TerrainVariant } from '../../src/lib/gpu/terrainRenderer';
 import { PROBE_BYTES, PROBE_WGSL } from '../../src/lib/gpu/terrain.wgsl';
+import { setPassStamp } from '../../src/lib/gpu/profile';
 
 type Frame = { x: number; y: number; z: number; yaw: number; pitch: number; hero?: number[]; heroF32?: Float32Array };
 type Preset = { id: string; w: number; h: number; marchSteps: number; shadowSteps: number };
@@ -23,7 +24,7 @@ type Probe = { id: string; origin: [number, number]; local0: [number, number]; s
 type GenCase = { name: string; speed: number; frames: number; heading: number };
 
 type Config = {
-  modes: Array<'timing' | 'shots' | 'probe' | 'gen' | 'seq' | 'horizon'>;
+  modes: Array<'timing' | 'shots' | 'probe' | 'gen' | 'seq' | 'horizon' | 'taa'>;
   variants: VariantCfg[];
   presets: Preset[];
   frames: Frame[];
@@ -69,7 +70,7 @@ async function main(): Promise<void> {
   if (!navigator.gpu) throw new Error('WebGPU unavailable');
   const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
   if (!adapter) throw new Error('no WebGPU adapter');
-  const wanted: GPUFeatureName[] = ['timestamp-query', 'float32-filterable'];
+  const wanted: GPUFeatureName[] = ['timestamp-query', 'float32-filterable', 'clip-distances', 'shader-f16'];
   const features = wanted.filter((f) => adapter.features.has(f));
   const device = await adapter.requestDevice({ requiredFeatures: features });
   device.addEventListener('uncapturederror', (e) => { void fail(`WebGPU error: ${(e as GPUUncapturedErrorEvent).error.message}`); });
@@ -78,7 +79,7 @@ async function main(): Promise<void> {
   await postJSON('/env', {
     api: 'webgpu',
     vendor: info.vendor, architecture: info.architecture, device: info.device, description: info.description,
-    features, userAgent: navigator.userAgent,
+    features, adapterFeatures: [...adapter.features].sort(), userAgent: navigator.userAgent,
   });
 
   const renderers = await Promise.all(cfg.variants.map(async (v) => {
@@ -136,7 +137,16 @@ async function main(): Promise<void> {
         mine.push({ label, i });
         return { querySet, begin: i, end: i + 1 };
       };
-      texels.push(t.encode(enc, alloc));
+      // Every pass the renderer begins (not only those handed a slot) is stamped under its label.
+      setPassStamp((label) => {
+        const a = alloc(label);
+        return { querySet: a.querySet, beginningOfPassWriteIndex: a.begin, endOfPassWriteIndex: a.end };
+      });
+      try {
+        texels.push(t.encode(enc, alloc));
+      } finally {
+        setPassStamp(null);
+      }
       slots.push(mine);
       device.queue.submit([enc.finish()]);
     }
@@ -166,7 +176,9 @@ async function main(): Promise<void> {
     setup: () => { before?.(); R.setFrame(fp); },
     encode: (enc, ts) => {
       const texels = R.pendingTexels() > 0 ? R.encodeGenerate(enc, ts('gen')) : 0;
-      for (let j = 0; j < renders; j++) R.encodeRender(enc, view, ts('render'));
+      // A raster renderer stamps its own passes (the main one as 'render') in the order it begins them.
+      const own = R.variant.height === 'raster';
+      for (let j = 0; j < renders; j++) R.encodeRender(enc, view, own ? undefined : ts('render'));
       return texels;
     },
   });
@@ -215,8 +227,27 @@ async function main(): Promise<void> {
             const renders = P.filter((p) => p.label === 'render');
             const gaps = renders.slice(1).map((p, j) => p.end - renders[j].end);
             const g = P.find((p) => p.label === 'gen');
+            // Per pass: the gap from the previous pass's end, over each steady-state frame
+            // (from one main pass's end to the next: last frame's TAA, this frame's passes).
+            const ends = P.map((p) => p.end);
+            const at = P.map((p, i) => (p.label === 'render' ? i : -1)).filter((i) => i >= 0);
+            const parts: Record<string, number[]> = {};
+            for (let j = 1; j < at.length; j++) {
+              const sum: Record<string, number> = {};
+              for (let i = at[j - 1] + 1; i <= at[j]; i++) sum[P[i].label] = (sum[P[i].label] ?? 0) + ends[i] - ends[i - 1];
+              for (const [k, v] of Object.entries(sum)) (parts[k] ??= []).push(v);
+            }
+            const passes = Object.fromEntries(Object.entries(parts).map(([k, v]) => [k, median(v)]));
+            // and begin → end of each (compute passes overlap render passes on this GPU, so gaps can go negative)
+            const raws: Record<string, number[]> = {};
+            for (let j = 1; j < at.length; j++) {
+              for (let i = at[j - 1] + 1; i <= at[j]; i++) (raws[P[i].label] ??= []).push(P[i].end - P[i].begin);
+            }
+            const raw = Object.fromEntries(Object.entries(raws).map(([k, v]) => [k, median(v)]));
             return {
               ...m,
+              passes,
+              raw,
               ms: median(gaps),
               first: renders[0].end - (g ? g.end : renders[0].begin),
               gen: g ? g.end - g.begin : null,
@@ -408,6 +439,59 @@ async function main(): Promise<void> {
     // frame after invalidate() (all levels regenerated). Moves: the camera
     // travels at the case's speed for case.frames 60 Hz frames, against the
     // same number of frames with the camera held still.
+    // The TAA passes alone over each frame's scene: per task one frame, then `repeat` resolve +
+    // present pairs back to back (each resolve overwrites the history the present before it read,
+    // so they run in order); costs are gaps between consecutive pass ends.
+    async taa() {
+      const out = [];
+      type Taa = TerrainRendererLike & { encodeTaa?: (enc: GPUCommandEncoder, view: GPUTextureView) => void };
+      for (const preset of cfg.presets) {
+        const target = makeTarget(preset.w, preset.h);
+        const view = target.createView();
+        const K = cfg.repeat;
+        const task = (R: Taa, f: number): Task => ({
+          setup: () => R.setFrame(frameParams(cfg.frames[f], preset, f / 60)),
+          encode: (enc) => {
+            if (R.pendingTexels() > 0) R.encodeGenerate(enc);
+            R.encodeRender(enc, view);
+            for (let k = 0; k < K; k++) R.encodeTaa?.(enc, view);
+            return 0;
+          },
+        });
+        const t0 = performance.now();
+        for (let k = 0; performance.now() - t0 < cfg.warmupMs; k++) {
+          await runBatch(renderers.map((x, j) => task(x.r, (k + j) % cfg.frames.length)));
+        }
+        const meta: Array<{ v: number; f: number; r: number }> = [];
+        const tasks: Task[] = [];
+        for (let f = 0; f < cfg.frames.length; f++) {
+          for (let r = 0; r < cfg.reps; r++) {
+            for (let j = 0; j < renderers.length; j++) {
+              const v = (j + r) % renderers.length;
+              meta.push({ v, f, r });
+              tasks.push(task(renderers[v].r, f));
+            }
+          }
+        }
+        const res = await runAll(tasks);
+        out.push({
+          preset: preset.id,
+          samples: meta.map((m, i) => {
+            const P = res[i].passes;
+            const pres = P.map((p, k) => (p.label === 'taa.present' ? k : -1)).filter((k) => k >= 0);
+            const both: number[] = [], resolve: number[] = [];
+            for (let j = 1; j < pres.length; j++) {
+              both.push(P[pres[j]].end - P[pres[j - 1]].end);
+              resolve.push(P[pres[j] - 1].end - P[pres[j - 1]].end);
+            }
+            return { ...m, ms: median(both), resolve: median(resolve), present: median(both) - median(resolve) };
+          }),
+        });
+        target.destroy();
+      }
+      return out;
+    },
+
     async gen() {
       const preset = cfg.presets[0];
       const target = makeTarget(preset.w, preset.h);

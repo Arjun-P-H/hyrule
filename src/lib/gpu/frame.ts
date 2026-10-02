@@ -8,6 +8,13 @@ import type { PassTimestamps } from './clipmapCache';
 import type { GrassSpec } from './grass.wgsl';
 import type { ForestSpec } from './forest.wgsl';
 
+/** Parts of the sky realm (skyRealm.ts) a bench may leave out (all drawn by default) to measure what each costs. */
+export type RealmSpec = {
+  shadows?: boolean; water?: boolean; falls?: boolean; rings?: boolean; arches?: boolean;
+  /** Bench only: the tops' ground a constant colour (skyRealm.wgsl.ts STUB_RLGROUND), to measure its shading. */
+  stubGround?: boolean;
+};
+
 export type FrameParams = {
   /** Camera, world metres (fp64). */
   x: number;
@@ -49,7 +56,9 @@ export type TerrainVariant =
   | ({ height: 'cached' } & CacheOptions)
   | ({
       height: 'raster'; k: number; stride: number; morphStart: number;
-      grass?: GrassSpec | null; forest?: ForestSpec | null; islands?: boolean; ruins?: boolean;
+      grass?: GrassSpec | null; forest?: ForestSpec | null; ruins?: boolean;
+      /** The sky realm (skyRealm.ts): true, or with parts left out to measure their cost. */
+      islands?: boolean | RealmSpec;
       /**
        * Per-cell diagonals from the heights (keeps diagonal ridge crests whole), else one fixed
        * diagonal; 'always' re-triangulates every ring every frame (to measure that cost).
@@ -61,6 +70,20 @@ export type TerrainVariant =
       taaSharpen?: number; taaAlpha?: number;
       /** The classic fixed sky (default), or the day–night cycle (sky.wgsl.ts; FrameParams.days sets the hour). */
       sky?: 'classic' | 'cycle';
+      /** Bench only: the shaders' lookup tables as `var<private>` (as before), not `const`, to compare. */
+      privateTables?: boolean;
+      /** Bench only: the TAA's colour arithmetic in f32 (as before), not f16, to compare. */
+      taaF32?: boolean;
+      /** Bench only: the surfaces' colour arithmetic in f32 (as before), not f16, to compare. */
+      shadeF32?: boolean;
+      /** Bench only: the hero drawn after the trees and grass (as before), not first, to compare. */
+      heroLate?: boolean;
+      /** Bench only: STUB_* constants switched on for every pipeline (their defaults rewritten), to measure them. */
+      stubAll?: Array<'STUB_DISPLAY' | 'STUB_FOGALL' | 'NO_BLADE_CACHE'>;
+      /** Bench only: draws left out of the main pass, to measure them. */
+      skip?: Array<'terrain' | 'water' | 'sky' | 'hero' | 'forest' | 'grass' | 'realm' | 'ruins'>;
+      /** Bench only: parts of the terrain's shading left out (terrain.wgsl.ts STUB_* constants), to measure them. */
+      stub?: Partial<Record<'STUB_BIOME' | 'STUB_GRAD' | 'STUB_SHADOW' | 'STUB_FOG' | 'STUB_SHADE' | 'PER_PIXEL_GROUND' | 'CACHED_GRAD', number>>;
     } & CacheOptions);
 
 export interface TerrainRendererLike {

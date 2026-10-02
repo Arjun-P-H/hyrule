@@ -48,6 +48,16 @@ export type PlayOptions = {
   headed?: boolean;
   /** More URL parameters for /game, e.g. 'time=21' or 'sky=classic'. */
   query?: string;
+  /** CSS viewport (default 1280×720), e.g. a maximised window on a 1440×900-point display. */
+  viewport?: [number, number];
+  /**
+   * Pace the engine by the GPU, not the display: requestAnimationFrame runs
+   * its callbacks as soon as possible (a MessageChannel loop), so frames are
+   * drawn whenever the engine's frames in flight allow. Chrome on macOS holds
+   * rAF to the display's 60 Hz even with --disable-gpu-vsync; this measures
+   * the rate the game would reach on a faster display.
+   */
+  uncapped?: boolean;
 };
 
 export type PlayResult = {
@@ -64,6 +74,8 @@ export type PlayResult = {
   allocByFunction: Array<{ fn: string; bytesPerSec: number; share: number }>;
   canvas: { first: [number, number]; last: [number, number]; minW: number; maxW: number; changes: number; reversals: number; timeline: Array<[number, number]> };
   gpuMs?: { n: number; p50: number; p95: number; mean: number };
+  /** Uncapped sessions: CPU ms of each engine tick that drew a frame. */
+  cpuMs?: { n: number; p50: number; p95: number; mean: number };
   hudFps?: string;
   /** ms from navigation start: first contentful paint, DOM interactive, first engine draw */
   load?: { fcp: number; firstDraw: number; domInteractive: number };
@@ -72,9 +84,27 @@ export type PlayResult = {
 
 // Injected before any page script. No allocation per frame: pre-bound
 // functions, fixed-size typed arrays for samples.
-const INSTRUMENT = (fenceOff: boolean, gpuTiming: boolean) => `(() => {
+const INSTRUMENT = (fenceOff: boolean, gpuTiming: boolean, uncapped = false) => `(() => {
   const W = window.__wb = { raf: 0, draws: 0, firstDrawAt: 0, sizes: new Float64Array(3 * 4096), nSizes: 0, gpu: new Float64Array(8192), nGpu: 0, pending: [], ext: null };
   const raf = window.requestAnimationFrame.bind(window);
+  if (${uncapped}) {
+    // CPU time of each callback that drew a frame (the engine's whole tick: input, physics, uniforms, encoding).
+    W.cpu = new Float64Array(65536); W.nCpu = 0;
+    const ch = new MessageChannel();
+    let q = [], spare = [], id = 0;
+    ch.port1.onmessage = () => {
+      const run = q; q = spare; spare = run;
+      const t = performance.now();
+      for (let i = 0; i < run.length; i++) {
+        const d0 = W.draws, s = performance.now();
+        run[i](t);
+        if (W.draws !== d0 && W.nCpu < W.cpu.length) W.cpu[W.nCpu++] = performance.now() - s;
+      }
+      run.length = 0;
+    };
+    window.requestAnimationFrame = (cb) => { q.push(cb); if (q.length === 1) ch.port2.postMessage(0); return ++id; };
+    window.cancelAnimationFrame = () => {};
+  }
   function tick() { W.raf++; raf(tick); }
   raf(tick);
   const proto = WebGL2RenderingContext.prototype;
@@ -138,10 +168,11 @@ export async function runPlaySession(baseUrl: string, opts: PlayOptions): Promis
     await cdp.send('Page.enable');
     await cdp.send('Runtime.enable');
     await cdp.send('HeapProfiler.enable');
-    if (opts.dpr && opts.dpr !== 1) {
-      await cdp.send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 720, deviceScaleFactor: opts.dpr, mobile: false });
+    if ((opts.dpr && opts.dpr !== 1) || opts.viewport) {
+      const [width, height] = opts.viewport ?? [1280, 720];
+      await cdp.send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: opts.dpr ?? 1, mobile: false });
     }
-    await cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: INSTRUMENT(!!opts.fenceOff, !!opts.gpuTiming) });
+    await cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: INSTRUMENT(!!opts.fenceOff, !!opts.gpuTiming, !!opts.uncapped) });
     const loaded = new Promise<void>((r) => cdp.on('Page.loadEventFired', () => r()));
     const renderer = opts.renderer ?? 'webgl2';
     const params = [renderer === 'auto' ? '' : `renderer=${renderer}`, opts.query ?? ''].filter(Boolean).join('&');
@@ -176,10 +207,12 @@ export async function runPlaySession(baseUrl: string, opts: PlayOptions): Promis
     await key(cdp, 'KeyW', 'w', 87, 'keyDown');
     await Bun.sleep((opts.settleSeconds ?? 3) * 1000); // settle: JIT tiers, DRS warm-up window (2.5 s)
 
+    // (an uncapped session skips the heap profiler: sampling every 128 B stalls a page drawing flat out)
+    const sampling = !opts.uncapped;
     await cdp.send('HeapProfiler.collectGarbage');
-    await cdp.send('HeapProfiler.startSampling', { samplingInterval: 128, includeObjectsCollectedByMajorGC: true, includeObjectsCollectedByMinorGC: true });
-    const start = await evalJson<{ raf: number; draws: number; t: number; nSizes: number; nGpu: number }>(cdp,
-      `({ raf: __wb.raf, draws: __wb.draws, t: performance.now(), nSizes: __wb.nSizes, nGpu: __wb.nGpu })`);
+    if (sampling) await cdp.send('HeapProfiler.startSampling', { samplingInterval: 128, includeObjectsCollectedByMajorGC: true, includeObjectsCollectedByMinorGC: true });
+    const start = await evalJson<{ raf: number; draws: number; t: number; nSizes: number; nGpu: number; nCpu: number }>(cdp,
+      `({ raf: __wb.raf, draws: __wb.draws, t: performance.now(), nSizes: __wb.nSizes, nGpu: __wb.nGpu, nCpu: __wb.nCpu || 0 })`);
     const heap: number[] = [];
     const t0 = Date.now();
     let jumpAt = 0, strafe = 0;
@@ -195,11 +228,14 @@ export async function runPlaySession(baseUrl: string, opts: PlayOptions): Promis
       }
       await Bun.sleep(200);
     }
-    const end = await evalJson<{ raf: number; draws: number; t: number; nSizes: number; nGpu: number; sizes: number[]; gpu: number[]; hud: string }>(cdp,
+    const end = await evalJson<{ raf: number; draws: number; t: number; nSizes: number; nGpu: number; sizes: number[]; gpu: number[]; cpu: number[]; hud: string }>(cdp,
       `({ raf: __wb.raf, draws: __wb.draws, t: performance.now(), nSizes: __wb.nSizes, nGpu: __wb.nGpu,
           sizes: Array.from(__wb.sizes.subarray(0, 3 * __wb.nSizes)), gpu: Array.from(__wb.gpu.subarray(0, __wb.nGpu)),
+          cpu: __wb.cpu ? Array.from(__wb.cpu.subarray(0, __wb.nCpu)) : [],
           hud: (document.querySelector('.text-emerald-400.font-bold')?.textContent || '') })`);
-    const { profile } = await cdp.send<{ profile: { head: SampleNode } }>('HeapProfiler.stopSampling');
+    const { profile } = sampling
+      ? await cdp.send<{ profile: { head: SampleNode } }>('HeapProfiler.stopSampling')
+      : { profile: { head: { selfSize: 0, callFrame: { url: '', functionName: '', lineNumber: 0, columnNumber: 0 }, children: [] } as SampleNode } };
     await key(cdp, 'KeyW', 'w', 87, 'keyUp');
 
     const secs = (end.t - start.t) / 1000;
@@ -255,6 +291,10 @@ export async function runPlaySession(baseUrl: string, opts: PlayOptions): Promis
     };
     if (gpu.length) {
       result.gpuMs = { n: gpu.length, p50: gpu[Math.floor(gpu.length / 2)], p95: gpu[Math.floor(gpu.length * 0.95)], mean: gpu.reduce((a, b) => a + b, 0) / gpu.length };
+    }
+    const cpu = end.cpu.slice(start.nCpu).sort((a, b) => a - b);
+    if (cpu.length) {
+      result.cpuMs = { n: cpu.length, p50: cpu[Math.floor(cpu.length / 2)], p95: cpu[Math.floor(cpu.length * 0.95)], mean: cpu.reduce((a, b) => a + b, 0) / cpu.length };
     }
     if (opts.spector) result.spector = await spectorCapture(cdp);
     cdp.close();

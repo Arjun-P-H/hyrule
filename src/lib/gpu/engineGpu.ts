@@ -59,7 +59,12 @@ export async function createGpuBackend(canvas: HTMLCanvasElement, initialSky: Sk
   if (!adapter) throw new Error('No WebGPU adapter');
   // The clipmap is sampled with hardware bilinear filtering of r32float.
   if (!adapter.features.has('float32-filterable')) throw new Error('WebGPU adapter lacks float32-filterable');
-  const device = await adapter.requestDevice({ requiredFeatures: ['float32-filterable'] });
+  // Clip distances cut the sky islands' tops along their outlines (else the renderer discards there);
+  // half-precision shader arithmetic runs the TAA's colour maths at twice the rate (else in f32).
+  const optional: GPUFeatureName[] = ['clip-distances', 'shader-f16'];
+  const device = await adapter.requestDevice({
+    requiredFeatures: ['float32-filterable', ...optional.filter((f) => adapter.features.has(f))],
+  });
   const ctx = canvas.getContext('webgpu');
   if (!ctx) {
     device.destroy();

@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { ringIndices, ringLayout } from '../src/lib/gpu/rings';
+import { boxInView, RING_BLOCK, ringBlockOrder, ringIndices, ringLayout } from '../src/lib/gpu/rings';
 
 function lcg(seed: number): () => number {
   let s = seed >>> 0;
@@ -78,6 +78,39 @@ describe('ring layout', () => {
           expect(Math.abs(z / s0 - ring.center[1])).toBeLessThanOrEqual(2 * ring.step);
         }
       }
+    }
+  });
+});
+
+describe('ring culling blocks', () => {
+  test('the block order is a permutation of the blocks, round the ring centre by angle', () => {
+    const k = 128, nb = (2 * k) / RING_BLOCK;
+    const { order, slot } = ringBlockOrder(k);
+    expect(order.length).toBe(nb * nb);
+    expect([...order].sort((a, b) => a - b)).toEqual(Array.from({ length: nb * nb }, (_, i) => i));
+    for (let s = 0; s < order.length; s++) expect(slot[order[s]]).toBe(s);
+    const angle = (b: number) => Math.atan2((Math.floor(b / nb) + 0.5) * RING_BLOCK - k, ((b % nb) + 0.5) * RING_BLOCK - k);
+    for (let s = 1; s < order.length; s++) expect(angle(order[s])).toBeGreaterThanOrEqual(angle(order[s - 1]));
+  });
+
+  test('boxInView keeps every box a point of the view lies in, and drops boxes behind or beside it', () => {
+    const rnd = lcg(7);
+    for (let c = 0; c < 200; c++) {
+      // A random camera basis (yaw, pitch) as packFrame lays it out.
+      const yaw = (rnd() - 0.5) * 6.28, pitch = (rnd() - 0.5) * 1.6;
+      const cy = Math.cos(yaw), sy = Math.sin(yaw), cp = Math.cos(pitch), sp = Math.sin(pitch);
+      const fx = sy * cp, fy = sp, fz = cy * cp, rx = cy, rz = -sy;
+      const F = [rx, 0, rz, 0, fy * rz, fz * rx - fx * rz, -fy * rx, 0, fx, fy, fz, 0];
+      const tx = 1.27, ty = 0.7;
+      // A point inside the view (view coordinates within the frustum), and a box round it.
+      const vz = 5 + rnd() * 500, vx = (rnd() * 2 - 1) * tx * vz * 0.99, vy = (rnd() * 2 - 1) * ty * vz * 0.99;
+      const px = vx * F[0] + vy * F[4] + vz * F[8], py = vx * F[1] + vy * F[5] + vz * F[9], pz = vx * F[2] + vy * F[6] + vz * F[10];
+      const r = rnd() * 3;
+      expect(boxInView(F, tx, ty, px - r, py - r, pz - r, px + r, py + r, pz + r)).toBe(true);
+      // The same point behind the camera, and far beside the view: dropped.
+      expect(boxInView(F, tx, ty, -px - 1, -py - 1, -pz - 1, -px + 1, -py + 1, -pz + 1)).toBe(false);
+      const bx = 3 * tx * vz * F[0] + vz * F[8], by = 3 * tx * vz * F[1] + vz * F[9], bz = 3 * tx * vz * F[2] + vz * F[10];
+      expect(boxInView(F, tx, ty, bx - 1, by - 1, bz - 1, bx + 1, by + 1, bz + 1)).toBe(false);
     }
   });
 });

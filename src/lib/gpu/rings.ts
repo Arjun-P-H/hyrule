@@ -52,3 +52,41 @@ export function ringLayout(x: number, z: number, spacing0: number, k: number, st
   }
   return out;
 }
+
+/** Cells per side of a culling block of a ring (rasterRenderer.ts draws a ring's blocks in view). */
+export const RING_BLOCK = 16;
+
+/**
+ * A ring's blocks in the order its index buffer lays them out: round its
+ * centre by angle, so the blocks a view sees (a wedge from the camera, which
+ * sits by the centre) lie in one or two runs. `order[s]` is the block (row
+ * major, (2k / RING_BLOCK)² of them) in slot s; `slot[b]` the inverse.
+ */
+export function ringBlockOrder(k: number): { order: Uint16Array; slot: Uint16Array } {
+  const nb = (2 * k) / RING_BLOCK;
+  const angle = (b: number) => Math.atan2(((Math.floor(b / nb) + 0.5) * RING_BLOCK) - k, ((b % nb) + 0.5) * RING_BLOCK - k);
+  const order = Uint16Array.from({ length: nb * nb }, (_, b) => b).sort((a, b) => angle(a) - angle(b));
+  const slot = new Uint16Array(nb * nb);
+  order.forEach((b, s) => { slot[b] = s; });
+  return { order, slot };
+}
+
+/**
+ * Whether a camera-relative box [lo, hi] can show in the view: outside none
+ * of the four side planes of the frustum (basis F as packFrame lays it out:
+ * right F[0..2], up F[4..6], forward F[8..10]; tx, ty the tangents of the
+ * half angles) nor wholly behind the camera.
+ */
+export function boxInView(F: ArrayLike<number>, tx: number, ty: number,
+  lx: number, ly: number, lz: number, hx: number, hy: number, hz: number): boolean {
+  // Each plane's inward normal n: the box is outside when its corner farthest along n is behind it.
+  const out = (nx: number, ny: number, nz: number) =>
+    (nx >= 0 ? hx : lx) * nx + (ny >= 0 ? hy : ly) * ny + (nz >= 0 ? hz : lz) * nz < 0;
+  const fx = F[8], fy = F[9], fz = F[10];
+  if (out(fx, fy, fz)) return false;
+  if (out(tx * fx - F[0], tx * fy - F[1], tx * fz - F[2])) return false;
+  if (out(tx * fx + F[0], tx * fy + F[1], tx * fz + F[2])) return false;
+  if (out(ty * fx - F[4], ty * fy - F[5], ty * fz - F[6])) return false;
+  if (out(ty * fx + F[4], ty * fy + F[5], ty * fz + F[6])) return false;
+  return true;
+}

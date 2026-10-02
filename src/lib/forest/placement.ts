@@ -179,11 +179,11 @@ const noise01 = (x: number, z: number, wavelength: number, seed: number) => 0.5 
 /** The species of a pair for a value in [0, 1). */
 const pairPick = (p: Pair, v: number): Species => (v < 1 - p[2] ? p[0] : p[1]);
 
-type Feature = 'forest' | 'grove' | 'lone' | 'shore' | 'bush' | 'island';
+type Feature = 'forest' | 'grove' | 'lone' | 'shore' | 'bush';
 export type Plant = { species: Species; feature: Feature; x: number; z: number; scale: number; snow: boolean };
 
-/** Optional world context: ruins stay bare; sky-island tops (height, or −Infinity) are planted too. */
-export type PlaceWorld = { onRuin?: (x: number, z: number) => boolean; islandTop?: (x: number, z: number) => number };
+/** Optional world context: ruins stay bare. (The sky islands' trees are the forest's other layer: skyworld/flora.ts.) */
+export type PlaceWorld = { onRuin?: (x: number, z: number) => boolean };
 
 const W = VALLEY.wLevel;
 const DESERT = ZONES.indexOf('desert');
@@ -252,9 +252,6 @@ export function plantInCell(ix: number, iz: number, seed: number, world: PlaceWo
   if (world.onRuin?.(x, z)) return null;
 
   const region = noise01(x, z, PLACE.region.wavelength, seed + PLACE.region.seed);
-  const top = world.islandTop?.(x, z) ?? -Infinity;
-  if (top > -1e8) return islandPlant(ix, iz, x, z, seed, region, keep, pick, bush);
-
   const site = siteAt(x, z, seed, region, zoneR);
   if (!site) return null;
   const { e, slope, hollow, knoll, T, dom, mask, open, level, fill } = site;
@@ -312,23 +309,5 @@ export function plantInCell(ix: number, iz: number, seed: number, world: PlaceWo
   const edge = 4 * mask * (1 - mask);
   const bushP = (R.shrub * open + 0.12 * edge * (level < 1 ? 1 : 0) + 0.03 * mask) * (1 - steep);
   if (bush < bushP) return plant('bush', 'bush', 0.8 + 0.4 * pick);
-  return null;
-}
-
-/** Sky-island tops: lowland broadleaves in groves and as lone trees, a few bushes. */
-function islandPlant(ix: number, iz: number, x: number, z: number, seed: number, region: number, keep: number, pick: number, bush: number): Plant | null {
-  const autumn = region > (PLACE.region.lo + PLACE.region.hi) / 2;
-  const kl = 36 / CELL;
-  const lx = fdiv(ix, kl), lz = fdiv(iz, kl);
-  const lh = hash3(lx, lz, seed + 7231), lp = hash3(lx, lz, seed + 7232);
-  const fx = (0.15 + 0.7 * u16(lh, 0)) * kl, fz = (0.15 + 0.7 * u16(lh, 16)) * kl;
-  if (ix === lx * kl + Math.floor(fx) && iz === lz * kl + Math.floor(fz) && u16(lp, 0) < 0.45) {
-    return { species: autumn ? 'maple' : 'oak', feature: 'island', x: (lx * kl + fx) * CELL, z: (lz * kl + fz) * CELL, scale: 1.1 + 0.2 * pick, snow: false };
-  }
-  const grove = noise01(x, z, 40, seed + 7233);
-  if (keep < 0.3 * smooth(0.55, 0.75, grove)) {
-    return { species: pick < 0.3 ? 'birch' : autumn ? 'maple' : 'oak', feature: 'island', x, z, scale: 0.9 + 0.2 * pick, snow: false };
-  }
-  if (bush < 0.02) return { species: 'bush', feature: 'island', x, z, scale: 0.8 + 0.4 * pick, snow: false };
   return null;
 }

@@ -28,11 +28,13 @@ import { DRS_HARDWARE, DRS_SOFTWARE, createDrsState, drsStep, updateFpsEma } fro
 import { createHeroState, firstPersonGround, heroAction, placeHero, updateHero, type HeroInput, type HeroState } from '@/lib/hero/locomotion';
 import { createHeroRig, packHeroUniforms, updateHeroRig, HERO_UNIFORM } from '@/lib/hero/rig';
 import { createHeroCamera, updateHeroCamera } from '@/lib/hero/camera';
+import { skySpawn } from '@/lib/skyworld/realm';
 import type { GpuBackend, SkyMode } from '@/lib/gpu/engineGpu';
 import { advanceClock, createSkyClock, hourOf, setHour } from '@/lib/sky/clock';
 import type { FrameParams } from '@/lib/gpu/frame';
 import {
   CHUNK_SIZE,
+  FLY_CEILING,
   SPAWN,
   PLAYER,
   HERO_CAMERA,
@@ -69,6 +71,9 @@ export type EngineInputs = {
 
 /** Where the day starts: the hour, and real minutes per game day. */
 export type ClockStart = { hour: number; dayMinutes: number };
+
+/** Where the game starts: the spawn on the land, or up on the nearest sky archipelago's hub. */
+export type SpawnAt = 'land' | 'sky';
 
 export type EngineHandle = {
   dispose: () => void;
@@ -412,6 +417,7 @@ export function startEngine(
   initialMode: CamMode = 'fly',
   gpu: GpuBackend | null = null,
   clockStart: ClockStart = { hour: 15.5, dayMinutes: 24 },
+  spawnAt: SpawnAt = 'land',
 ): EngineHandle {
   const seedRef = inputs.seed;
   const presetRef = inputs.preset;
@@ -473,26 +479,35 @@ export function startEngine(
     const tp = createHeroCamera();
     const heroBuf = new Float32Array(HERO_UNIFORM.length);
 
+    // The start: the land's spawn, or (?spawn=sky) a spot up on the nearest archipelago's hub.
+    const spawnFor = (seed: number) => {
+      const sky = spawnAt === 'sky' ? skySpawn(SPAWN.x, SPAWN.z, seed) : null;
+      return sky ?? { x: SPAWN.x, y: elevation(SPAWN.x, SPAWN.z, seed, 0), z: SPAWN.z, yaw: SPAWN.yaw };
+    };
+    let spawn = spawnFor(seedRef.current);
+
     const cam: CamState = {
-      yaw: SPAWN.yaw,
+      yaw: spawn.yaw,
       pitch: initialMode === 'hero' ? HERO_CAMERA.pitch : SPAWN.pitch,
       mode: initialMode,
       onFoot: initialMode === 'hero' ? 'hero' : 'walk',
-      fly: { x: SPAWN.x, y: 0, z: SPAWN.z },
+      fly: { x: spawn.x, y: 0, z: spawn.z },
       flyVel: { x: 0, y: 0, z: 0 },
       player: {
-        x: SPAWN.x,
+        x: spawn.x,
         y: 0,
-        z: SPAWN.z,
+        z: spawn.z,
         vx: 0,
         vy: 0,
         vz: 0,
         grounded: false,
       },
-      hero: createHeroState(SPAWN.x, SPAWN.z, SPAWN.yaw, seedRef.current),
+      hero: createHeroState(spawn.x, spawn.z, spawn.yaw, seedRef.current),
     };
+    // (up in the sky the hero starts on the island's top, not on the land below)
+    if (spawnAt === 'sky') placeHero(cam.hero, spawn.x, spawn.y + PLAYER.groundBias, spawn.z, 0, 0, 0, spawn.yaw, seedRef.current);
 
-    cam.fly.y = elevation(SPAWN.x, SPAWN.z, seedRef.current, 0) + 30;
+    cam.fly.y = spawn.y + 30;
     cam.player.y = cam.fly.y;
     if (initialMode === 'walk') {
       cam.player.y = cam.hero.y + PLAYER.height;
@@ -514,22 +529,23 @@ export function startEngine(
 
     const doRespawn = () => {
       const s = seedRef.current;
-      const ground = elevation(SPAWN.x, SPAWN.z, s, 0);
+      spawn = spawnFor(s);
+      const ground = spawn.y;
       const spawnY = ground + 30;
-      cam.yaw = SPAWN.yaw;
+      cam.yaw = spawn.yaw;
       cam.pitch = SPAWN.pitch;
-      cam.fly = { x: SPAWN.x, y: spawnY, z: SPAWN.z };
+      cam.fly = { x: spawn.x, y: spawnY, z: spawn.z };
       cam.flyVel = { x: 0, y: 0, z: 0 };
       cam.player = {
-        x: SPAWN.x,
+        x: spawn.x,
         y: ground + 1.8,
-        z: SPAWN.z,
+        z: spawn.z,
         vx: 0,
         vy: 0,
         vz: 0,
         grounded: false,
       };
-      placeHero(cam.hero, SPAWN.x, ground + PLAYER.groundBias, SPAWN.z, 0, 0, 0, SPAWN.yaw, s);
+      placeHero(cam.hero, spawn.x, ground + PLAYER.groundBias, spawn.z, 0, 0, 0, spawn.yaw, s);
       cam.hero.stamina = 1;
       cam.hero.exhausted = false;
       rig.snap = true;
@@ -928,7 +944,8 @@ export function startEngine(
 
         // Free-fly mode (§IV.K.1): disable physics calculations entirely
         // (no gravity, no ground clamp, no slope sliding). Zero CPU elevation overhead.
-        cam.fly.y = Math.min(cam.fly.y, 1150);
+        // The ceiling clears the sky realm on WebGPU (the WebGL2 march stays under its own).
+        cam.fly.y = Math.min(cam.fly.y, gpu ? FLY_CEILING.webgpu : FLY_CEILING.webgl2);
         px = cam.fly.x;
         py = cam.fly.y;
         pz = cam.fly.z;

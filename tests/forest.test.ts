@@ -1,7 +1,8 @@
 import { describe, expect, test } from 'bun:test';
 import { PLAYER, SPAWN, VALLEY } from '../src/lib/constants';
 import { trunksNear } from '../src/lib/forest/collision';
-import { buildTreeModels, trunkColliders, VERTEX_BYTES } from '../src/lib/forest/models';
+import { buildLeafAtlas, LEAF_MIPS, LEAF_SIZE, LEAF_STYLES } from '../src/lib/forest/leafAtlas';
+import { buildTreeModels, SURFACE_SPAN, trunkColliders, VERTEX_BYTES } from '../src/lib/forest/models';
 import { createHeroState, firstPersonGround, updateHero, type HeroInput } from '../src/lib/hero/locomotion';
 import { forestAt, plantInCell, RULES, type Plant } from '../src/lib/forest/placement';
 import { CELL, LODS, SPECIES, SPECIES_INFO, VARIANTS } from '../src/lib/forest/species';
@@ -10,6 +11,7 @@ import { elevation, updatePlayer, type InputState, type PlayerState } from '../s
 
 const SEED = 1337;
 const models = buildTreeModels();
+const u8 = new Uint8Array(models.vertices);
 const mesh = (s: number, v: number, l: number) => models.meshes[(s * VARIANTS + v) * LODS + l];
 
 describe('tree models', () => {
@@ -57,6 +59,96 @@ describe('tree models', () => {
         expect(minY).toBeLessThan(0);
       }
     });
+  });
+
+  test('surface coordinates run round each trunk (a seam vertex closes the ring) and up it in metres; across and along fronds', () => {
+    const f32 = new Float32Array(models.vertices);
+    const u16 = new Uint16Array(models.vertices);
+    const pos = (m: { baseVertex: number }, k: number) => { const o = ((m.baseVertex + k) * VERTEX_BYTES) / 4; return [f32[o], f32[o + 1], f32[o + 2]]; };
+    const uv = (m: { baseVertex: number }, k: number) => { const o = ((m.baseVertex + k) * VERTEX_BYTES) / 2; return [u16[o + 10] / 65535, (u16[o + 11] / 65535) * SURFACE_SPAN]; };
+    SPECIES.forEach((sp, si) => {
+      if (sp === 'bush') return;
+      const m = mesh(si, 0, 0);
+      const sides = sp === 'cactus' ? 16 : 12;
+      for (let k = 0; k <= sides; k++) expect(uv(m, k)[0]).toBeCloseTo(k / sides, 4);
+      expect(pos(m, sides)).toEqual(pos(m, 0));
+      // Along: 0 at the foot, rising ring to ring by at least the height gained.
+      const centreY = (i: number) => { let y = 0; for (let k = 0; k < sides; k++) y += pos(m, i * (sides + 1) + k)[1]; return y / sides; };
+      expect(uv(m, 0)[1]).toBeCloseTo(0, 3);
+      for (let i = 1; i < 4; i++) {
+        const dv = uv(m, i * (sides + 1))[1] - uv(m, (i - 1) * (sides + 1))[1];
+        expect(dv).toBeGreaterThanOrEqual(centreY(i) - centreY(i - 1) - 1e-3);
+      }
+    });
+    // Palm fronds: the side (0, ½ on the midrib, 1) and metres from the stalk.
+    const palm = mesh(SPECIES.indexOf('palm'), 0, 0);
+    let fronds = 0;
+    for (let k = 0; k < palm.vertexCount; k++) {
+      if (u8[(palm.baseVertex + k) * VERTEX_BYTES + 16] !== 2) continue;
+      fronds++;
+      const [s, along] = uv(palm, k);
+      expect([0, 0.5, 1].some((x) => Math.abs(s - x) < 1e-4)).toBe(true);
+      expect(along).toBeGreaterThanOrEqual(0);
+      expect(along).toBeLessThan(5.1);
+    }
+    expect(fronds).toBeGreaterThan(100);
+  });
+
+  test('broadleaf crowns carry leaf cards at the near levels only, each four corners at one centre', () => {
+    const f32 = new Float32Array(models.vertices);
+    const u16 = new Uint16Array(models.vertices);
+    SPECIES.forEach((sp, s) => {
+      const cards = SPECIES_INFO[sp].card > 0;
+      for (let v = 0; v < VARIANTS; v++) {
+        const [near, mid, far] = [0, 1, 2].map((l) => mesh(s, v, l));
+        expect(far.cardCount).toBe(0);
+        if (!cards) { expect(near.cardCount + mid.cardCount).toBe(0); continue; }
+        // Enough cards to clothe the crown, fewer in the middle level (drawn larger there).
+        expect(near.cardCount / 6).toBeGreaterThan(30);
+        expect(mid.cardCount).toBeLessThan(near.cardCount);
+        expect(near.cardFirst).toBe(near.firstIndex + near.indexCount);
+        for (let c = 0; c < near.cardCount; c += 6) {
+          const quad = [...models.indices.slice(near.cardFirst + c, near.cardFirst + c + 6)];
+          const corners = new Set(quad);
+          expect(corners.size).toBe(4);
+          const at = (k: number) => { const o = ((near.baseVertex + k) * VERTEX_BYTES) / 4; return [f32[o], f32[o + 1], f32[o + 2]]; };
+          const centre = at(quad[0]);
+          const uv = new Set<string>();
+          for (const k of corners) {
+            expect(at(k)).toEqual(centre);
+            expect(u8[(near.baseVertex + k) * VERTEX_BYTES + 16]).toBe(5);
+            const o = ((near.baseVertex + k) * VERTEX_BYTES) / 2;
+            uv.add(`${u16[o + 10] / 65535},${u16[o + 11] / 65535}`);
+          }
+          expect([...uv].sort()).toEqual(['0,0', '0,1', '1,0', '1,1']);
+        }
+      }
+    });
+  });
+
+  test('leaf sprays: a spray of leaves on each layer, premultiplied, mipmaps averaging down to one texel', () => {
+    const atlas = buildLeafAtlas();
+    expect(atlas.length).toBe(LEAF_STYLES.length);
+    for (const levels of atlas) {
+      expect(levels.length).toBe(LEAF_MIPS);
+      const base = levels[0];
+      let cov = 0;
+      for (let k = 0; k < base.length; k += 4) {
+        cov += base[k];
+        // Premultiplied: tone and tilt never exceed coverage; empty texels hold nothing.
+        for (let c = 1; c < 4; c++) expect(base[k + c]).toBeLessThanOrEqual(base[k] + 1);
+      }
+      const share = cov / (255 * LEAF_SIZE * LEAF_SIZE);
+      expect(share).toBeGreaterThan(0.2);
+      expect(share).toBeLessThan(0.6);
+      // The edge of the tile stays empty (cards would show a cut).
+      for (let i = 0; i < LEAF_SIZE; i++) {
+        expect(base[4 * i]).toBe(0);
+        expect(base[4 * (i * LEAF_SIZE)]).toBe(0);
+      }
+      // The last level is the mean of the first.
+      expect(Math.abs(levels[LEAF_MIPS - 1][0] - share * 255)).toBeLessThan(2);
+    }
   });
 
   test('the same seeds build the same models', () => {
@@ -173,13 +265,10 @@ describe('where trees grow', () => {
     expect(plants).toBeGreaterThan(50);
   });
 
-  test('ruins stay bare; sky-island tops get their own groves', () => {
+  test('ruins stay bare', () => {
     const cells: Array<[number, number]> = [];
     for (let iz = -560; iz < -540; iz++) for (let ix = 300; ix < 340; ix++) cells.push([ix, iz]);
     for (const [ix, iz] of cells) expect(plantInCell(ix, iz, SEED, { onRuin: () => true })).toBeNull();
-    const island = cells.map(([ix, iz]) => plantInCell(ix, iz, SEED, { islandTop: () => 600 })).filter((p) => p !== null);
-    expect(island.length).toBeGreaterThan(0);
-    for (const p of island) expect(p!.feature).toBe('island');
   });
 });
 
@@ -206,17 +295,18 @@ describe('tree collision', () => {
         if (sp === 'bush') { expect(c).toBeNull(); continue; }
         expect(c!.r).toBeGreaterThan(0.15);
         expect(c!.r).toBeLessThan(1.2);
-        // The trunk is each mesh's first tube: rings of `sides` vertices from the foot up.
+        // The trunk is each mesh's first tube: rings of `sides` vertices from the foot up, each closed by a seam vertex.
         const m = mesh(si, v, 0);
-        const sides = sp === 'cactus' ? 16 : 8;
+        const sides = sp === 'cactus' ? 16 : 12;
+        const ring = sides + 1;
         const at = (k: number) => { const o = ((m.baseVertex + k) * VERTEX_BYTES) / 4; return [f32[o], f32[o + 1], f32[o + 2]]; };
-        const ringY = (i: number) => { let y = 0; for (let k = 0; k < sides; k++) y += at(i * sides + k)[1]; return y / sides; };
+        const ringY = (i: number) => { let y = 0; for (let k = 0; k < sides; k++) y += at(i * ring + k)[1]; return y / sides; };
         for (const h of [0.3, 0.9, 1.5]) {
           let i = 0;
           while (ringY(i + 1) < h) i++;
           const f = (h - ringY(i)) / (ringY(i + 1) - ringY(i));
           for (let k = 0; k < sides; k++) {
-            const a = at(i * sides + k), b = at((i + 1) * sides + k);
+            const a = at(i * ring + k), b = at((i + 1) * ring + k);
             const x = a[0] + (b[0] - a[0]) * f, z = a[2] + (b[2] - a[2]) * f;
             expect(Math.hypot(x - c!.x, z - c!.z)).toBeLessThan(c!.r + 0.05);
           }

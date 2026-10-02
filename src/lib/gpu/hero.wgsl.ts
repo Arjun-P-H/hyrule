@@ -3,15 +3,28 @@
  * demoShader.ts (signed-distance body from capsules around the rig joints,
  * sphere-traced inside its bounding sphere, soft shadow, contact darkening,
  * stylized shading). Uniforms are the rig's camera-relative packing
- * (rig.ts packHeroUniforms), repacked to WGSL layout by packHeroWgsl().
+ * (rig.ts packHeroUniforms), repacked to WGSL layout by packHeroWgsl(),
+ * which adds the box round every part: the camera's rays are traced only
+ * where they cross it, and the renderer scissors the hero's pass to its
+ * outline on screen. (The soft shadow keeps the sphere: rays passing near the
+ * hero outside the box still darken its penumbra.)
  */
 
 import { HERO_SHAPE } from '../constants';
-import { HERO_UNIFORM } from '../hero/rig';
+import { HERO_JOINTS, HERO_UNIFORM, J } from '../hero/rig';
 import { wgslF32 as f } from './worldgen.wgsl';
 
-/** WGSL Hero block: 18 joints as vec4, torso and head mat3x3f, bound, misc. */
-export const HERO_BYTES = 18 * 16 + 48 + 48 + 16 + 16;
+/** WGSL Hero block: 18 joints as vec4, torso and head mat3x3f, bound, misc, the box's corners. */
+export const HERO_BYTES = 18 * 16 + 48 + 48 + 16 + 16 + 32;
+/** Where the box's min and max corners sit in the packed block (floats). */
+export const HERO_BOX = 104;
+
+/** How far a part reaches from joint j (the rig's bounding-sphere pads: HERO_SHAPE.*Reach / limbPad). */
+const jointReach = (j: number, glide: number) =>
+  j === J.head ? HERO_SHAPE.headReach
+    : j === J.pelvis || j === J.chest ? HERO_SHAPE.backReach
+      : j === J.glider ? HERO_SHAPE.gliderReach * glide
+        : HERO_SHAPE.limbPad;
 
 /** Repack rig.ts HERO_UNIFORM floats into the WGSL Hero block. */
 export function packHeroWgsl(src: Float32Array, out: Float32Array): void {
@@ -33,6 +46,21 @@ export function packHeroWgsl(src: Float32Array, out: Float32Array): void {
     out[96 + k] = src[HERO_UNIFORM.bound + k];
     out[100 + k] = src[HERO_UNIFORM.misc + k];
   }
+  // The box round every part: each joint padded by its parts' reach (a limb's capsule lies in the
+  // hull of its joints' padded spheres; the box holds them all), the glider's only while it is open.
+  const glide = src[HERO_UNIFORM.misc];
+  const nj = glide > 0 ? HERO_JOINTS : HERO_JOINTS - 1;
+  for (let c = 0; c < 3; c++) { out[HERO_BOX + c] = Infinity; out[HERO_BOX + 4 + c] = -Infinity; }
+  for (let j = 0; j < nj; j++) {
+    const pad = jointReach(j, glide);
+    for (let c = 0; c < 3; c++) {
+      const x = src[3 * j + c];
+      if (x - pad < out[HERO_BOX + c]) out[HERO_BOX + c] = x - pad;
+      if (x + pad > out[HERO_BOX + 4 + c]) out[HERO_BOX + 4 + c] = x + pad;
+    }
+  }
+  out[HERO_BOX + 3] = 0;
+  out[HERO_BOX + 7] = 0;
 }
 
 /** Needs FRAME_WGSL (u), the light API (keyDir, keyCol, skyAmb, bounceCol, skyHorCol: sky.wgsl.ts) and surfaceFog. */
@@ -43,8 +71,20 @@ struct Hero {
   head: mat3x3f,
   bound: vec4f,        // bounding sphere: centre (camera-relative), radius; radius 0 = no hero
   misc: vec4f,         // x glider open 0..1, y ground under the hero (camera-relative), zw sin/cos facing
+  lo: vec4f,           // box round every part (camera-relative): min corner
+  hi: vec4f,           //   and max corner
 };
 @group(0) @binding(5) var<uniform> hero: Hero;
+
+// Where a ray from o along d crosses the hero's box: t in [x, y] (x > y: it misses).
+fn heroBox(o: vec3f, d: vec3f) -> vec2f {
+  let inv = 1.0 / select(d, vec3f(1e-12), abs(d) < vec3f(1e-12));
+  let a = (hero.lo.xyz - o) * inv;
+  let b = (hero.hi.xyz - o) * inv;
+  let n = min(a, b);
+  let x = max(a, b);
+  return vec2f(max(max(n.x, n.y), n.z), min(min(x.x, x.y), x.z));
+}
 
 const HERO_HEAD_REACH: f32 = ${f(HERO_SHAPE.headReach)};
 const HERO_GLIDER_REACH: f32 = ${f(HERO_SHAPE.gliderReach)};
@@ -120,15 +160,21 @@ fn heroMap(p: vec3f) -> vec2f {
   body = min(body, sdCone(q - vec3f(0.0, -0.1, -0.01), 0.16, 0.205, 0.132));
   var r = vec2f(body, 1.0);
   r = hU(r, sdCapsule(p, che, hd, 0.05), 0.0);
-  let bw = vec2f(length(q.xz) - 0.142, abs(q.y - 0.07) - 0.026);
-  r = hU(r, min(max(bw.x, bw.y), 0.0) + length(max(bw, vec2f(0.0))), 4.0);
-  r = hU(r, sdBox3(q - vec3f(0.0, 0.07, 0.143), vec3f(0.032, 0.026, 0.01)), 6.0);
-  r = hU(r, sdCapsule(q, vec3f(-0.15, -0.14, -0.175), vec3f(0.1, 0.34, -0.175), 0.028), 9.0);
-  r = hU(r, sdCapsule(q, vec3f(0.1, 0.34, -0.175), vec3f(0.155, 0.46, -0.175), 0.018), 8.0);
-  r = hU(r, min(sdCapsule(q, vec3f(0.038, 0.372, -0.175), vec3f(0.162, 0.308, -0.175), 0.016),
-                length(q - vec3f(0.164, 0.478, -0.175)) - 0.024), 6.0);
-  let sw = vec2f(heroShieldEdge(q.xy), abs(q.z + 0.222) - 0.015);
-  r = hU(r, min(max(sw.x, sw.y), 0.0) + length(max(sw, vec2f(0.0))), 7.0);
+  // The belt and its buckle (in a sphere of 0.19 m round the belt line), the sword, its sheath and
+  // the shield on the back (0.42 m round their middle): each group only where it could be nearest.
+  if (length(q - vec3f(0.0, 0.07, 0.0)) - 0.19 < r.x) {
+    let bw = vec2f(length(q.xz) - 0.142, abs(q.y - 0.07) - 0.026);
+    r = hU(r, min(max(bw.x, bw.y), 0.0) + length(max(bw, vec2f(0.0))), 4.0);
+    r = hU(r, sdBox3(q - vec3f(0.0, 0.07, 0.143), vec3f(0.032, 0.026, 0.01)), 6.0);
+  }
+  if (length(q - vec3f(0.0, 0.2, -0.2)) - 0.42 < r.x) {
+    r = hU(r, sdCapsule(q, vec3f(-0.15, -0.14, -0.175), vec3f(0.1, 0.34, -0.175), 0.028), 9.0);
+    r = hU(r, sdCapsule(q, vec3f(0.1, 0.34, -0.175), vec3f(0.155, 0.46, -0.175), 0.018), 8.0);
+    r = hU(r, min(sdCapsule(q, vec3f(0.038, 0.372, -0.175), vec3f(0.162, 0.308, -0.175), 0.016),
+                  length(q - vec3f(0.164, 0.478, -0.175)) - 0.024), 6.0);
+    let sw = vec2f(heroShieldEdge(q.xy), abs(q.z + 0.222) - 0.015);
+    r = hU(r, min(max(sw.x, sw.y), 0.0) + length(max(sw, vec2f(0.0))), 7.0);
+  }
 
   if (length(p - hd) - HERO_HEAD_REACH < r.x) {
     let h = (p - hd) * hero.head;
@@ -180,23 +226,26 @@ fn heroMap(p: vec3f) -> vec2f {
   return r;
 }
 
-// Sphere-trace the camera ray (origin 0, camera-relative) inside the bounds.
-fn heroTrace(rd: vec3f) -> f32 {
+// Sphere-trace the camera ray (origin 0, camera-relative) inside the bounds: the hit's distance
+// (negative: none) and the material id there.
+fn heroTrace(rd: vec3f) -> vec2f {
   let c = hero.bound.xyz;
   let b = dot(c, rd);
   var h = b * b - dot(c, c) + hero.bound.w * hero.bound.w;
-  if (h < 0.0) { return -1.0; }
+  if (h < 0.0) { return vec2f(-1.0, 0.0); }
   h = sqrt(h);
-  var t = max(b - h, 0.0);
-  let t1 = b + h;
-  if (t1 < 0.0) { return -1.0; }
+  // Only where the ray is in both the sphere and the box (nothing of the hero lies outside the box).
+  let bx = heroBox(vec3f(0.0), rd);
+  var t = max(max(b - h, 0.0), bx.x);
+  let t1 = min(b + h, bx.y);
+  if (t1 < t) { return vec2f(-1.0, 0.0); }
   for (var i = 0; i < HERO_STEPS; i++) {
-    let d = heroMap(rd * t).x;
-    if (d < max(0.0015, 0.4 * t * u.footprint)) { return t; }
-    t += d * 0.9;
+    let d = heroMap(rd * t);
+    if (d.x < max(0.0015, 0.4 * t * u.footprint)) { return vec2f(t, d.y); }
+    t += d.x * 0.9;
     if (t > t1) { break; }
   }
-  return -1.0;
+  return vec2f(-1.0, 0.0);
 }
 
 // Soft shadow the hero casts on a camera-relative point (itself included).
@@ -223,6 +272,8 @@ fn heroShadow(pr: vec3f) -> f32 {
 
 // Ambient contact darkening on the ground around the hero's legs.
 fn heroContactAO(pr: vec3f) -> f32 {
+  // (the legs' capsule reaches 1.3 m from the pelvis at most: 3 m away the darkening is below 1e-9)
+  if (dot(pr - hero.j[0].xyz, pr - hero.j[0].xyz) > 9.0) { return 1.0; }
   let d = sdCapsule(pr, hero.j[0].xyz, 0.5 * (hero.j[11].xyz + hero.j[15].xyz), 0.18);
   return 1.0 - 0.5 * exp(-18.0 * d * max(d, 0.0) - 2.0 * max(-d, 0.0));
 }
@@ -280,10 +331,10 @@ fn heroNormal(pr: vec3f, tH: f32) -> vec3f {
   return normalize(n);
 }
 
-// sh: sun visibility (terrain soft shadow × the hero's own shadow).
-fn heroShade(rd: vec3f, tH: f32, n: vec3f, sh: f32) -> vec3f {
+// sh: sun visibility (terrain soft shadow × the hero's own shadow); id: the material there (heroTrace).
+fn heroShade(rd: vec3f, tH: f32, id: f32, n: vec3f, sh: f32) -> vec3f {
   let pr = rd * tH;
-  let alb = heroAlbedo(i32(heroMap(pr).y + 0.5), pr);
+  let alb = heroAlbedo(i32(id + 0.5), pr);
   let spec = alb.a;
   let L = keyDir();
   let kc = keyCol(u.camPos.y + pr.y);

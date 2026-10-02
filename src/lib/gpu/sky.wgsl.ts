@@ -494,14 +494,58 @@ fn skyLut(d: vec3f) -> vec3f {
 // round glow of haze toward a low sun). Lifted at twilight less than the dome.
 const FOG_MIE: f32 = 0.55;
 fn fogInscatter(rd: vec3f) -> vec3f {
-  let c1 = dot(rd.xz, sky.keyAz.xy) * inverseSqrt(max(dot(rd.xz, rd.xz), 1e-8));
-  let ring = max(skyLight.hor.rgb + skyLight.hor1.rgb * c1 + skyLight.hor2.rgb * (2.0 * c1 * c1 - 1.0), vec3f(0.0));
-  let air = mix(skyLight.hor.rgb, ring, exp(-abs(rd.y) * 7.0));
-  let mu = dot(rd, keyDir());
-  let g = 0.72;
-  let x = max(1.0 + g * g - 2.0 * g * mu, 1e-3);
-  let hg = (1.0 - g * g) / (4.0 * PI_S * x * sqrt(x));
-  return softClip(air * sqrt(skyLight.grade.w) + sky.camKey.rgb * (hg * FOG_MIE), skyLight.grade.x);
+  // (colours in half precision: hf, hv3)
+  let c1 = hf(dot(rd.xz, sky.keyAz.xy) * inverseSqrt(max(dot(rd.xz, rd.xz), 1e-8)));
+  let ring = max(hv3(skyLight.hor.rgb) + hv3(skyLight.hor1.rgb) * c1 + hv3(skyLight.hor2.rgb) * (2.0 * c1 * c1 - 1.0), hv3(0.0));
+  let air = mix(hv3(skyLight.hor.rgb), ring, exp(hf(-abs(rd.y) * 7.0)));
+  let mu = hf(dot(rd, keyDir()));
+  let g = hf(0.72);
+  let x = max(1.0 + g * g - 2.0 * g * mu, hf(1e-3));
+  let hg = (1.0 - g * g) / (hf(4.0 * PI_S) * x * sqrt(x));
+  // Looking up (at a sky island) the haze takes the colour of the sky behind it, not the horizon's
+  // (the dome looked up only where it shows: not along the ground, where nearly every pixel looks).
+  let up = smoothstep(0.06, 0.45, rd.y);
+  var haze = air * hf(sqrt(skyLight.grade.w));
+  if (up > 0.0) { haze = mix(haze, hv3(skyLut(vec3f(rd.x, max(rd.y, 0.0), rd.z))), hf(up)); }
+  return softClip(vec3f(haze + hv3(sky.camKey.rgb) * (hg * hf(FOG_MIE))), skyLight.grade.x);
+}
+
+// The cloud deck (CLOUD_PLANE) at chunk-local xz, seen from tc metres: its coverage and thickness.
+fn cloudDeck(xz: vec2f, tc: f32) -> vec2f {
+  let cp = xz + u.origin + vec2f(u.time * 6.0, u.time * 2.0);
+  let dpc = max(tc * u.footprint, 0.02);
+  let c = fbmN(cp.x * F_CLOUD, cp.y * F_CLOUD, u.seed + 501, CLOUD_OCT, 2.0, 0.5, dpc, F_CLOUD, ASUM_CLOUD);
+  return vec2f(smoothstep(0.42 + sky.clouds.x, 0.78 + sky.clouds.x, 0.5 + 0.5 * c), smoothstep(0.2, 0.9, c));
+}
+
+// Its colour seen along rd, lit by the key light at its height (so it keeps the sunset's glow after
+// the land loses it): from below silver toward the light and lit from beneath when it is low; from
+// above (a sky island's view), its sunlit tops.
+fn cloudColour(rd: vec3f, thick: f32, above: bool) -> vec3f {
+  let kd = keyDir();
+  let lc = keyCol(CLOUD_PLANE) * sky.clouds.y;
+  let mu = max(dot(rd, kd), 0.0);
+  let amb = (skyLight.ambUp.rgb * (0.62 + 0.32 * (1.0 - thick)) + skyLight.hor.rgb * 0.25) * sky.clouds.y;
+  if (above) {
+    let tops = lc * (0.12 + 0.55 * max(kd.y, 0.0) + 0.25 * pow(mu, 4.0)) * (0.8 + 0.3 * thick);
+    return softClip(amb * 1.1 + tops, skyLight.grade.x);
+  }
+  let silver = pow(mu, 6.0) * (1.4 - thick) * 0.9;
+  let under = smoothstep(0.1, -0.04, kd.y);
+  let lit = lc * (0.2 + 0.2 * max(kd.y, 0.0) + silver + under * (0.6 - 0.25 * thick));
+  return softClip(amb + lit * (1.0 - 0.45 * thick), skyLight.grade.x);
+}
+
+// The cloud deck between the camera and a surface at height h, t along rd: up through it at a sky
+// island, or down through it on the land from one (its coverage there over the surface).
+fn cloudVeil(col: vec3f, t: f32, h: f32, rd: vec3f) -> vec3f {
+  let y0 = u.camPos.y;
+  if ((y0 - CLOUD_PLANE) * (h - CLOUD_PLANE) >= 0.0 || abs(rd.y) < 1e-4) { return col; }
+  let tc = (CLOUD_PLANE - y0) / rd.y;
+  if (tc <= 0.0 || tc >= t) { return col; }
+  let cl = cloudDeck(u.camPos.xz + rd.xz * tc, tc);
+  let fade = exp(-tc * 6.0e-5) * smoothstep(0.02, 0.12, abs(rd.y));
+  return mix(col, cloudColour(rd, cl.y, y0 > CLOUD_PLANE), cl.x * fade);
 }
 
 // Height fog along the view ray (as the classic raster sky), with its density
@@ -511,15 +555,24 @@ fn fogDepth(y0: f32, t: f32, rdy: f32, H: f32) -> f32 {
   if (abs(k) < 1e-3) { return t * exp(-y0 / H); }
   return t * (exp(-y0 / H) - exp(-(y0 / H + k))) / k;
 }
-fn surfaceFog(col: vec3f, t: f32, h: f32, rd: vec3f) -> vec3f {
+// The fog's optical depth over t metres along rd (surfaceFogOd); past FOG_OPAQUE the surface's own
+// colour no longer shows, so a surface there need not be shaded at all.
+const FOG_OPAQUE: f32 = 5.82;
+fn fogOd(t: f32, rd: vec3f) -> f32 {
   let y0 = max(u.camPos.y, 0.0);
   var od = SIGMA_FOG * sky.fog.x * fogDepth(y0, t, rd.y, FOG_H);
   if (sky.fog.y > 0.0) { od += sky.fog.y * fogDepth(max(y0 - W_LEVEL, 0.0), t, rd.y, sky.fog.z); }
-  if (od < 0.0005) { return col; }
+  return od;
+}
+fn surfaceFog(col: vec3f, t: f32, h: f32, rd: vec3f) -> vec3f { return surfaceFogOd(col, t, h, rd, fogOd(t, rd)); }
+fn surfaceFogOd(col: vec3f, t: f32, h: f32, rd: vec3f, od: f32) -> vec3f {
+  if (STUB_FOGALL) { return col; }
+  if (od < 0.0005) { return cloudVeil(col, t, h, rd); }
   let ins = fogInscatter(rd);
-  if (od > 5.82) { return ins; }
-  let T = exp(-vec3f(0.58, 0.72, 0.95) * od);
-  return col * T + ins * (1.0 - T);
+  if (od > FOG_OPAQUE) { return cloudVeil(ins, t, h, rd); }
+  let T = exp(hv3(-0.58, -0.72, -0.95) * hf(od));
+  // (the deck veils the fogged surface as it veils the sky round it)
+  return cloudVeil(vec3f(hv3(col) * T + hv3(ins) * (1.0 - T)), t, h, rd);
 }
 
 // The water's sky: the dome without its discs (the key light's glint stands in).
@@ -682,25 +735,12 @@ fn shadeSky(ro: vec3f, rd: vec3f) -> vec3f {
   }
   // the moon over the sky behind it, and a soft corona over the air's own scattering of its light
   col += (m.rgb * m.a + sky.moonDisc.rgb * 0.05 * exp(-acos(clamp(dot(rd, sky.moon.xyz), -1.0, 1.0)) / 0.05) * sky.moonE.w * night) * inv;
-  // clouds: lit by the key light at their height (so they keep the sunset's glow
-  // after the land loses it), silver toward the light, lit from below when it is low
+  // clouds (cloudDeck, cloudColour): seen from below, against the sky
   if (rd.y > 0.02 && ro.y < CLOUD_PLANE) {
     let tc = (CLOUD_PLANE - ro.y) / rd.y;
-    let cp = ro.xz + rd.xz * tc + u.origin + vec2f(u.time * 6.0, u.time * 2.0);
-    let dpc = max(tc * u.footprint, 0.02);
-    let c = fbmN(cp.x * F_CLOUD, cp.y * F_CLOUD, u.seed + 501, CLOUD_OCT, 2.0, 0.5, dpc, F_CLOUD, ASUM_CLOUD);
-    let cov = smoothstep(0.42 + sky.clouds.x, 0.78 + sky.clouds.x, 0.5 + 0.5 * c);
-    let thick = smoothstep(0.2, 0.9, c);
-    let kd = keyDir();
-    let lc = keyCol(CLOUD_PLANE) * sky.clouds.y;
-    let mu = max(dot(rd, kd), 0.0);
-    let silver = pow(mu, 6.0) * (1.4 - thick) * 0.9;
-    let under = smoothstep(0.1, -0.04, kd.y);
-    let lit = lc * (0.2 + 0.2 * max(kd.y, 0.0) + silver + under * (0.6 - 0.25 * thick));
-    let amb = (skyLight.ambUp.rgb * (0.62 + 0.32 * (1.0 - thick)) + skyLight.hor.rgb * 0.25) * sky.clouds.y;
-    let cloudCol = softClip(amb + lit * (1.0 - 0.45 * thick), skyLight.grade.x);
+    let cl = cloudDeck(ro.xz + rd.xz * tc, tc);
     let fade = exp(-tc * 6.0e-5) * smoothstep(0.02, 0.12, rd.y);
-    col = mix(col, cloudCol, cov * fade);
+    col = mix(col, cloudColour(rd, cl.y, false), cl.x * fade);
   }
   return col;
 }
@@ -710,15 +750,17 @@ fn shadeSky(ro: vec3f, rd: vec3f) -> vec3f {
 // shoulder), with the exposure the probe adapted, the hour's saturation, and
 // a shift toward blue for the eye's night vision.
 fn outputTransform(col: vec3f) -> vec3f {
-  var c = col * skyLight.grade.x;
-  let l = dot(c, LUMA);
-  c *= mix(vec3f(0.9, 0.97, 1.14), vec3f(1.04, 1.0, 0.94), smoothstep(0.015, 0.35, l));
-  c += vec3f(0.004, 0.006, 0.011) * (1.0 - smoothstep(0.0, 0.08, l));
-  let ln = dot(c, LUMA);
-  c = mix(c, ln * vec3f(0.62, 0.82, 1.18), sky.grade.z * 0.4);
-  c = clamp((c * (2.51 * c + 0.03)) / (c * (2.43 * c + 0.59) + 0.14), vec3f(0.0), vec3f(1.0));
-  let l2 = dot(c, LUMA);
-  return mix(vec3f(l2), c, sky.grade.y);
+  // (in half precision: hf, hv3)
+  let LH = hv3(LUMA);
+  var c = hv3(col * skyLight.grade.x);
+  let l = dot(c, LH);
+  c *= mix(hv3(0.9, 0.97, 1.14), hv3(1.04, 1.0, 0.94), smoothstep(hf(0.015), hf(0.35), l));
+  c += hv3(0.004, 0.006, 0.011) * (1.0 - smoothstep(hf(0.0), hf(0.08), l));
+  let ln = dot(c, LH);
+  c = mix(c, ln * hv3(0.62, 0.82, 1.18), hf(sky.grade.z * 0.4));
+  c = clamp((c * (2.51 * c + 0.03)) / (c * (2.43 * c + 0.59) + 0.14), hv3(0.0), hv3(1.0));
+  let l2 = dot(c, LH);
+  return vec3f(mix(hv3(l2), c, hf(sky.grade.y)));
 }
 `;
 }

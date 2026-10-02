@@ -354,27 +354,44 @@ export const QUALITY_PRESETS: QualityPreset[] = [
 ];
 
 /**
- * Sky islands (TotK-style floating landmasses), placed by hash: at most one
- * per `cell` square, never crossing its border. Top: grassy relief over a
- * jagged outline; underside: a cliff wall then an inverted rocky mountain.
- * Top and underside meet exactly at the rim. Mirrored by the WGSL twin
- * (src/lib/gpu/skyIslands.wgsl.ts); src/lib/skyIslands.ts is the CPU twin.
+ * The sky realm (src/lib/skyworld/): archipelagos — a great hub island,
+ * satellites round it joined by natural rock arches, small isles and
+ * floating rocks — and lone isles between them, all above the highest peak
+ * and the cloud deck. Each island has a sky biome of its own and, where it
+ * is wet enough, a lake whose stream pours off the rim as a waterfall that
+ * turns to mist on the way down. Placed by hash (pure functions of cell and
+ * seed); ranges are [min, max]. The WGSL twin (gpu/skyIslands.wgsl.ts)
+ * evaluates the same surfaces from what the CPU uploads.
  */
-export const SKY_ISLANDS = {
-  cell: 2048,         // m (dyadic) — one candidate per cell
-  probability: 0.32,
-  radiusMin: 110,     // m — top radius before the outline's wobble
-  radiusMax: 320,
-  altitudeMin: 430,   // m — base height of the top surface
-  altitudeMax: 820,
-  depthMin: 0.55,     // underside depth, × radius
-  depthMax: 1.0,
-  hill: 16,           // m — relief of the top
-  cliff: 26,          // m — rim wall below the top
-  rimDrop: 2.5,       // m — the top rounds down this far at the rim
-  outline: 0.14,      // radial wobble of the outline
-  inset: 0.2,         // centres stay within [inset, 1 − inset] of their cell
+export const SKY_REALM = {
+  archCell: 8192,           // m — one candidate archipelago per cell (= CHUNK_SIZE)
+  archProbability: 0.6,
+  archReach: 3000,          // m — nothing of an archipelago lies farther from its centre
+  hubRadius: [650, 1250],   // m — outline radius before the wobble
+  hubTop: [2050, 2500],     // m — base height of the hub's top
+  satellites: [3, 6],
+  satRadius: [150, 420],
+  satGap: [170, 460],       // m — open sky between a satellite's outline and the hub's
+  isles: [2, 6],            // small isles farther out
+  isleRadius: [45, 120],
+  debris: [5, 12],          // floating rocks round the islands
+  debrisRadius: [5, 18],
+  isleCell: 2048,           // m — lone isles between archipelagos, one candidate per cell
+  isleProbability: 0.22,
+  loneRadius: [80, 280],
+  floor: 1400,              // m — no island reaches lower (the terrain tops out at MAX_WORLD_H)
+  topMax: 2900,             // m
+  rimDrop: 2.5,             // m — the top rounds down this far at the rim
+  outline: [0.07, 0.15],    // radial wobble of an outline
+  linkSlope: 0.3,           // steepest arch deck (rise per metre)
 } as const;
+
+/**
+ * Fly mode's ceiling (m): the WebGL2 ray-march keeps its camera under its
+ * early-exit height (MAX_WORLD_H, and draws no sky realm); WebGPU flies up
+ * past the sky realm's highest tops, so every island can be reached.
+ */
+export const FLY_CEILING = { webgl2: 1150, webgpu: SKY_REALM.topMax + 600 } as const;
 
 /**
  * Ruins and shrines (Zonai-style), placed by hash: src/lib/ruins.ts builds

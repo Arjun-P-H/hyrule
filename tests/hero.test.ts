@@ -7,6 +7,7 @@ import {
 import { createHeroRig, updateHeroRig, packHeroUniforms, J, HERO_JOINTS, HERO_UNIFORM, type HeroRig } from '../src/lib/hero/rig';
 import { createHeroCamera, updateHeroCamera } from '../src/lib/hero/camera';
 import { TERRAIN_FS, minifyGlsl, withHero } from '../src/components/terrain/demoShader';
+import { HERO_BOX, HERO_BYTES, packHeroWgsl } from '../src/lib/gpu/hero.wgsl';
 import { transformShader } from '../bench/gpu/runner';
 
 /**
@@ -465,6 +466,41 @@ describe('Hero rig (procedural animation)', () => {
         expect(dot(rt, [up[1] * fw[2] - up[2] * fw[1], up[2] * fw[0] - up[0] * fw[2], up[0] * fw[1] - up[1] * fw[0]])).toBeCloseTo(1, 5);
       }
       expect(out[HERO_UNIFORM.bound + 3]).toBeGreaterThan(0.8);
+    }
+  });
+});
+
+describe('Hero WGSL packing (hero.wgsl.ts)', () => {
+  it("the parts' box holds every joint padded by its reach, inside the bounding sphere's cube", () => {
+    const poses: Array<() => HeroState> = [
+      () => createHeroState(FLAT[0], FLAT[1], FLAT_YAW, SEED),
+      () => { const s = createHeroState(FLAT[0], FLAT[1], 0, SEED); placeHero(s, s.x, s.ground + 20, s.z, 0, 0, 0, 0, SEED); s.move = 'glide'; return s; },
+      () => { const s = createHeroState(WALL[0], WALL[1], WALL_UP, SEED); s.move = 'climb'; return s; },
+      () => createHeroState(DEEP[0], DEEP[1], 0, SEED),
+    ];
+    for (const make of poses) {
+      const s = make();
+      const r = createHeroRig();
+      for (let i = 0; i < 90; i++) updateHeroRig(r, s, DT);
+      const src = new Float32Array(HERO_UNIFORM.length);
+      packHeroUniforms(r, s, s.x + 3, s.y + 2, s.z - 4, src);
+      const out = new Float32Array(HERO_BYTES / 4);
+      packHeroWgsl(src, out);
+      const glide = src[HERO_UNIFORM.misc];
+      const b = HERO_UNIFORM.bound;
+      for (let j = 0; j < (glide > 0 ? HERO_JOINTS : HERO_JOINTS - 1); j++) {
+        const pad = j === J.head ? HERO_SHAPE.headReach : j === J.pelvis || j === J.chest ? HERO_SHAPE.backReach
+          : j === J.glider ? HERO_SHAPE.gliderReach * glide : HERO_SHAPE.limbPad;
+        for (let c = 0; c < 3; c++) {
+          const x = src[3 * j + c];
+          expect(x - pad).toBeGreaterThanOrEqual(out[HERO_BOX + c] - 1e-5);
+          expect(x + pad).toBeLessThanOrEqual(out[HERO_BOX + 4 + c] + 1e-5);
+        }
+      }
+      for (let c = 0; c < 3; c++) {
+        expect(out[HERO_BOX + c]).toBeGreaterThanOrEqual(src[b + c] - src[b + 3] - 1e-4);
+        expect(out[HERO_BOX + 4 + c]).toBeLessThanOrEqual(src[b + c] + src[b + 3] + 1e-4);
+      }
     }
   });
 });

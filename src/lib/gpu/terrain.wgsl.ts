@@ -17,12 +17,13 @@
 import { WORLD_WGSL, wgslF32 as f } from './worldgen.wgsl';
 import { HERO_WGSL, NO_HERO_WGSL } from './hero.wgsl';
 import { grassWGSL, type GrassSpec } from './grass.wgsl';
-import { SKY_ISLANDS_WGSL } from './skyIslands.wgsl';
+import { skyRealmWGSL } from './skyRealm.wgsl';
 import { WATERFALLS_WGSL } from './waterfalls.wgsl';
 import { RUINS_WGSL, RUIN_SITES_WGSL } from './ruins.wgsl';
 import { forestWGSL, type ForestSpec } from './forest.wgsl';
 import { CLASSIC_LIGHT_WGSL, cycleSkyWGSL } from './sky.wgsl';
 import { CAMERA, MARCH, SHADOW } from '../constants';
+import { RING_BLOCK, ringBlockOrder } from './rings';
 import { PATH_N, SKY } from '../sky/celestial';
 
 type CachedOptions = {
@@ -50,6 +51,35 @@ export const GEN_BYTES = 48;
 export const PROBE_BYTES = 32;
 /** Raster mesh uniform block: 3 vec4, then per ring a corner and a centre vec4, then rings + 1 texture offsets. */
 export const meshBytes = (rings: number) => 16 * (3 + 2 * rings + rings + 1);
+
+/**
+ * The colour arithmetic's types: hf / hv3 are f16 / vec3<f16> where the
+ * device has shader-f16 (half the registers, twice the rate on this GPU:
+ * the fog's colours, the tone map and the gamma, after the lighting), else
+ * f32 / vec3f. Positions, distances and depths stay f32 everywhere.
+ */
+const HALF_WGSL = (f16: boolean) => f16
+  ? 'enable f16;\nalias hf = f16;\nalias hv3 = vec3<f16>;'
+  : 'alias hf = f32;\nalias hv3 = vec3f;';
+
+const NO_TINT_WGSL = /* wgsl */ `
+fn groundTint(col: vec3f, veg: f32, slope: f32, g: vec2f, seed: i32) -> vec3f { return col; }
+fn groundTintFrom(col: vec3f, veg: f32, slope: f32, patchN: f32, patchHue: f32) -> vec3f { return col; }
+`;
+
+/**
+ * The noise fields under the ground's colour at world g — moisture, the
+ * vegetation clumping, the grass's density and hue patches — which the
+ * terrain's shading evaluated per pixel every frame; baked once per lattice
+ * point into the material layer (by sunShader / horizonShader) and sampled.
+ * Height and slope, which shape the colour sharply, stay per pixel.
+ */
+const GROUND_FIELDS_WGSL = /* wgsl */ `
+fn groundFields(g: vec2f, seed: i32) -> vec4f {
+  return vec4f(moisture(g, seed), vnoise(g.x / VEG_WL, g.y / VEG_WL, seed + 171),
+    0.5 + 0.5 * vnoise(g.x * 0.045, g.y * 0.045, seed + 7777), 0.5 + 0.5 * vnoise(g.x * 0.033, g.y * 0.033, seed + 7707));
+}
+`;
 
 const FRAME_WGSL = /* wgsl */ `
 struct Frame {
@@ -121,6 +151,8 @@ ${opts.sun === 'classic' ? `
 fn sunAt(xz: vec2f) -> f32 {
   return clipLookup(sunTex, xz, vec2f(0.0));
 }
+// The visibility in a texel of the sun layer already fetched (groundCacheAt).
+fn sunFrom(s: vec4f) -> f32 { return s.x; }
 ` : opts.sun === 'path' ? `
 // Cached horizons of the ground along the sun's path (clipmapCache.ts,
 // horizonShader below): the key light (sky.key, on the path at angle w) is
@@ -150,10 +182,30 @@ fn sunAt(xz: vec2f) -> f32 {
   let th = sky.key.w;
   return clamp(PATH_SOFT * (th - h.x), 0.0, 1.0) * clamp(PATH_SOFT * (h.y - th), 0.0, 1.0);
 }
+// The same from a texel of the sun layer already fetched (groundCacheAt).
+fn sunFrom(s: vec4f) -> f32 {
+  let th = sky.key.w;
+  return clamp(PATH_SOFT * (th - s.x), 0.0, 1.0) * clamp(PATH_SOFT * (s.y - th), 0.0, 1.0);
+}
 ` : ''}`;
 }
 
 const SHADE_WGSL = /* wgsl */ `
+// Bench-only stubs (pipeline-overridable constants; the game never sets them): leave out one part
+// of the terrain's shading to measure what it costs.
+override STUB_BIOME: bool = false;
+override STUB_GRAD: bool = false;
+override STUB_SHADOW: bool = false;
+override STUB_FOG: bool = false;
+override STUB_SHADE: bool = false;
+// Bench only: shade the raster ground per pixel as before its clipmap material (shadeSurface), to compare.
+override PER_PIXEL_GROUND: bool = false;
+// Bench only, for every surface: no tone mapping or gamma (display), no fog (surfaceFog).
+override STUB_DISPLAY: bool = false;
+override STUB_FOGALL: bool = false;
+// Bench only: the raster ground's normal from the sun layer's cached gradient (smooth) instead of the
+// cached heights' own slopes at the pixel's footprint (gradientAt, as shadeSurface).
+override CACHED_GRAD: bool = false;
 const SH_START: f32 = ${f(SHADOW.startT)};
 const SH_FOOT: f32 = ${f(SHADOW.footprintScale)};
 const SH_K: f32 = ${f(SHADOW.penumbraK)};
@@ -198,7 +250,9 @@ fn shadeSurface(terrain: bool, p: vec3f, rd: vec3f, tS: f32, eWater: f32) -> vec
 
   var n: vec3f;
   var gradLenSq = 0.0;
-  if (terrain) {
+  if (terrain && STUB_GRAD) {
+    n = vec3f(0.0, 1.0, 0.0);
+  } else if (terrain) {
     let grad2 = gradientAt(p.xz, dp, dp);
     gradLenSq = dot(grad2, grad2);
     let invLen = inverseSqrt(gradLenSq + 1.0);
@@ -213,7 +267,9 @@ fn shadeSurface(terrain: bool, p: vec3f, rd: vec3f, tS: f32, eWater: f32) -> vec
 
   let ndl = max(dot(n, keyDir()), 0.0);
   var sh = 0.0;
-  if (!terrain || ndl > 0.0) {
+  if (terrain && STUB_SHADOW) {
+    sh = 1.0;
+  } else if (!terrain || ndl > 0.0) {
     var so = vec3f(0.0, 0.15, 0.0);
     if (terrain) { so = n * 0.15; }
     sh = sunVisibility(p, so);
@@ -223,15 +279,18 @@ fn shadeSurface(terrain: bool, p: vec3f, rd: vec3f, tS: f32, eWater: f32) -> vec
   var col: vec3f;
   if (terrain) {
     let e = p.y;
-    let T = temperature(g, e);
-    let M = moisture(g, u.seed);
-    let vegNoise = vnoise(g.x / VEG_WL, g.y / VEG_WL, u.seed + 171);
-    let bio = biomeColor(T, M, e, sqrt(gradLenSq), vegNoise);
-    let albedo = bedTint(groundTint(bio.col, bio.veg, sqrt(gradLenSq), g), p);
+    var albedo = vec3f(0.1, 0.16, 0.05);
+    if (!STUB_BIOME) {
+      let T = temperature(g, e);
+      let M = moisture(g, u.seed);
+      let vegNoise = vnoise(g.x / VEG_WL, g.y / VEG_WL, u.seed + 171);
+      let bio = biomeColor(T, M, e, sqrt(gradLenSq), vegNoise);
+      albedo = bedTint(groundTint(bio.col, bio.veg, sqrt(gradLenSq), g, u.seed), p);
+    }
     let sunTerm = albedo * keyCol(p.y) * ndl * sh * causticsAt(p);
     let ambTerm = albedo * skyAmb(n, 0.22 + 0.28 * max(n.y, 0.0)) * heroAOAt(p - u.camPos);
     col = sunTerm + ambTerm;
-    col = surfaceFog(col, tS, p.y, rd);
+    if (!STUB_FOG) { col = surfaceFog(col, tS, p.y, rd); }
   } else {
     let depth = max(W_LEVEL - eWater, 0.0);
     let shallow = vec3f(0.110, 0.320, 0.300);
@@ -267,7 +326,8 @@ fn shadeSurface(terrain: bool, p: vec3f, rd: vec3f, tS: f32, eWater: f32) -> vec
 }
 
 fn display(col: vec3f) -> vec4f {
-  return vec4f(pow(max(outputTransform(col), vec3f(0.0)), vec3f(1.0 / 2.2)), 1.0);
+  if (STUB_DISPLAY) { return vec4f(col, 1.0); }
+  return vec4f(vec3f(pow(max(hv3(outputTransform(col)), hv3(0.0)), hv3(1.0 / 2.2))), 1.0);
 }
 
 // Camera ray through a framebuffer position (WebGPU y runs down, the GLSL's
@@ -306,7 +366,7 @@ fn shadeSky(ro: vec3f, rd: vec3f) -> vec3f {
 
 /** The ray-march renderer: fullscreen triangle, one fragment per pixel. */
 export function terrainShader(opts: TerrainShaderOptions): string {
-  return /* wgsl */ `
+  return /* wgsl */ `${HALF_WGSL(false)}
 ${WORLD_WGSL}
 ${FRAME_WGSL}
 ${heightSourceWGSL(opts)}
@@ -314,7 +374,7 @@ ${CLASSIC_LIGHT_WGSL}
 ${SHADE_WGSL}
 ${CLASSIC_SHADE_SKY_WGSL}
 ${NO_HERO_WGSL}
-fn groundTint(col: vec3f, veg: f32, slope: f32, g: vec2f) -> vec3f { return col; }
+fn groundTint(col: vec3f, veg: f32, slope: f32, g: vec2f, seed: i32) -> vec3f { return col; }
 fn sunVisibility(p: vec3f, so: vec3f) -> f32 { return softShadow(p + so, u.footprint); }
 fn surfaceFog(col: vec3f, t: f32, h: f32, rd: vec3f) -> vec3f { return applyFog(col, t, h, rd); }
 fn outputTransform(col: vec3f) -> vec3f { return col; }
@@ -468,19 +528,50 @@ fn skyGrade(col: vec3f, rd: vec3f) -> vec3f {
 // Height fog integrated along the view ray from the camera (the march
 // renderer's applyFog takes the density at the surface point for the whole
 // ray, which fogs a view from a sky island as if it were at sea level).
-fn surfaceFog(col: vec3f, t: f32, h: f32, rd: vec3f) -> vec3f {
+// The fog's optical depth over t metres along rd (surfaceFogOd); past FOG_OPAQUE the surface's own
+// colour no longer shows, so a surface there need not be shaded at all.
+const FOG_OPAQUE: f32 = 5.82;
+fn fogOd(t: f32, rd: vec3f) -> f32 {
   let y0 = max(u.camPos.y, 0.0);
   let k = rd.y * t / FOG_H;
   var along = 1.0;
   if (abs(k) > 1e-3) { along = (1.0 - exp(-k)) / k; }
-  let od = SIGMA_FOG * t * exp(-y0 / FOG_H) * along;
-  if (od < 0.0005) { return col; }
-  // In-scatter: the sky's colour toward rd without the sun's disc (the halo stays).
+  return SIGMA_FOG * t * exp(-y0 / FOG_H) * along;
+}
+fn surfaceFog(col: vec3f, t: f32, h: f32, rd: vec3f) -> vec3f { return surfaceFogOd(col, t, h, rd, fogOd(t, rd)); }
+fn surfaceFogOd(col: vec3f, t: f32, h: f32, rd: vec3f, od: f32) -> vec3f {
+  if (od < 0.0005) { return cloudVeil(col, t, h, rd); }
+  // In-scatter: the sky's colour toward rd without the sun's disc (the halo stays); looking up
+  // (at a sky island) the colour of the sky behind it rather than the horizon's haze.
   let disc = SUN_COL * 6.0 * smoothstep(0.99955, 0.99985, max(dot(rd, SUN), 0.0));
-  let inscatter = (skyColor(rd) - disc + SKY_HOR) * 0.5;
-  if (od > 5.82) { return inscatter; }
+  let inscatter = mix((skyColor(rd) - disc + SKY_HOR) * 0.5, skyGrade(skyColor(rd) - disc, rd), smoothstep(0.06, 0.45, rd.y));
+  if (od > FOG_OPAQUE) { return cloudVeil(inscatter, t, h, rd); }
   let T = exp(-vec3f(0.58, 0.72, 0.95) * od);
-  return col * T + inscatter * (1.0 - T);
+  return cloudVeil(col * T + inscatter * (1.0 - T), t, h, rd);
+}
+
+// The cloud deck (CLOUD_PLANE) at chunk-local xz, seen from tc metres: its coverage and thickness.
+fn cloudDeck(xz: vec2f, tc: f32) -> vec2f {
+  let cp = xz + u.origin + vec2f(u.time * 6.0, u.time * 2.0);
+  let dpc = max(tc * u.footprint, 0.02);
+  let c = fbmN(cp.x * F_CLOUD, cp.y * F_CLOUD, u.seed + 501, CLOUD_OCT, 2.0, 0.5, dpc, F_CLOUD, ASUM_CLOUD);
+  return vec2f(smoothstep(0.42, 0.78, 0.5 + 0.5 * c), c);
+}
+// Its colour: as the classic dome draws it from below; its sunlit tops from above.
+fn cloudColour(rd: vec3f, c: f32, above: bool) -> vec3f {
+  if (above) { return vec3f(0.95) * (0.7 + 0.35 * max(SUN.y, 0.0)); }
+  let shade = 0.85 + 0.30 * (1.0 - smoothstep(0.2, 0.9, c));
+  return vec3f(shade) * (0.62 + 0.38 * max(SUN.y, 0.0));
+}
+// The deck between the camera and a surface at height h, t along rd (see the day–night sky's).
+fn cloudVeil(col: vec3f, t: f32, h: f32, rd: vec3f) -> vec3f {
+  let y0 = u.camPos.y;
+  if ((y0 - CLOUD_PLANE) * (h - CLOUD_PLANE) >= 0.0 || abs(rd.y) < 1e-4) { return col; }
+  let tc = (CLOUD_PLANE - y0) / rd.y;
+  if (tc <= 0.0 || tc >= t) { return col; }
+  let cl = cloudDeck(u.camPos.xz + rd.xz * tc, tc);
+  let fade = exp(-tc * 6.0e-5) * smoothstep(0.02, 0.12, abs(rd.y));
+  return mix(col, cloudColour(rd, cl.y, y0 > CLOUD_PLANE), cl.x * fade);
 }
 
 // The sky's gradient only: the sun's disc and halo come back as the glint.
@@ -491,12 +582,16 @@ ${CLASSIC_SHADE_SKY_WGSL}
 `;
 
 type RasterOptions = CachedOptions & {
+  /** Half-precision colour arithmetic (the device has shader-f16): HALF_WGSL. */
+  f16?: boolean;
   /** Mesh cells per half ring (even). */
   k: number;
   /** Rings (one per clipmap level, starting at level 0). */
   rings: number;
   grass?: GrassSpec | null;
+  /** The sky realm (skyRealm.wgsl.ts), its tops cut along their outlines by clip distances (`clip`) or by discard. */
   islands?: boolean;
+  clip?: boolean;
   ruins?: boolean;
   /** Trees (forest.wgsl.ts), with the measured bounds of their models. */
   forest?: { spec: ForestSpec; bounds: ReadonlyArray<{ top: number; radius: number }> } | null;
@@ -518,14 +613,25 @@ type RasterOptions = CachedOptions & {
  * (corners on the coarser level, centre = its own lower corner) so the morph
  * ends exactly on the coarser ring's triangles.
  */
-const RING_TRIS_WGSL = /* wgsl */ `
+/**
+ * ringTris: a ring's index buffer, its cells block by block (RING_BLOCK² cells
+ * a block, the blocks round the ring's centre by angle: rings.ts
+ * ringBlockOrder) so the renderer can draw only the blocks in view; the
+ * cells under the next finer ring left degenerate.
+ */
+function ringTrisWGSL(k: number): string {
+  const { slot } = ringBlockOrder(k);
+  return /* wgsl */ `
 struct RingJob {
   ring: u32,
-  hole: u32,     // 1: skip the k² cells under the next finer ring
+  hole: u32,     // 1: leave out the k² cells under the next finer ring
   holeOff: vec2i, // where they start, minus k/2
 };
 @group(1) @binding(14) var<uniform> ringJob: RingJob;
 @group(1) @binding(15) var<storage, read_write> ringTrisOut: array<u32>;
+const RING_B: u32 = ${RING_BLOCK}u;
+// Each block's slot in the buffer (row-major blocks).
+const RING_SLOT = array<u32, ${slot.length}>(${Array.from(slot, (x) => `${x}u`).join(', ')});
 
 fn antiDiagonal(h00: f32, h10: f32, h01: f32, h11: f32, hc: f32, haveCentre: bool) -> bool {
   let ma = 0.5 * (h00 + h11);
@@ -539,25 +645,18 @@ fn ringTris(@builtin(global_invocation_id) id: vec3u) {
   let k = RING_SIDE / 2u;
   let side2 = 2u * k;
   let i = id.x;
-  var count = side2 * side2;
-  if (ringJob.hole != 0u) { count -= k * k; }
-  if (i >= count) { return; }
-  // Cell i in row order, the hole's cells left out.
-  var ci = i % side2;
-  var cj = i / side2;
+  if (i >= side2 * side2) { return; }
+  let ci = i % side2;
+  let cj = i / side2;
+  let nb = side2 / RING_B;
+  let o = (RING_SLOT[(cj / RING_B) * nb + ci / RING_B] * RING_B * RING_B + (cj % RING_B) * RING_B + ci % RING_B) * 6u;
+  let v00 = cj * RING_SIDE + ci;
   if (ringJob.hole != 0u) {
     let hx = k / 2u + u32(ringJob.holeOff.x);
     let hz = k / 2u + u32(ringJob.holeOff.y);
-    let below = hz * side2;
-    if (i >= below && i < below + k * k) {
-      let m = i - below;
-      cj = hz + m / k;
-      let c = m % k;
-      ci = select(c + k, c, c < hx);
-    } else if (i >= below + k * k) {
-      let m = i - below - k * k;
-      cj = hz + k + m / side2;
-      ci = m % side2;
+    if (ci >= hx && ci < hx + k && cj >= hz && cj < hz + k) {
+      for (var q = 0u; q < 6u; q++) { ringTrisOut[o + q] = v00; }
+      return;
     }
   }
   let r = ringJob.ring;
@@ -589,11 +688,9 @@ fn ringTris(@builtin(global_invocation_id) id: vec3u) {
       meshHeight(vec2f(P + vec2i(0, st)), l), meshHeight(vec2f(P + vec2i(st, st)), l),
       hc, haveCentre);
   }
-  let v00 = cj * RING_SIDE + ci;
   let v10 = v00 + 1u;
   let v01 = v00 + RING_SIDE;
   let v11 = v01 + 1u;
-  let o = i * 6u;
   if (anti) {
     ringTrisOut[o] = v00; ringTrisOut[o + 1u] = v01; ringTrisOut[o + 2u] = v10;
     ringTrisOut[o + 3u] = v10; ringTrisOut[o + 4u] = v01; ringTrisOut[o + 5u] = v11;
@@ -603,6 +700,7 @@ fn ringTris(@builtin(global_invocation_id) id: vec3u) {
   }
 }
 `;
+}
 
 /**
  * Geometry-clipmap renderer: ring r is a (2k)² grid of cells at spacing
@@ -615,21 +713,21 @@ fn ringTris(@builtin(global_invocation_id) id: vec3u) {
  */
 export function rasterShader(opts: RasterOptions): string {
   const cycle = opts.sky === 'cycle';
-  return /* wgsl */ `
+  const islands = !!opts.islands;
+  return /* wgsl */ `${islands && opts.clip ? 'enable clip_distances;' : ''}
+${HALF_WGSL(!!opts.f16)}
 ${WORLD_WGSL}
 ${FRAME_WGSL}
 ${heightSourceWGSL({ height: 'cached', ...opts, sun: cycle ? 'path' : 'classic' })}
 ${SHADE_WGSL}
 ${HERO_WGSL}
-fn sunVisibility(p: vec3f, so: vec3f) -> f32 { return sunAt(p.xz) * treeShadowAt(p) * islandShadowAt(p, 0xffffffffu); }
+fn sunVisibility(p: vec3f, so: vec3f) -> f32 { return sunAt(p.xz) * treeShadowAt(p) * skyShadowAt(p); }
 
 ${cycle ? cycleSkyWGSL({ sky: 17, light: 18, view: 19 }) : CLASSIC_LIGHT_WGSL + CLASSIC_RASTER_SKY_WGSL}
-${opts.grass ? grassWGSL(opts.grass) : 'fn groundTint(col: vec3f, veg: f32, slope: f32, g: vec2f) -> vec3f { return col; }'}
-${opts.forest ? forestWGSL(opts.forest.spec, opts.forest.bounds) : 'fn treeShadowAt(p: vec3f) -> f32 { return 1.0; }'}
+${opts.grass ? grassWGSL(opts.grass, islands) : NO_TINT_WGSL}
+${opts.forest ? forestWGSL(opts.forest.spec, opts.forest.bounds, islands) : 'fn treeShadowAt(p: vec3f) -> f32 { return 1.0; }'}
 ${opts.ruins ? RUIN_SITES_WGSL + RUINS_WGSL : 'fn inRuinSite(xz: vec2f) -> bool { return false; }'}
-${opts.islands ? SKY_ISLANDS_WGSL + WATERFALLS_WGSL : `
-fn islandTopAt(xz: vec2f, rhoMax: f32) -> f32 { return -1e9; }
-fn islandShadowAt(p: vec3f, skip: u32) -> f32 { return 1.0; }`}
+${islands ? skyRealmWGSL(!!opts.clip) + WATERFALLS_WGSL : 'fn skyShadowAt(p: vec3f) -> f32 { return 1.0; }'}
 
 struct Mesh {
   cam: vec4f,                        // camera rel. the reference lattice point: x, y (height), z; spacing0
@@ -642,6 +740,79 @@ struct Mesh {
 @group(0) @binding(4) var<uniform> mesh: Mesh;
 const RING_SIDE: u32 = ${2 * opts.k + 1}u;
 const CAMERA_NEAR: f32 = ${f(CAMERA.near)};
+
+// The ground's material layer (clipmapCache.ts): its noise fields per lattice point (groundFields).
+@group(0) @binding(28) var matTex: texture_2d_array<f32>;
+
+const GRAD_NEAR: f32 = 60.0;
+const GRAD_FAR: f32 = 120.0;
+
+// Everything the ground's shading reads from the clipmap at xz, from the one level (or two, in a
+// blend band) that holds it: height, the sun layer (light, gradient) and the material.
+struct GroundCache { h: f32, sun: vec4f, mat: vec4f };
+fn groundCacheAt(xz: vec2f) -> GroundCache {
+  let rel = xz - clip.cam.xy;
+  let d = max(abs(rel.x), abs(rel.y));
+  let lf = log2(max(d * clip.cam.z, 1e-6));
+  let lc = clamp(ceil(lf), 0.0, CLIP_LMAX);
+  let l = i32(lc);
+  let L = clip.lv[l];
+  let uv = (rel * L.z + L.xy) * CLIP_INV_N;
+  var g = GroundCache(textureSampleLevel(hTex, hSamp, uv, l, 0.0).r,
+    textureSampleLevel(sunTex, hSamp, uv, l, 0.0), textureSampleLevel(matTex, hSamp, uv, l, 0.0));
+  let b = clamp((lf - lc) / CLIP_BLEND + 1.0, 0.0, 1.0);
+  if (b > 0.0 && lc < CLIP_LMAX) {
+    let L1 = clip.lv[l + 1];
+    let uv1 = (rel * L1.z + L1.xy) * CLIP_INV_N;
+    g.h = mix(g.h, textureSampleLevel(hTex, hSamp, uv1, l + 1, 0.0).r, b);
+    g.sun = mix(g.sun, textureSampleLevel(sunTex, hSamp, uv1, l + 1, 0.0), b);
+    g.mat = mix(g.mat, textureSampleLevel(matTex, hSamp, uv1, l + 1, 0.0), b);
+  }
+  return g;
+}
+
+// The ground at p (its height from gc), seen at distance tS along rd: shadeSurface's terrain
+// shading with its normal, sun and noise fields read from the clipmap instead of evaluated per
+// pixel; the biome and the grass's tint, which turn sharply with height and slope, per pixel.
+fn shadeGround(p: vec3f, rd: vec3f, tS: f32, gc: GroundCache) -> vec3f {
+  // Behind fog too thick to see through, only the fog shows.
+  let od = fogOd(tS, rd);
+  if (od > FOG_OPAQUE && !STUB_FOG) { return surfaceFogOd(vec3f(0.0), tS, p.y, rd, od); }
+  var n = vec3f(0.0, 1.0, 0.0);
+  var grad = vec2f(0.0);
+  if (!STUB_GRAD) {
+    // Near the camera the cached surface's own slopes at the pixel's footprint (gradientAt, as
+    // shadeSurface); out beyond GRAD_NEAR … GRAD_FAR the sun layer's gradient (central differences
+    // over the lattice), which follows the land's smooth contours where the surface's facets would
+    // draw its slopes, and the colours they choose, in texel steps.
+    grad = gc.sun.zw;
+    let far = select(smoothstep(GRAD_NEAR, GRAD_FAR, tS), 1.0, CACHED_GRAD);
+    if (far < 1.0) {
+      let dp = max(tS * u.footprint, 1e-4);
+      grad = mix(gradientAt(p.xz, dp, dp), grad, far);
+    }
+    n = vec3f(-grad.x, 1.0, -grad.y) * inverseSqrt(dot(grad, grad) + 1.0);
+  }
+  let ndl = max(dot(n, keyDir()), 0.0);
+  var sh = 0.0;
+  if (STUB_SHADOW) {
+    sh = 1.0;
+  } else if (ndl > 0.0) {
+    sh = sunFrom(gc.sun) * treeShadowAt(p) * skyShadowAt(p);
+    if (sh > 0.0) { sh = min(sh, heroShadowAt(p - u.camPos)); }
+  }
+  var albedo = vec3f(0.1, 0.16, 0.05);
+  if (!STUB_BIOME) {
+    let slope = length(grad);
+    let bio = biomeColor(temperature(p.xz + u.origin, p.y), gc.mat.x, p.y, slope, gc.mat.y);
+    albedo = bedTint(groundTintFrom(bio.col, bio.veg, slope, gc.mat.z, gc.mat.w), p);
+  }
+  let sunTerm = albedo * keyCol(p.y) * ndl * sh * causticsAt(p);
+  let ambTerm = albedo * skyAmb(n, 0.22 + 0.28 * max(n.y, 0.0)) * heroAOAt(p - u.camPos);
+  var col = sunTerm + ambTerm;
+  if (!STUB_FOG) { col = surfaceFogOd(col, tS, p.y, rd, od); }
+  return col;
+}
 
 fn meshHeight(P: vec2f, l: i32) -> f32 {
   let o = mesh.texOff[l];
@@ -679,18 +850,24 @@ fn vsTerrain(@builtin(vertex_index) vi: u32, @builtin(instance_index) ring: u32)
   return o;
 }
 
-${opts.diag ? RING_TRIS_WGSL : ''}
+${opts.diag ? ringTrisWGSL(opts.k) : ''}
 @fragment
 fn fsTerrain(i: TOut) -> @location(0) vec4f {
   let ro = u.camPos;
   let tS = length(i.rel);
   let rd = i.rel / tS;
   if (ro.y < W_LEVEL) { return underwater(rd); }
+  if (STUB_SHADE) { return vec4f(0.3, 0.45, 0.2, 1.0); }
   // Shade on the cached surface under the mesh point: the triangles cut
   // below it in concave spots, and a shadow ray starting there self-shadows.
   var p = ro + i.rel;
-  p.y = heightAt(p.xz, vec2f(0.0), tS * u.footprint);
-  return display(shadeSurface(true, p, rd, tS, 0.0));
+  if (PER_PIXEL_GROUND) {
+    p.y = heightAt(p.xz, vec2f(0.0), tS * u.footprint);
+    return display(shadeSurface(true, p, rd, tS, 0.0));
+  }
+  let gc = groundCacheAt(p.xz);
+  p.y = gc.h;
+  return display(shadeGround(p, rd, tS, gc));
 }
 
 // Water: one quad at W_LEVEL spanning the march distance around the camera.
@@ -744,12 +921,17 @@ fn fsWater(i: TOut) -> @location(0) vec4f {
   let tS = length(i.rel);
   let rd = i.rel / tS;
   if (ro.y < W_LEVEL) { return underwater(rd); }
+  // Behind fog too thick to see through: the fog alone, laid on opaquely (as the full path would end).
+  let od = fogOd(tS, rd);
+  if (od > FOG_OPAQUE) { return display(surfaceFogOd(vec3f(0.0), tS, W_LEVEL, rd, od)); }
   let p = ro + i.rel;
   let g = p.xz + u.origin;
   let depthV = max(W_LEVEL - heightAt(p.xz, vec2f(0.0), 0.0), 0.0);
-  // Ripples: calmer at the shore, faded out with distance (no sub-pixel noise).
+  // Ripples: calmer at the shore, faded out with distance (no sub-pixel noise; none past 300 m,
+  // where the water's normal is its plane's and its noise is not evaluated).
   let strength = mix(0.03, 0.14, smoothstep(0.0, 1.5, depthV)) * (1.0 - smoothstep(40.0, 300.0, tS));
-  let n = waterNormal(g, u.time, strength);
+  var n = vec3f(0.0, 1.0, 0.0);
+  if (strength > 0.0) { n = waterNormal(g, u.time, strength); }
   let sh = sunVisibility(p, vec3f(0.0, 0.15, 0.0));
   // Light through the water column under this point, per channel (red dies first).
   let path = depthV / max(-rd.y, 0.06);
@@ -762,11 +944,14 @@ fn fsWater(i: TOut) -> @location(0) vec4f {
   let F = 0.02 + 0.98 * pow(1.0 - max(dot(-rd, n), 0.0), 5.0);
   let sd = max(dot(refl, keyDir()), 0.0);
   let glint = pow(sd, 900.0) * 14.0 + pow(sd, 120.0) * 0.3;
-  // Shoreline foam: bands running in, and a line where water meets land.
-  let fnz = vnoise(g.x / 2.3 + u.time * 0.15, g.y / 2.3, 941);
-  let bands = smoothstep(0.55, 0.85, sin(depthV * 14.0 - u.time * 2.4 + fnz * 3.0) * 0.5 + 0.5) * (1.0 - smoothstep(0.05, 0.55, depthV));
-  let edge = 1.0 - smoothstep(0.0, 0.07, depthV);
-  let foam = clamp(max(bands * 0.85, edge) * (0.6 + 0.4 * fnz), 0.0, 1.0);
+  // Shoreline foam: bands running in, and a line where water meets land (none past 0.55 m deep).
+  var foam = 0.0;
+  if (depthV < 0.55) {
+    let fnz = vnoise(g.x / 2.3 + u.time * 0.15, g.y / 2.3, 941);
+    let bands = smoothstep(0.55, 0.85, sin(depthV * 14.0 - u.time * 2.4 + fnz * 3.0) * 0.5 + 0.5) * (1.0 - smoothstep(0.05, 0.55, depthV));
+    let edge = 1.0 - smoothstep(0.0, 0.07, depthV);
+    foam = clamp(max(bands * 0.85, edge) * (0.6 + 0.4 * fnz), 0.0, 1.0);
+  }
   let foamCol = vec3f(0.85, 0.88, 0.9) * (kc * 0.32 * (0.35 + 0.65 * sh) + skyAmb(up, 0.55));
   // Premultiplied: sky reflection and in-scatter over the transmitted bed.
   var col = skyReflect(refl) * F + body * (vec3f(1.0) - T) * (1.0 - F) + kc * glint * sh;
@@ -774,7 +959,7 @@ fn fsWater(i: TOut) -> @location(0) vec4f {
   col = mix(col, foamCol, foam);
   alpha = mix(alpha, 1.0, foam);
   let a = max(alpha, 1e-3);
-  let shown = display(surfaceFog(col / a, tS, W_LEVEL, rd));
+  let shown = display(surfaceFogOd(col / a, tS, W_LEVEL, rd, od));
   return vec4f(shown.rgb * alpha, alpha);
 }
 
@@ -789,17 +974,18 @@ struct HeroOut {
 fn fsHero(@builtin(position) fc: vec4f) -> HeroOut {
   if (hero.bound.w <= 0.0 || u.camPos.y < W_LEVEL) { discard; }
   let rd = cameraRay(fc.xy);
-  let tH = heroTrace(rd);
+  let hit = heroTrace(rd);
+  let tH = hit.x;
   if (tH < 0.0) { discard; }
   let pr = rd * tH;
   let n = heroNormal(pr, tH);
   var sh = 0.0;
   if (dot(n, keyDir()) > 0.0) {
-    sh = softShadow(u.camPos + pr + n * 0.05, u.footprint) * treeShadowAt(u.camPos + pr) * islandShadowAt(u.camPos + pr, 0xffffffffu);
+    sh = softShadow(u.camPos + pr + n * 0.05, u.footprint) * treeShadowAt(u.camPos + pr) * skyShadowAt(u.camPos + pr);
     if (sh > 0.0) { sh = min(sh, heroShadow(pr + n * 0.03)); }
   }
   var o: HeroOut;
-  o.color = display(heroShade(rd, tH, n, sh));
+  o.color = display(heroShade(rd, tH, hit.y, n, sh));
   o.depth = CAMERA_NEAR / dot(pr, u.basis[2]);
   return o;
 }
@@ -874,7 +1060,9 @@ struct Gen {
 };
 @group(0) @binding(0) var<uniform> gen: Gen;
 ${heightSourceWGSL({ height: 'cached', ...opts, sun: undefined })}
-@group(0) @binding(4) var sunOut: texture_storage_2d_array<r32float, write>;
+@group(0) @binding(4) var sunOut: texture_storage_2d_array<rgba16float, write>;
+@group(0) @binding(5) var matOut: texture_storage_2d_array<rgba16float, write>;
+${GROUND_FIELDS_WGSL}
 const SH_K: f32 = ${f(SHADOW.penumbraK)};
 const SH_CUTOFF: f32 = ${f(SHADOW.cutoff)};
 
@@ -887,6 +1075,8 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   let gx = (heightAt(xz, vec2f(s, 0.0), s) - heightAt(xz, vec2f(-s, 0.0), s)) / (2.0 * s);
   let gz = (heightAt(xz, vec2f(0.0, s), s) - heightAt(xz, vec2f(0.0, -s), s)) / (2.0 * s);
   let n = normalize(vec3f(-gx, 1.0, -gz));
+  let st = (gen.store0 + id.xy) % vec2u(${opts.n}u);
+  textureStore(matOut, st, gen.level, groundFields(xz + gen.origin, gen.seed));
   let p = vec3f(xz.x, e, xz.y) + n * (0.15 + 0.5 * s);
   var res = 1.0;
   var t = max(0.6, 1.5 * s);
@@ -899,7 +1089,8 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     if (res < SH_CUTOFF) { res = 0.0; break; }
     t += clamp(h * 0.8, 0.5, 80.0) + t * 0.05;
   }
-  textureStore(sunOut, (gen.store0 + id.xy) % vec2u(${opts.n}u), gen.level, vec4f(clamp(res, 0.0, 1.0), 0.0, 0.0, 0.0));
+  // The visibility, and the ground's gradient (the shading's normal) beside it.
+  textureStore(sunOut, st, gen.level, vec4f(clamp(res, 0.0, 1.0), 0.0, gx, gz));
 }
 `;
 }
@@ -935,6 +1126,8 @@ struct Gen {
 @group(0) @binding(0) var<uniform> gen: Gen;
 ${heightSourceWGSL({ height: 'cached', ...opts, sun: undefined })}
 @group(0) @binding(4) var horizonOut: texture_storage_2d_array<rgba16float, write>;
+@group(0) @binding(5) var matOut: texture_storage_2d_array<rgba16float, write>;
+${GROUND_FIELDS_WGSL}
 const PATH_UP: vec3f = vec3f(${f(PATH_N[0])}, ${f(PATH_N[1])}, ${f(PATH_N[2])});
 const COS_LAT: f32 = ${f(cosLat)};
 const SIN_LAT: f32 = ${f(sinLat)};
@@ -992,10 +1185,13 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   let gx = (heightAt(xz, vec2f(s, 0.0), s) - heightAt(xz, vec2f(-s, 0.0), s)) / (2.0 * s);
   let gz = (heightAt(xz, vec2f(0.0, s), s) - heightAt(xz, vec2f(0.0, -s), s)) / (2.0 * s);
   let n = normalize(vec3f(-gx, 1.0, -gz));
+  let st = (gen.store0 + id.xy) % vec2u(${opts.n}u);
+  textureStore(matOut, st, gen.level, groundFields(xz + gen.origin, gen.seed));
   let p = vec3f(xz.x, e, xz.y) + n * (0.15 + 0.5 * s);
   let rise = pathHorizon(p, 1.0, s);
   let sinks = 3.14159265 - pathHorizon(p, -1.0, s);
-  textureStore(horizonOut, (gen.store0 + id.xy) % vec2u(${opts.n}u), gen.level, vec4f(rise, sinks, 0.0, 0.0));
+  // The horizons, and the ground's gradient (the shading's normal) beside them.
+  textureStore(horizonOut, st, gen.level, vec4f(rise, sinks, gx, gz));
 }
 `;
 }

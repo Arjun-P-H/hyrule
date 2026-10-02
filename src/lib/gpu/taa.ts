@@ -12,9 +12,17 @@
  */
 
 import { CAMERA } from '../constants';
-import { TAA_BYTES, TAA_WGSL } from './taa.wgsl';
+import { TAA_BYTES, taaWGSL } from './taa.wgsl';
+import { stamped } from './profile';
 
-export const SCENE_FORMAT: GPUTextureFormat = 'rgba16float';
+/**
+ * The scene's colour as the main pass renders it: display-ready values (tone-mapped, gamma-encoded:
+ * 0 … 1, a saturation boost's few per cent over at most), at 10 bits a channel, a quarter of the
+ * output's 8-bit step — half the bytes of a 16-bit float target to store and resolve. The history
+ * accumulates in 16-bit floats (a tenth of a sample a frame needs the finer steps).
+ */
+export const SCENE_FORMAT: GPUTextureFormat = 'rgb10a2unorm';
+const HISTORY_FORMAT: GPUTextureFormat = 'rgba16float';
 
 /** Halton low-discrepancy value of `i` in base `b`, in [0, 1). */
 function halton(i: number, b: number): number {
@@ -54,6 +62,8 @@ export class TemporalResolve {
   alpha = 0.1;
   /** 0..1, contrast-adaptive sharpening of the presented image. */
   sharpen = 0.5;
+  /** Colour arithmetic in f16 when the device has shader-f16 (set before init). */
+  halfPrecision = true;
 
   constructor(device: GPUDevice, outFormat: GPUTextureFormat) {
     this.device = device;
@@ -72,17 +82,18 @@ export class TemporalResolve {
         { binding: 4, visibility: F, sampler: { type: 'filtering' } },
       ],
     });
-    const module = d.createShaderModule({ code: TAA_WGSL });
+    // Half-precision colour arithmetic where the device has it (bench: halfPrecision = false keeps f32).
+    const shader = d.createShaderModule({ code: taaWGSL(this.halfPrecision && d.features.has('shader-f16')) });
     const pl = d.createPipelineLayout({ bindGroupLayouts: [this.layout] });
     [this.resolvePipe, this.presentPipe] = await Promise.all([
       d.createRenderPipelineAsync({
-        layout: pl, vertex: { module, entryPoint: 'vsFull' },
-        fragment: { module, entryPoint: 'fsResolve', targets: [{ format: SCENE_FORMAT }] },
+        layout: pl, vertex: { module: shader, entryPoint: 'vsFull' },
+        fragment: { module: shader, entryPoint: 'fsResolve', targets: [{ format: HISTORY_FORMAT }] },
         primitive: { topology: 'triangle-list' },
       }),
       d.createRenderPipelineAsync({
-        layout: pl, vertex: { module, entryPoint: 'vsFull' },
-        fragment: { module, entryPoint: 'fsPresent', targets: [{ format: this.outFormat }] },
+        layout: pl, vertex: { module: shader, entryPoint: 'vsFull' },
+        fragment: { module: shader, entryPoint: 'fsPresent', targets: [{ format: this.outFormat }] },
         primitive: { topology: 'triangle-list' },
       }),
     ]);
@@ -99,7 +110,7 @@ export class TemporalResolve {
     const RT = GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING;
     this.scene = d.createTexture({ size: [w, h], format: SCENE_FORMAT, usage: RT });
     this.depth = d.createTexture({ size: [w, h], format: 'depth32float', usage: RT });
-    this.hist = [0, 1].map(() => d.createTexture({ size: [w, h], format: SCENE_FORMAT, usage: RT }));
+    this.hist = [0, 1].map(() => d.createTexture({ size: [w, h], format: HISTORY_FORMAT, usage: RT }));
     this.sceneView = this.scene.createView();
     this.depthView = this.depth.createView();
     this.histViews = this.hist.map((t) => t.createView());
@@ -158,12 +169,12 @@ export class TemporalResolve {
   /** Resolve the scene into the history, then present it (scaled, sharpened) into `out`. */
   encode(enc: GPUCommandEncoder, out: GPUTextureView): void {
     const src = this.cur, dst = 1 - this.cur;
-    const rp = enc.beginRenderPass({ colorAttachments: [{ view: this.histViews[dst], loadOp: 'clear', storeOp: 'store', clearValue: { r: 0, g: 0, b: 0, a: 1 } }] });
+    const rp = enc.beginRenderPass({ colorAttachments: [{ view: this.histViews[dst], loadOp: 'clear', storeOp: 'store', clearValue: { r: 0, g: 0, b: 0, a: 1 } }], ...stamped('taa.resolve') });
     rp.setPipeline(this.resolvePipe);
     rp.setBindGroup(0, this.resolveBind[src]);
     rp.draw(3);
     rp.end();
-    const pp = enc.beginRenderPass({ colorAttachments: [{ view: out, loadOp: 'clear', storeOp: 'store', clearValue: { r: 0, g: 0, b: 0, a: 1 } }] });
+    const pp = enc.beginRenderPass({ colorAttachments: [{ view: out, loadOp: 'clear', storeOp: 'store', clearValue: { r: 0, g: 0, b: 0, a: 1 } }], ...stamped('taa.present') });
     pp.setPipeline(this.presentPipe);
     pp.setBindGroup(0, this.presentBind[dst]);
     pp.draw(3);

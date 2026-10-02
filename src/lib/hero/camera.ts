@@ -10,14 +10,20 @@
  */
 
 import { elevation } from '../terrainMath';
-import { islandGround } from '../skyIslands';
+import { skyGround, skyWater } from '../skyworld/realm';
 import { HERO_CAMERA as C, PLAYER, VALLEY } from '../constants';
 import type { HeroState } from './locomotion';
 
-/** Ground under an eye at height y: a sky island's top when the eye is above one, else the terrain. */
+/** Ground under an eye at height y: a sky island's top or an arch's deck when the eye is above one, else the terrain. */
 function groundBelow(x: number, y: number, z: number, seed: number): number {
-  const top = islandGround(x, y, z, seed, 0.5);
+  const top = skyGround(x, y, z, seed, 0.5);
   return top === top ? top : elevation(x, z, seed, 0);
+}
+
+/** The water an eye at height y must stay above: a sky lake or stream under it, else the lakes and sea. */
+function waterBelow(x: number, y: number, z: number, seed: number): number {
+  const w = skyWater(x, y, z, seed);
+  return w === w ? w : VALLEY.wLevel;
 }
 
 export type HeroCamera = {
@@ -78,7 +84,7 @@ export function updateHeroCamera(
   // Unobstructed and settled (the usual case) the eye is where the ground was
   // just sampled: reuse it (one elevation() per frame instead of two).
   const eyeGround = ex === ex0 && ez === ez0 ? ec : groundBelow(ex, c.ty - fy * c.boom, ez, seed);
-  const floor = Math.max(eyeGround, VALLEY.wLevel) + C.clearance;
+  const floor = Math.max(eyeGround, waterBelow(ex, c.ty - fy * c.boom, ez, seed)) + C.clearance;
   const ey = Math.max(c.ty - fy * c.boom, floor);
   c.x = ex; c.y = ey; c.z = ez;
 

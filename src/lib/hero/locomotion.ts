@@ -7,12 +7,13 @@
  * through the CPU twin's elevation() on fp64 global coordinates — one ground
  * sample plus two forward differences per tick. The root (x, y, z) sits
  * between the feet; when grounded y = E + PLAYER.groundBias like the first-
- * person eye, so switching views keeps the same collision contract. Above a
- * sky island (skyIslands.ts) the island's top is the ground instead.
+ * person eye, so switching views keeps the same collision contract. Up in
+ * the sky realm (skyworld/realm.ts) an island's top or an arch's deck is the
+ * ground instead, and a sky lake or stream the water.
  */
 
 import { elevation, type PlayerState } from '../terrainMath';
-import { islandTop, islandUnder } from '../skyIslands';
+import { floorHeight, skyFloorUnder, skyGround, skyWater } from '../skyworld/realm';
 import { ruinSiteAt, toBoxLocal } from '../ruins';
 import { trunksNear, type Trunk } from '../forest/collision';
 import { HERO, PLAYER, VALLEY } from '../constants';
@@ -34,6 +35,7 @@ export type HeroState = {
   surge: number;                    // metres of climb-jump surge left
   ground: number;                   // E under the root at the last sample
   gx: number; gz: number;           // ∇E there (forward differences)
+  water: number;                    // the water's surface there: the lakes and sea, a sky lake or stream, or −∞ (dry)
   impact: number;                   // downward speed at the last landing (m/s)
   landings: number;                 // counts landings so the rig reacts to each once
 };
@@ -139,8 +141,8 @@ function collideTrees(s: Body, feetY: number, seed: number): void {
 export function firstPersonGround(p: PlayerState, feetY: number, seed: number): number {
   collideTrees(p, feetY, seed);
   const box = collideRuins(p, feetY, seed);
-  const isl = islandUnder(p.x, feetY, p.z, seed);
-  return Math.max(box, isl ? islandTop(isl, p.x, p.z) : -Infinity);
+  const sky = skyGround(p.x, feetY, p.z, seed);
+  return Math.max(box, sky === sky ? sky : -Infinity);
 }
 
 function sampleGround(s: HeroState, seed: number): void {
@@ -155,22 +157,27 @@ function sampleGround(s: HeroState, seed: number): void {
 }
 
 function sampleSurface(s: HeroState, seed: number): void {
-  const isl = islandUnder(s.x, s.y, s.z, seed);
-  if (isl) {
-    const t = islandTop(isl, s.x, s.z);
-    s.gx = (islandTop(isl, s.x + GRAD_H, s.z) - t) / GRAD_H;
-    s.gz = (islandTop(isl, s.x, s.z + GRAD_H) - t) / GRAD_H;
+  const f = skyFloorUnder(s.x, s.y, s.z, seed);
+  if (f) {
+    const t = floorHeight(f, s.x, s.z);
+    // (past an arch's edge or an island's rim the floor ends: no slope across it)
+    const tx = floorHeight(f, s.x + GRAD_H, s.z), tz = floorHeight(f, s.x, s.z + GRAD_H);
+    s.gx = tx === tx ? (tx - t) / GRAD_H : 0;
+    s.gz = tz === tz ? (tz - t) / GRAD_H : 0;
     s.ground = t;
+    const w = skyWater(s.x, s.y, s.z, seed);
+    s.water = w === w ? w : -Infinity;
     return;
   }
   const e = elevation(s.x, s.z, seed, 0);
   s.gx = (elevation(s.x + GRAD_H, s.z, seed, 0) - e) / GRAD_H;
   s.gz = (elevation(s.x, s.z + GRAD_H, seed, 0) - e) / GRAD_H;
   s.ground = e;
+  s.water = VALLEY.wLevel;
 }
 
 function deepWater(s: HeroState): boolean {
-  return s.ground < VALLEY.wLevel - HERO.swimDepth;
+  return s.ground < s.water - HERO.swimDepth;
 }
 
 /** Pushing into ground too steep to run up, with stamina to spend: grab it. */
@@ -201,9 +208,9 @@ export function placeHero(
   s.jumpHeld = true; // a Space still held from the previous mode must not fire
   sampleGround(s, seed); // islands and ruin ledges count from this height
   const floor = s.ground + PLAYER.groundBias;
-  if (deepWater(s) && y < VALLEY.wLevel) {
+  if (deepWater(s) && y < s.water) {
     s.move = 'swim';
-    s.y = Math.max(y, VALLEY.wLevel - HERO.swimFloat - 0.3);
+    s.y = Math.max(y, s.water - HERO.swimFloat - 0.3);
   } else if (y <= floor + 0.05) {
     s.move = 'ground';
     s.y = floor;
@@ -219,7 +226,7 @@ export function createHeroState(x: number, z: number, yaw: number, seed: number)
     x, y: 0, z, vx: 0, vy: 0, vz: 0, yaw: 0, move: 'ground',
     stamina: 1, exhausted: false, rest: 0,
     sprinting: false, sneaking: false, sliding: false, jumpHeld: false,
-    surge: 0, ground: 0, gx: 0, gz: 0, impact: 0, landings: 0,
+    surge: 0, ground: 0, gx: 0, gz: 0, water: VALLEY.wLevel, impact: 0, landings: 0,
   };
   placeHero(s, x, -Infinity, z, 0, 0, 0, yaw, seed);
   s.jumpHeld = false;
@@ -241,7 +248,6 @@ export function updateHero(s: HeroState, input: HeroInput, dt: number, seed: num
   const jumpPressed = input.jump && !s.jumpHeld;
   s.jumpHeld = input.jump;
   const fresh = !s.exhausted && s.stamina > 0; // stamina actions allowed
-  const water = VALLEY.wLevel;
   let spend = 0;
   s.sprinting = false;
   s.sliding = false;
@@ -261,7 +267,7 @@ export function updateHero(s: HeroState, input: HeroInput, dt: number, seed: num
         s.sprinting = true;
         spend += HERO.staminaSprint * dt;
       }
-      if (s.ground < water - 0.3) speed *= HERO.wadeFactor;
+      if (s.ground < s.water - 0.3) speed *= HERO.wadeFactor;
       const k = approach(HERO.accel, dt);
       s.vx += (wx * speed * mag - s.vx) * k;
       s.vz += (wz * speed * mag - s.vz) * k;
@@ -310,7 +316,7 @@ export function updateHero(s: HeroState, input: HeroInput, dt: number, seed: num
       sampleGround(s, seed);
       if (jumpPressed && fresh && s.y - s.ground > HERO.glideMinHeight) {
         s.move = 'glide';
-      } else if (deepWater(s) && s.y < water - HERO.swimFloat) {
+      } else if (deepWater(s) && s.y < s.water - HERO.swimFloat) {
         s.move = 'swim';
         s.vy *= 0.3;
       } else if (s.y <= s.ground + PLAYER.groundBias) {
@@ -333,7 +339,7 @@ export function updateHero(s: HeroState, input: HeroInput, dt: number, seed: num
       s.y += s.vy * dt;
       s.z += s.vz * dt;
       sampleGround(s, seed);
-      if (deepWater(s) && s.y < water - HERO.swimFloat) {
+      if (deepWater(s) && s.y < s.water - HERO.swimFloat) {
         s.move = 'swim';
         s.vy *= 0.3;
       } else if (s.y <= s.ground + PLAYER.groundBias) {
@@ -403,12 +409,12 @@ export function updateHero(s: HeroState, input: HeroInput, dt: number, seed: num
       s.vz += (wz * speed * mag - s.vz) * k;
       if (mag > 0) turnToward(s, Math.atan2(wx, wz), HERO.turnRate * 0.6, dt);
       // Buoyancy: a damped spring settles the root at the float depth.
-      s.vy += ((water - HERO.swimFloat - s.y) * 12 - s.vy * 5) * dt;
+      s.vy += ((s.water - HERO.swimFloat - s.y) * 12 - s.vy * 5) * dt;
       s.x += s.vx * dt;
       s.y += s.vy * dt;
       s.z += s.vz * dt;
       sampleGround(s, seed);
-      if (s.ground > water - HERO.swimDepth + 0.1) {
+      if (s.ground > s.water - HERO.swimDepth + 0.1) {
         // Shallow enough to stand: wade out.
         s.move = 'ground';
         s.y = Math.max(s.y, s.ground + PLAYER.groundBias);

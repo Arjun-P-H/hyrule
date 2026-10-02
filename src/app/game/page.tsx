@@ -27,6 +27,7 @@ import { useTerrainEngine, type PresetId } from '@/lib/engine/useTerrainEngine';
 import { useEngineApi, useEngineMode, useEngineStats, useHeroStamina, useSkyState, type CamMode, type StatsStore } from '@/lib/engine/statsStore';
 import { useSeedState } from '@/lib/engine/useSeedState';
 import type { SkyMode } from '@/lib/gpu/engineGpu';
+import type { SpawnAt } from '@/lib/engine/engineCore';
 import { clockText, dayPhase } from '@/lib/sky/clock';
 import {
   DEFAULT_SEED,
@@ -139,12 +140,16 @@ const SkyClock = React.memo(function SkyClock({ statsStore }: { statsStore: Stat
   );
 });
 
-// ?sky=classic|cycle and ?time=18.5 or ?time=18:30 start the page there (read in the browser only).
+// ?sky=classic|cycle, ?time=18.5 or ?time=18:30 and ?spawn=sky start the page there (read in the browser only).
 function urlParam(name: string): string | null {
   return typeof window === 'undefined' ? null : new URLSearchParams(window.location.search).get(name);
 }
 function urlSky(): SkyMode {
   return urlParam('sky') === 'classic' ? 'classic' : 'cycle';
+}
+// ?spawn=sky starts the hero up on the nearest sky archipelago's hub.
+function urlSpawn(): SpawnAt {
+  return urlParam('spawn') === 'sky' ? 'sky' : 'land';
 }
 function urlHour(): number {
   const v = urlParam('time');
@@ -192,6 +197,7 @@ export default function GamePage() {
   const [speedMultiplier, setSpeedMultiplier] = useState<number>(1);
   const [sky, setSky] = useState<SkyMode>(urlSky);
   const [clockStart] = useState(() => ({ hour: urlHour(), dayMinutes: 24 }));
+  const [spawnAt] = useState(urlSpawn);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
@@ -208,6 +214,7 @@ export default function GamePage() {
     renderer: 'auto',
     sky,
     clockStart,
+    spawnAt,
     onPointerLockChange: setIsPointerLocked,
     onToggleHud: () => setShowHud((v) => !v),
   });

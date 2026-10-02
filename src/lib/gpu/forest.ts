@@ -1,8 +1,9 @@
 /**
  * The forest's GPU resources and passes (host side of forest.wgsl.ts).
  * ---------------------------------------------------------------------------
- * Owns the tree models (one vertex and one index buffer), the cached window
- * of placement slots, the instance buckets with their indirect draw
+ * Owns the tree models (one vertex and one index buffer), the leaf sprays
+ * the leaf cards draw (leafAtlas.ts, one texture layer per spray), the cached
+ * window of placement slots, the instance buckets with their indirect draw
  * arguments, and two shadow maps: each frame renders one while every surface
  * samples the other, finished the frame before (reading a map in the frame
  * that draws it would stall the GPU until the shadow pass ends). Per frame:
@@ -12,16 +13,21 @@
  *   encode(enc, group0)   placement for new tiles, culling, the bucket clamp,
  *                         then the shadow pass
  *   draw(pass)            one indexed indirect draw per bucket, in the main pass
+ *   drawCardDepth(pass)   the near trees' leaf cards' depth, cut out (discard): first
+ *                         in the pass, so what lies behind leaves is never shaded
+ *   drawCardColour(pass)  their colour where that depth is equal: once per pixel
  */
 
 import { LIGHT, VALLEY } from '../constants';
+import { buildLeafAtlas, LEAF_MIPS, LEAF_SIZE, LEAF_STYLES } from '../forest/leafAtlas';
 import { buildTreeModels, VERTEX_BYTES, type TreeModels } from '../forest/models';
 import { CELL, LODS } from '../forest/species';
 import { TILE_CELLS, TileWindow } from '../forest/tiles';
-import { islandGround } from '../skyIslands';
+import { skyGround } from '../skyworld/realm';
 import { elevation } from '../terrainMath';
 import type { FrameParams } from './frame';
-import { ARGS_BYTES, BUCKETS, CAP, FOREST_BYTES, GROUPS, GROUP_LEVEL, INSTANCES, INSTANCE_BYTES, KINDS, REGION, SLOT_BYTES, type ForestSpec } from './forest.wgsl';
+import { ARGS_BYTES, BUCKETS, CAP, CARD_GROUPS, FOREST_BYTES, GROUPS, GROUP_LEVEL, INSTANCES, INSTANCE_BYTES, KINDS, REGION, SLOT_BYTES, type ForestSpec } from './forest.wgsl';
+import { stamped } from './profile';
 
 const TILE = CELL * TILE_CELLS;
 /** Half depth (m) of the shadow box along the sun's direction. */
@@ -63,11 +69,15 @@ export class Forest {
   /** The map rendered this frame; the other one is sampled (round the centre it was drawn at, lastCentre). */
   private renderIdx = 0;
   private shadowSampler: GPUSampler;
+  private leafTex: GPUTexture;
+  private leafSampler: GPUSampler;
   private genPipe!: GPUComputePipeline;
   private cullPipe!: GPUComputePipeline;
   private clampPipe!: GPUComputePipeline;
   private treePipe!: GPURenderPipeline;
   private fadePipe!: GPURenderPipeline;
+  private cardDepthPipe!: GPURenderPipeline;
+  private cardPipe!: GPURenderPipeline;
   private shadowPipe!: GPURenderPipeline;
   private genBind!: GPUBindGroup;
   private cullBind!: GPUBindGroup;
@@ -100,20 +110,34 @@ export class Forest {
     this.ibuf = d.createBuffer({ size: this.models.indices.byteLength, usage: B.INDEX | B.COPY_DST });
     d.queue.writeBuffer(this.ibuf, 0, this.models.indices);
     const tiles = spec.side * spec.side;
-    this.slots = d.createBuffer({ size: tiles * TILE_CELLS * TILE_CELLS * SLOT_BYTES, usage: B.STORAGE | B.COPY_SRC });
+    // Two layers of slots: the plants on the land, and those up on the sky islands over it.
+    this.slots = d.createBuffer({ size: 2 * tiles * TILE_CELLS * TILE_CELLS * SLOT_BYTES, usage: B.STORAGE | B.COPY_SRC });
     this.tiles = d.createBuffer({ size: tiles * 16, usage: B.STORAGE | B.COPY_SRC });
     this.jobs = d.createBuffer({ size: tiles * 16, usage: B.STORAGE | B.COPY_DST });
     this.inst = d.createBuffer({ size: INSTANCES * INSTANCE_BYTES, usage: B.STORAGE });
-    this.args = d.createBuffer({ size: BUCKETS * ARGS_BYTES, usage: B.STORAGE | B.INDIRECT | B.COPY_DST | B.COPY_SRC });
+    // Draw arguments per bucket, then the same buckets' leaf cards (forestClamp copies the instance counts across).
+    this.args = d.createBuffer({ size: 2 * BUCKETS * ARGS_BYTES, usage: B.STORAGE | B.INDIRECT | B.COPY_DST | B.COPY_SRC });
     // Each bucket draws its (species, shape)'s mesh at its group's level.
-    this.argsTemplate = new Uint32Array(BUCKETS * 5);
+    this.argsTemplate = new Uint32Array(2 * BUCKETS * 5);
     for (let g = 0; g < GROUPS; g++) {
       for (let k = 0; k < KINDS; k++) {
         const m = this.models.meshes[k * LODS + GROUP_LEVEL[g]];
         this.argsTemplate.set([m.indexCount, 0, m.firstIndex, m.baseVertex, 0], (g * KINDS + k) * 5);
+        this.argsTemplate.set([m.cardCount, 0, m.cardFirst, m.baseVertex, 0], (BUCKETS + g * KINDS + k) * 5);
         this.offsets[g * KINDS + k] = (REGION[g] + k * CAP[g]) * INSTANCE_BYTES;
       }
     }
+    // The leaf sprays: one layer each, with mipmaps.
+    const atlas = buildLeafAtlas();
+    this.leafTex = d.createTexture({
+      size: [LEAF_SIZE, LEAF_SIZE, LEAF_STYLES.length], mipLevelCount: LEAF_MIPS, format: 'rgba8unorm',
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+    });
+    atlas.forEach((levels, layer) => levels.forEach((texels, mip) => {
+      const n = LEAF_SIZE >> mip;
+      d.queue.writeTexture({ texture: this.leafTex, mipLevel: mip, origin: [0, 0, layer] }, texels, { bytesPerRow: 4 * n, rowsPerImage: n }, [n, n, 1]);
+    }));
+    this.leafSampler = d.createSampler({ magFilter: 'linear', minFilter: 'linear', mipmapFilter: 'linear', maxAnisotropy: 4, addressModeU: 'clamp-to-edge', addressModeV: 'clamp-to-edge' });
     const res = Math.max(spec.shadowRes, 1);
     this.shadows = [0, 1].map(() => d.createTexture({ size: [res, res], format: 'depth32float', usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING }));
     this.shadowViews = this.shadows.map((t) => t.createView());
@@ -126,12 +150,14 @@ export class Forest {
     this.shadowSampler = d.createSampler({ compare: 'less-equal', magFilter: 'linear', minFilter: 'linear', addressModeU: 'clamp-to-edge', addressModeV: 'clamp-to-edge' });
   }
 
-  /** Entries the forest adds to group 0: its uniform, the shadow map and its comparison sampler. */
+  /** Entries the forest adds to group 0: its uniform, the shadow map and its comparison sampler, the leaf sprays and their sampler. */
   static layoutEntries(): GPUBindGroupLayoutEntry[] {
     const VFC = GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT | GPUShaderStage.COMPUTE;
     return [
       { binding: 8, visibility: VFC, buffer: { type: 'uniform' } },
       { binding: 9, visibility: VFC, texture: { sampleType: 'depth' } },
+      { binding: 14, visibility: VFC, texture: { sampleType: 'float', viewDimension: '2d-array' } },
+      { binding: 15, visibility: VFC, sampler: { type: 'filtering' } },
       { binding: 16, visibility: VFC, sampler: { type: 'comparison' } },
     ];
   }
@@ -141,6 +167,8 @@ export class Forest {
     return [
       { binding: 8, resource: { buffer: this.ubuf } },
       { binding: 9, resource: this.shadowViews[which] },
+      { binding: 14, resource: this.leafTex.createView({ dimension: '2d-array' }) },
+      { binding: 15, resource: this.leafSampler },
       { binding: 16, resource: this.shadowSampler },
     ];
   }
@@ -167,21 +195,35 @@ export class Forest {
         { shaderLocation: 0, offset: 0, format: 'float32x3' },
         { shaderLocation: 1, offset: 12, format: 'snorm8x4' },
         { shaderLocation: 2, offset: 16, format: 'unorm8x4' },
+        { shaderLocation: 3, offset: 20, format: 'unorm16x2' },
       ],
     };
     const cl = (layout: GPUBindGroupLayout) => d.createPipelineLayout({ bindGroupLayouts: [computeLayout, layout] });
     const treeDesc = (fade: boolean): GPURenderPipelineDescriptor => ({
       layout: d.createPipelineLayout({ bindGroupLayouts: [renderLayout, drawLayout] }),
       vertex: { module, entryPoint: 'vsTree', buffers: [vertex] },
-      fragment: { module, entryPoint: 'fsTree', targets: target, constants: { TREE_FADE: fade ? 1 : 0 } },
+      fragment: { module, entryPoint: 'fsTree', targets: target, constants: { TREE_FADE: fade ? 1 : 0, TREE_DETAIL: this.spec.detail === false ? 0 : 1 } },
       primitive: { topology: 'triangle-list', cullMode: 'none' }, depthStencil: depth, multisample,
     });
-    [this.genPipe, this.cullPipe, this.clampPipe, this.treePipe, this.fadePipe, this.shadowPipe] = await Promise.all([
+    [this.genPipe, this.cullPipe, this.clampPipe, this.treePipe, this.fadePipe, this.cardDepthPipe, this.cardPipe, this.shadowPipe] = await Promise.all([
       d.createComputePipelineAsync({ layout: cl(genLayout), compute: { module, entryPoint: 'forestGen' } }),
       d.createComputePipelineAsync({ layout: cl(cullLayout), compute: { module, entryPoint: 'forestCull' } }),
       d.createComputePipelineAsync({ layout: cl(cullLayout), compute: { module, entryPoint: 'forestClamp' } }),
       d.createRenderPipelineAsync(treeDesc(false)),
       d.createRenderPipelineAsync(treeDesc(true)),
+      // Leaf cards: their depth (cut out, no colour), then their colour where that depth is equal.
+      d.createRenderPipelineAsync({
+        layout: d.createPipelineLayout({ bindGroupLayouts: [renderLayout, drawLayout] }),
+        vertex: { module, entryPoint: 'vsCardDepth', buffers: [vertex] },
+        fragment: { module, entryPoint: 'fsCardDepth', targets: target.map((t) => ({ ...t, writeMask: 0 })) },
+        primitive: { topology: 'triangle-list', cullMode: 'none' }, depthStencil: depth, multisample,
+      }),
+      d.createRenderPipelineAsync({
+        layout: d.createPipelineLayout({ bindGroupLayouts: [renderLayout, drawLayout] }),
+        vertex: { module, entryPoint: 'vsCard', buffers: [vertex] },
+        fragment: { module, entryPoint: 'fsCard', targets: target },
+        primitive: { topology: 'triangle-list', cullMode: 'none' }, depthStencil: { ...depth, depthWriteEnabled: false, depthCompare: 'equal' }, multisample,
+      }),
       d.createRenderPipelineAsync({
         layout: d.createPipelineLayout({ bindGroupLayouts: [shadowLayout, drawLayout] }),
         vertex: { module, entryPoint: 'vsTreeShadow', buffers: [vertex] },
@@ -230,7 +272,7 @@ export class Forest {
     const LF = this.lf, LR = this.lr, LU = this.lu;
     const R = this.spec.shadowRange;
     const cx = fp.x + Math.sin(fp.yaw) * 0.35 * R, cz = fp.z + Math.cos(fp.yaw) * 0.35 * R;
-    const isl = islandGround(fp.x, fp.y, fp.z, fp.seed);
+    const isl = skyGround(fp.x, fp.y, fp.z, fp.seed);
     const cy = Number.isFinite(isl) ? isl : Math.max(elevation(cx, cz, fp.seed, 8), VALLEY.wLevel);
     const texel = (2 * R) / Math.max(this.spec.shadowRes, 1);
     const lx = cx * LR[0] + cy * LR[1] + cz * LR[2], ly = cx * LU[0] + cy * LU[1] + cz * LU[2];
@@ -258,7 +300,7 @@ export class Forest {
 
   /** Placement for the tiles that entered the window, culling into the buckets, then the shadow map. */
   encode(enc: GPUCommandEncoder, group0: GPUBindGroup): void {
-    const cp = enc.beginComputePass();
+    const cp = enc.beginComputePass(stamped('forest.cull'));
     cp.setBindGroup(0, group0);
     if (this.jobCount) {
       cp.setPipeline(this.genPipe);
@@ -268,7 +310,7 @@ export class Forest {
     }
     cp.setPipeline(this.cullPipe);
     cp.setBindGroup(1, this.cullBind);
-    cp.dispatchWorkgroups(Math.ceil((this.spec.side * this.spec.side * TILE_CELLS * TILE_CELLS) / 64));
+    cp.dispatchWorkgroups(Math.ceil((2 * this.spec.side * this.spec.side * TILE_CELLS * TILE_CELLS) / 64));
     cp.setPipeline(this.clampPipe);
     cp.dispatchWorkgroups(Math.ceil(BUCKETS / 64));
     cp.end();
@@ -276,6 +318,7 @@ export class Forest {
     const sp = enc.beginRenderPass({
       colorAttachments: [],
       depthStencilAttachment: { view: this.shadowViews[this.renderIdx], depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'store' },
+      ...stamped('forest.shadow'),
     });
     sp.setPipeline(this.shadowPipe);
     sp.setBindGroup(0, this.shadowBind);
@@ -286,11 +329,11 @@ export class Forest {
     sp.end();
   }
 
-  /** One indexed indirect draw per bucket of group g (pipeline, group 0 and buffers already set). */
-  private drawGroup(pass: GPURenderPassEncoder, g: number): void {
+  /** One indexed indirect draw per bucket of group g (pipeline, group 0 and buffers already set); `cards`: the buckets' leaf cards. */
+  private drawGroup(pass: GPURenderPassEncoder, g: number, cards = false): void {
     for (let k = 0; k < KINDS; k++) {
       pass.setBindGroup(1, this.drawBinds[g], this.offsets, g * KINDS + k, 1);
-      pass.drawIndexedIndirect(this.args, (g * KINDS + k) * ARGS_BYTES);
+      pass.drawIndexedIndirect(this.args, ((cards ? BUCKETS : 0) + g * KINDS + k) * ARGS_BYTES);
     }
   }
 
@@ -302,6 +345,28 @@ export class Forest {
     for (let g = 0; g < 3; g++) this.drawGroup(pass, g);
     pass.setPipeline(this.fadePipe);
     for (let g = 4; g < 7; g++) this.drawGroup(pass, g);
+  }
+
+  /**
+   * The near trees' leaf cards, in two steps (group 0 already set). Cut-out cards overlap, and
+   * discard keeps the GPU from removing hidden surfaces, so each layer would be shaded. Instead:
+   * first in the pass their depth, cut out (cheap); then the opaque draws, which skip whatever lies
+   * behind leaves; then the cards' colour where that depth is equal, once per pixel and opaque.
+   */
+  drawCardDepth(pass: GPURenderPassEncoder): void {
+    this.drawCards(pass, this.cardDepthPipe);
+  }
+
+  drawCardColour(pass: GPURenderPassEncoder): void {
+    this.drawCards(pass, this.cardPipe);
+  }
+
+  private drawCards(pass: GPURenderPassEncoder, pipe: GPURenderPipeline): void {
+    if (this.spec.detail === false) return;
+    pass.setVertexBuffer(0, this.vbuf);
+    pass.setIndexBuffer(this.ibuf, 'uint32');
+    pass.setPipeline(pipe);
+    for (const g of CARD_GROUPS) this.drawGroup(pass, g, true);
   }
 
   /** Instances drawn last frame: levels 0 + 1, level 2, shadow casters (fading trees counted at both levels; debug readback). */
@@ -319,9 +384,9 @@ export class Forest {
     return out;
   }
 
-  /** The placement window as generated: tiles (side² × vec4i), then slots (side² × 64 × vec4u) (debug readback). */
+  /** The placement window as generated: tiles (side² × vec4i), then slots (side² × 64 × vec4u: the land's, then the sky's) (debug readback). */
   async readSlots(): Promise<ArrayBuffer> {
-    const tb = this.spec.side * this.spec.side * 16, sb = tb * TILE_CELLS * TILE_CELLS;
+    const tb = this.spec.side * this.spec.side * 16, sb = 2 * tb * TILE_CELLS * TILE_CELLS;
     const rb = this.device.createBuffer({ size: tb + sb, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     const enc = this.device.createCommandEncoder();
     enc.copyBufferToBuffer(this.tiles, 0, rb, 0, tb);
@@ -337,5 +402,6 @@ export class Forest {
   destroy(): void {
     for (const b of [this.ubuf, this.vbuf, this.ibuf, this.slots, this.tiles, this.jobs, this.inst, this.args]) b.destroy();
     for (const t of this.shadows) t.destroy();
+    this.leafTex.destroy();
   }
 }

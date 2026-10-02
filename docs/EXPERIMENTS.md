@@ -154,7 +154,7 @@ the change.
 - **4× MSAA** for thin blades: +1.1 ms p50 at 1280×720.
 - Grass costs almost nothing net: blade fragments replace the terrain shading they cover.
 
-### E7 — sky islands
+### E7 — sky islands (replaced: see "The sky realm" below)
 
 - `src/lib/skyIslands.ts` (CPU twin) and `src/lib/gpu/skyIslands.wgsl.ts`: at most one island
   per 2,048 m cell (32 % of cells), 110–320 m radius, top at 430–820 m: grassy relief over a
@@ -246,7 +246,7 @@ at 1920×1080 on High).
 
 ### E7 — waterfalls, ruins and shrines
 
-- **Waterfalls** (`waterfalls.wgsl.ts`, `islandWaterfall` in `skyIslands.ts`): 60 % of sky
+- **Waterfalls** (replaced by the sky realm's, below) (`waterfalls.wgsl.ts`, `islandWaterfall` in `skyIslands.ts`): 60 % of sky
   islands pour a 12–24 m wide fall from a hashed rim point to the ground or water below: a
   camera-facing ribbon that widens as it drops, with scrolling streaks, and a mist
   billboard at the foot. Views of falls: 5.39 ms p50 / 5.76 ms p95 at 1280×720.
@@ -548,13 +548,426 @@ never reduced. Tests: 16 more (`tests/sky.test.ts`) cover the sun's and the moon
 pacing of the clock, the air's transmittance, the reddening and alpenglow of the key light,
 the sun-to-moon switch in the dark, the night's level and the morning mist.
 
+### Tree surfaces: leaf cards, painted bark, needles and leaflets
+
+Every tree surface was one flat colour broken by two octaves of value noise: crowns read as
+faceted blobs beside the grass, trunks as plain tubes. The aim, from reference pictures of
+Breath of the Wild's trees, was crowns that are masses of single leaves with leafy, broken
+outlines and sky through the gaps, and pale, mossy, painterly trunks spreading into roots.
+Nothing is a texture file: the leaves are painted at start-up and the rest is shader code,
+fixed to the model so it sways with the tree.
+
+- **Leaf sprays** (`src/lib/forest/leafAtlas.ts`): one 256² layer per leaf style, painted
+  once at start-up in ~0.15 s, with its mipmaps:
+  - long pointed leaves (oak), five-lobed leaves (maple), small toothed ovals (birch), broad
+    leaves with heavy midribs (jungle), compound leaves of tiny leaflets (acacia) and small
+    round leaves (bushes);
+  - each layer is a spray of 13–52 leaves over a disc, pointing outward, deeper ones darker,
+    each with its own tone, a darker base and midrib, and its own tilt;
+  - texels hold coverage, tone and tilt, all premultiplied by coverage, so the mipmaps
+    average correctly.
+- **Leaf cards** (`models.ts`, `forest.wgsl.ts`): the near and middle levels of every
+  broadleaf crown carry cards spread evenly over each clump. That is ~470 on a near oak, ~130
+  at the middle level, ~45 on a bush. Cards buried deep inside another clump are dropped;
+  those near the seams between clumps stay and cover them.
+  - Each card is four vertices at one centre. The vertex shader turns the card to face the
+    camera, then sizes and turns it per card.
+  - Each leaf is lit by the crown's normal (out from its middle, so the crown shades as one
+    soft volume), bent the way that leaf faces. Light comes through the leaves when backlit.
+  - The crown under the cards is the foliage further in: the same sprays projected onto it
+    three ways, darker and in its own shade, with deep gaps between the leaves.
+  - Cut-outs are dithered against the spray's coverage, so TAA blends the edges. Far off,
+    where the mipmaps blur a spray, it thins to its mean coverage instead of shrinking.
+  - The middle level draws 28 % of the cards at 1.75 times the size, and they shrink away
+    over the far half of that level, where one spans a few pixels. Cards also give way
+    within 1.6 m of the camera, so a camera inside the leaves does not fill with them.
+- **Painted bark** for oak, maple, acacia and bush stems:
+  - long soft streaks down the trunk in three octaves, shallow furrows wandering along it,
+    and large light and dark mottling;
+  - moss in patches, most on whatever faces up and round the foot;
+  - a pale mossy olive base on oaks.
+  It replaced the first version's Voronoi plates, which were too hard and too dark next to
+  the references.
+- **Roots:** oak and maple trunks flare at the foot into four or five roots spreading over
+  the ground. Near trunks have 12 sides (from 8) and close rings at the base, so the roots
+  show. The trunk colliders follow the roots automatically.
+- **Other species keep their own surfaces:**
+  - pine: scaly plates;
+  - birch: lenticels, dark scars and a black cracked foot;
+  - palm: ring scars and fibres;
+  - jungle: pale bark with lichen and rings;
+  - dead trees: twisting grain and cracks;
+  - cactus: grooves and areoles;
+  - pine needle tufts: domes on a lattice drawn out down each skirt, with needle bundles
+    close up;
+  - palm fronds: leaflets with a pale midrib.
+- **Relief** bends the normal by each pattern's analytic slopes along the surface
+  coordinates, times the screen-space derivatives of those coordinates (Mikkelsen's surface
+  gradient). The new coordinates are the turn round each tube, with a seam vertex closing
+  every ring, and the metres along it. Screen-space differences of the pattern itself, the
+  first attempt, step in 2 × 2 pixel blocks that TAA does not remove.
+- **How it got here:** the first crowns were shading only, leaf clusters as small domes.
+  They gave textured surfaces but smooth lump outlines and no gaps, unlike the references.
+  The cards replace them; conifers keep the domes as needle tufts.
+- **Fixed on the way:**
+  - A pine skirt's underside shared the rim's up-facing normals and was lit like its top. It
+    now faces down.
+  - Foliage seen from inside a crown stays plain and shaded.
+
+**Drawing cut-out cards cheaply on the M1.** `discard` turns off hidden-surface removal, and
+cut-out cards overlap, so every layer of leaves was shaded and so was whatever lay behind
+them. Drawing the cards after every opaque draw cost × 1.16 on the forest views. What brought
+it down, measured at each step:
+1. **Fewer, larger middle-level cards:** 28 % of them at 1.75 times the size, shrinking away
+   over the far half of the level. Only near cards look up the tree shadow map, once a
+   vertex. The aerial view over the autumn woods went from +3.7 ms to +0.5 ms.
+2. **Two passes:** the cards' depth first, cut out and cheap; then their colour where that
+   depth is equal, opaque and without `discard`, shaded once per pixel. Both passes place
+   corners with the same function, and the position is `@invariant`, so their depths agree
+   to the bit. Forest views: × 1.09.
+3. **Depth first in the pass:** the cards' depth pass now runs before the terrain, so the
+   terrain, grass, crowns and ruins skip whatever lies behind leaves. Forest views: × 1.07.
+   The seam fix then added cards and brought it back to × 1.09.
+
+**Cost.** The comparison variant is `world-cycle-plain`, the same world with plain trees
+(`forest.detail: false`: no cards, no surface detail). All numbers are at 1920×1080, the
+game's internal resolution on High.
+
+The order of variants biases every paired comparison: whichever variant renders a view
+first, and to a lesser degree second, pays for arriving there while the GPU's clocks ramp.
+`--warmup=1` runs a copy of the first variant ahead of the rest, but that absorbs only part
+of the effect. Each number below is therefore the geometric mean of both orders (each run in
+brackets), plus the per-view change taken as each variant's fastest time over both runs.
+
+| Views | Surfaces vs plain | Median view | Worst views |
+| :--- | ---: | ---: | :--- |
+| 20 gallery views (the game's typical views) | × 1.00 (0.99, 1.02) | ±0.0 ms | 9.8 → 11.4 ms |
+| 50 close-ups (bark, crowns, under the canopy) | × 1.02 (1.00, 1.05) | +0.03 ms | under a maple 7.0 → 9.9 ms |
+| 20 forest views (inside woods and from the air) | × 1.09 (1.09, 1.08) | +0.15 ms | autumn woods 6.2 → 10.0 ms, jungle shore 7.3 → 9.3 ms |
+
+**Temporal stability** (`bun bench/webgpu.ts shimmer`: 6 forest views, 24 frames held still,
+then a 32-frame slow pan with time frozen, 1280×800):
+- flicker, the share of pixels changing by more than 24 of 255 between frames, is 0.22–0.95 %
+  with the cards against 0.27–0.95 % plain, so the dithered cut-outs add none;
+- the mean change per frame rose by 0.16–0.36 of 255, because the trees have more contrast
+  to move.
+
+**In game** (production build, High, 2560×1440 canvas, headed Chrome): 59.9 fps in third
+person, 59.9 in first person, 60.0 in third person at 17:54. Dynamic resolution was never
+reduced.
+
+Tests, in `tests/forest.test.ts`:
+- surface coordinates run round each trunk (the seam vertex repeats the first) and up it in
+  metres, and frond vertices carry their side and their length;
+- broadleaf crowns carry cards at the near levels only, each four corners at one centre;
+- every leaf spray covers 20–60 % of its layer, is premultiplied, keeps the tile's edge
+  empty, and its last mipmap is its mean coverage.
+
+### The sky realm: archipelagos, sky biomes and water with a source (replaces E7's islands)
+
+What was wrong with E7's islands, as reported in play:
+- a waterfall poured from a bare point on the rim, with no lake or stream above it;
+- it fell to whatever lay below, often a dry mountainside;
+- island tops were the lowland's meadow and trees;
+- islands were small (110–320 m) and low (tops at 430–820 m), so some floated inside the
+  1.3 km peaks;
+- they never connected.
+
+The new realm lives in `src/lib/skyworld/` (the CPU twin, physics and tests). On the GPU it is
+`gpu/skyRealm.wgsl.ts` (shaders) and `gpu/skyRealm.ts` (host).
+
+**Layout** (`archipelago.ts`, all by hash from cell and seed, cached):
+- **Archipelagos:** one candidate per 8,192 m cell (60 % kept), whole inside its cell.
+  - a hub of 0.65–1.25 km;
+  - 3–6 satellites across 170–460 m of open sky, most level enough to be joined by an arch;
+  - 2–6 small isles farther out, at their own heights;
+  - 5–12 floating rocks.
+- **Lone isles:** one candidate per 2,048 m cell (22 %), never inside an archipelago.
+- **Height:** every underside's tip stays above 1,400 m, so above the highest peak. Tops lie
+  at 1.55–2.9 km, above the 1.5 km cloud deck.
+- **Around the spawn (seed 1337):** 9 archipelagos and 14 lone isles within 12 km. The
+  nearest stands 3.9 km straight ahead of the spawn's view (hash salts chosen for that).
+  Building them on the CPU takes ~110 ms, once.
+
+**Sky biomes** (`biomes.ts`). The ground's biomes follow latitude, altitude and rain. Up here
+other things decide:
+- the cloud deck: an island whose underside hangs into its mist drinks it;
+- the thin cold air of height, and the wind on a small isle;
+- the archipelago's trait (verdant, blossom, frost or wild), which runs through all its
+  islands.
+
+Five biomes, each with its own ground palette, grass (height, density, wild flowers), relief,
+underside rock, water and trees:
+
+| Biome | Where it grows | Look and trees | Water |
+| :--- | :--- | :--- | :--- |
+| Sky meadow | middling height and size | golden-green grass full of flowers; golden and blossoming trees | lakes |
+| Mistwood | underside steeped in the cloud deck | moss-dark ground; giant teal oaks, tree ferns, silver birches | lakes in 95 % |
+| Petal glade | blossom archipelagos | pink and pearl-white groves over lilac-flecked grass | lakes |
+| Gale crags | small, high and exposed | tawny turf and bare crag; wind-stunted pines | rarely |
+| Rime isles | the highest (above ~2.6 km) | snow; a summit; rime-frosted pines | frozen lakes, no stream |
+
+The trees are the ground's tree shapes in eight sky palettes. Islands of one archipelago
+share its trait, then split by their own height and size. Around the spawn, every biome
+occurs (tested).
+
+**Water with a source** (`hydrology.ts`). The cloud deck wets the islands, most of all those
+hanging into it. A wet enough island keeps a lake in its lowest hollow, and the lake drains
+by one stream to a notch in the rim:
+- **Lake:** the best of a dozen candidate hollows well inside the rim. Its level sits 0.35 m
+  under the lowest point of its shore (two rings of 48 samples), and a low levee covers what
+  lies between the samples. It never spills: 360 bearings × 4 distances are tested.
+- **Stream:** 16 meandering points from the lake's outlet to the lip. Its bed:
+  - starts 0.6 m under the lake's level and never rises;
+  - falls at least 0.4 %;
+  - stays 0.8 m under the land across its whole corridor (±1.6 half-widths), not just its axis;
+  - notches 1.2 m into the rim.
+
+  The first version kept the bed under the axis only, and a stream along a slope ran above the
+  land beside it; the test caught it.
+- **Lip:** the best of 36 bearings round the rim. It keeps clear of the arches' footings and
+  of any island beneath. It prefers shallow cuts and a big drop, and rejects any ravine deeper
+  than three half-widths plus 4 m.
+- **Fall:** water that drops hundreds of metres frays into spray and then mist, as the
+  world's tallest falls do. Each fall has all turned to mist by its reach: at most half the
+  drop to the land below, and at most 220 m + 40 × its width. Its mist trails on below,
+  drifting downwind, with a faint rainbow when the sun is behind the viewer. **No fall reaches
+  the ground**, so none lands on a dry mountain (tested), and every fall has a stream and a
+  lake above it (tested).
+- **Closed shell:** where the stream notches the rim, the underside follows it down, so top
+  and underside still meet at the lip (tested).
+
+**Arches** (`arches.ts`) are natural rock bridges from inside one island's rim to inside
+another's:
+- the deck is never steeper than 0.3 and is crowned with grass;
+- it is 10–18 m wide mid-span and 2–2.6 times that where it roots into the islands;
+- its rock is about 1/30 of the span thick in the middle and 1/12 at the ends, with a ragged
+  keel of hanging spurs;
+- it never crosses another island;
+- `kind: 'arch'` leaves room for built bridges.
+
+**Physics** (`realm.ts`):
+- The hero stands on tops and arch decks, swims in sky lakes, wades in streams and falls off
+  rims. Swimming needed a water level that depends on position: `HeroState.water`, the sea or
+  a sky lake or stream.
+- The camera keeps clear of sky water.
+- First person stands on tops and decks.
+- Tests: the hero runs to a hub's lake and swims, crosses an arch to a satellite without
+  falling, and falls 300 m+ off a rim.
+- `?spawn=sky` starts the game on the nearest hub, beside an arch's footing.
+- Fly mode's ceiling was 1,150 m, under the WebGL2 ray-march's early-exit height. It hid the
+  realm behind an invisible ceiling from the ground. On WebGPU it is now 3,500 m
+  (`FLY_CEILING`, tested against the highest top). Checked in the production build: from the
+  ground spawn, fly up (about 30 s), over the hub, F, and the hero lands on its top.
+
+**Rendering:**
+- **The realm buffer** is re-picked every 250 m, nearest archipelagos first. Floating rocks
+  are uploaded only within 6 km. It holds up to 256 islands, 4,096 stream points and 96 arches.
+- **Polar meshes** draw undersides always, and tops unless the sky rings hold all of them.
+  Rings are bunched toward the rim (its cliff), at three levels of detail (8×32, 24×96,
+  64×192) chosen by on-screen size.
+- **Sky rings** draw the tops near a camera that is up among the islands: a geometry clipmap of
+  six rings of 128² cells, 1 m cells first, out to ±2 km. Each vertex takes the top of its
+  island and is cut along the outline by a clip distance (the signed distance inside it;
+  `discard` if the device lacks the feature).
+  - A compute pass caches each ring's heights, normals and clip distances. It remakes a ring
+    only when that ring moves or the realm changes. Evaluated per vertex every frame instead,
+    the rings cost × 1.39 on island views; cached, × 1.00.
+- **Water:** lakes as a blended disc at the water line (frozen ones as opaque, cracked ice),
+  and streams as a ribbon down the channel with foam streaks, white water in the rapids and at
+  the lip.
+- **Shadows:** the undersides and arches seen from the sun go into a 2,048² shadow map
+  (±9 km, double-buffered like the trees'), replacing the analytic disc shadows.
+- **The cloud deck veils what lies across it:** islands seen from the land sit partly behind
+  the same clouds as the sky round them, and from an island the land lies under a sea of
+  clouds.
+- **Fog** looking up takes the colour of the sky behind it rather than the horizon's haze;
+  islands had read as pale ghosts.
+- **Surfaces:**
+  - beyond the forest's drawing range an island's top is painted with its canopy;
+  - undersides show strata, vertical weathering and a wet streak under the fall's lip;
+  - a soft bounce from the cloud deck lights undersides above it.
+- **Grass** grows on tops and arch decks in the biome's colours, height and flowers. It grows
+  where the top is nearer the camera than the land below, never on bare crag or under snow.
+- **The forest's second layer:** a second layer of placement slots holds the sky's trees, so
+  the land under an island keeps its own trees. Before, every cell held one plant, island or
+  land, and the ground under each island was bare.
+  - The sky layer's GPU placement matches its CPU twin in 99.999–100 % of 147,456 cells per
+    view (`bun bench/webgpu.ts parity --config=realm`).
+
+**Bugs found on the way:**
+- **NaN at the origin.** WGSL `atan2(0, 0)` is NaN on Metal, and Metal's `min` returns the
+  other operand. A polar mesh's centre vertex got NaN relief, and the lake shore's steep curve
+  replaced it: a 240 m spire, at coarse levels of detail only. The fix is an `atan2` that is 0
+  at the origin.
+- **Garbage streams.** When the stream points ran out of room, islands whose streams were
+  left out were still drawn as streams, reading other islands' points.
+
+**Cost** (1920×1080; each ratio the geometric mean of both variant orders, each order in
+brackets; this session ran warm, so absolute times were up to 1.5× the earlier sessions'):
+
+| Views | Realm vs the same world without it | Notes |
+| :--- | ---: | :--- |
+| 20 gallery views on the land (the game's typical views) | × 1.00 (0.95, 1.05) | no measurable cost |
+| 15 views on and among the islands | × 1.13 (1.09, 1.17) | p50 8.2–8.6 ms; against empty sky, so the islands' own trees, grass and water |
+| the sky rings, on those views (one order) | × 1.00 | × 1.39 before their cache |
+
+In game (production build, High, 2560×1440 canvas): 60.0 fps in third and first person, on
+the land and on the hub (`?spawn=sky`). Dynamic resolution was never reduced. JavaScript
+allocation: +0.16 MB/s for the realm (2.06 against 1.91 MB/s without it); its per-frame
+layout allocates nothing.
+
+**Tests:**
+- `tests/skyworld.test.ts`: 20 tests covering layout, closed shells, water that never spills
+  or climbs, falls with sources that turn to mist above the land, walkable arches, biome
+  logic, sky flora, and the hero on tops, in lakes and on arches.
+- `tests/skyRealm.test.ts`: 6 tests covering the realm buffer against the WGSL structs, the
+  clip-distance and discard variants, the packing round the spawn, and the meshes.
+
+**Room for a sky civilization:**
+- Each archipelago is a graph of islands joined by arches, with a trait.
+- Each island carries its biome, its water and its flat dry ground, which `nearWater`, the
+  slope and ρ already find.
+- Ruins already take sites on island tops, clear of the water.
+- Settlements, built bridges (a new `Arch` kind), and roads along the graph can hook in there
+  without touching the terrain.
+
+### Performance pass: the default preset past 120 fps, the picture unchanged
+
+**How it was measured.**
+- **In game.** Chrome on macOS holds `requestAnimationFrame` to the display's 60 Hz, even with
+  vsync switched off. `bench/play.ts` `uncapped` therefore paces the engine by the GPU (two
+  frames in flight).
+  - Two production builds were compared: the code before this pass and after it.
+  - Sessions alternated between the builds: 3 rounds × 8 s each.
+  - Hero mode, 1440×790 CSS pixels at DPR 2, a 2880×1580 canvas.
+- **Bench.** `bench/webgpu.ts stills --timing` ran the game's own variant (`game-med`,
+  `game-high`: `GAME_VARIANT` at the presets' internal scale) at 2880×1580.
+  - Every ratio is paired and taken in both orders, with 4–6 reps.
+  - `--noshots=1` times without saving images.
+  - `profile.ts` stamps every pass.
+  - The `taa` mode times the TAA passes alone.
+  - The scenes are the gallery, the `run` path (third person), the `realm` views and the `hub`
+    (the hero on the sky hub, as `?spawn=sky`; `framed-hub.json`).
+- **Picture.** The 20 gallery views at 2880×1580, converged (8 frames), compared with the same
+  views rendered by the code before this pass.
+
+**In game** (fps; the means of 3 alternated rounds, rounds in brackets):
+
+| Preset | Scene | Before | After | Ratio |
+| :--- | :--- | ---: | ---: | ---: |
+| Medium (default) | land | 104 (108, 105, 100) | **145** (148, 149, 138) | × 1.39 |
+| Medium | sky hub | 106 (104, 108, 106) | **147** (152, 146, 142) | × 1.39 |
+| High | land | 67 (72, 66, 65) | **96** (102, 94, 93) | × 1.43 |
+| High | sky hub | 82 (87, 80, 79) | **103** (101, 105, 103) | × 1.26 |
+
+The display is 60 Hz, so the game shows 60 fps. These figures are what the GPU sustains: the
+headroom, and what a faster display would show.
+
+**What changed, and what each bought** (bench ratios of the whole frame, both orders):
+- **The ground's colour from the clipmap.** Moisture, the vegetation clumps and the grass's two
+  patch fields were six value noises per pixel per frame. They are now baked once per lattice
+  point into a material layer, written by the sun/horizon pass, and sampled with the height and
+  the sun layer in one level lookup (`groundCacheAt`).
+  - Height and slope, which turn the colour sharply, stay per pixel, so near ground looks as it
+    did.
+  - Frame × 0.895 at Medium.
+  - A first version cached the albedo itself. It was faster (× 0.86) but softened a cliff
+    top's crisp edge, and was dropped.
+- **The normal beyond 60–120 m from the sun layer's gradient.** This is a LOD improvement.
+  Central differences over the lattice follow the land's smooth contours, where the cached
+  surface's facets drew distant ridge crests, valley creases and snow edges as stair-steps.
+  Near the camera the faceted normal is kept, as before. On the glide views these are the only
+  differences above a JND.
+- **Lookup tables as `const`, not `var<private>`.** Tint copied each private table into every
+  invocation: about 50 tables of species, sky biomes and placement zones. The frame got
+  × 0.927 at High (`run`).
+- **TAA in half precision.** The colour arithmetic runs in f16; positions and the reprojection
+  stay f32. TAA alone went from 2.09 to 1.64 ms at High (resolve 1.18 → 0.81, present
+  0.90 → 0.82).
+  - The scene target is now 10-bit (`rgb10a2unorm`, display-encoded values), half the bytes of
+    16-bit floats; the history stays f16.
+  - Fog's colour, the tone map and the gamma are in f16 too (about × 0.98).
+- **Terrain rings culled by block.** Each ring's index buffer is laid out in 16 × 16-cell
+  blocks, ordered round the ring by angle (`ringBlockOrder`). Only the blocks whose boxes meet
+  the view are drawn, one or two runs a ring. The images are bit-identical; about 40 % of the
+  terrain's 820 k triangles are left out.
+- **The sky realm's shadow map and the sky LUT are made only when they would change.**
+  - The shadow map is redrawn when the sun turns 0.05° or the camera moves 500 m. A day of
+    12 real minutes then asks for one every 0.1 s.
+  - A 64 × 64 caster mask, made with each map, lets every surface skip the realm's four shadow
+    taps where nothing is in reach. They had run for every pixel within 9 km.
+  - The sky LUT and its probe are remade when what they read moves past a tolerance.
+- **Grass.** Rings 3 and 4 (63 m and more away) bend in two segments, not three (a LOD of the
+  geometry; within a third of a pixel).
+  - The sky's blades are cached per lattice cell (`bladeCache`, tagged with their cell). The
+    scatter on the hub went from 1.68 to 0.32 ms, though it overlapped other passes, so the
+    frame did not change.
+  - One walk along an island's stream now serves the water, the top and the damp, where it
+    took up to five.
+- **The hero.**
+  - It is traced only inside the box round its parts, and its scissor is that box on screen.
+  - The belt and the sword, sheath and shield are skipped like the limbs where they cannot be
+    nearest.
+  - The trace returns the material it hit.
+  - Contact darkening returns early 3 m away.
+- **Work the picture cannot show is skipped.**
+  - Behind opaque fog (optical depth > 5.82) the ground, the water and the islands' surfaces
+    return the fog without being shaded.
+  - The fog stops reading the sky dome where it does not blend it in (looking down).
+  - Water skips its ripple noise past 300 m and its foam noise in deep water.
+
+**The picture** (20 gallery views against the code before this pass):
+- Mean ΔE 0.0022; 0.47 % of pixels above a JND on average, 1.28 % in the worst view.
+- The differences are the smoother far ridges, the far grass's blade shapes, and rounding.
+- Close-ups of the hero, the ground and the trees are unchanged.
+
+**Dead ends** (measured, reverted):
+- **TAA as compute kernels.** Workgroup tiles, 12 point loads where there were 9 bilinear taps.
+  The image was identical but cost 3.08 against 1.50 ms. Fragment passes write tile memory;
+  compute writes go out to memory.
+- **The present sampling a 10-bit copy of the history.** No change (0.90 ms either way): it is
+  not filter-bound.
+- **Drawing the hero first.** No change on the `run` views. Kept, because whatever lies behind
+  it is then never shaded.
+
+**What the measurements taught:**
+- **Per-pass "end minus previous end" gaps go wrong once compute is in the frame.** Compute
+  overlaps the render passes, and the gaps made TAA look like 2.5–3 ms. Time a pass alone, and
+  attribute the main pass by ablation (`STUB_*` constants, `skip`).
+- **Compute that overlaps render passes hides its cost.** Making the grass scatter five times
+  cheaper moved the frame by nothing.
+- **The big fragment shaders are register-bound.** Stubbing fog out of every surface saved 9 %
+  of the frame for a few dozen instructions, and the biome's remaining arithmetic 6.5 %.
+  Fewer live values (f16, caching) pays more than fewer instructions.
+- **Two variants cost very differently in one page.** With eight renderers at 2880×1580 the
+  8 GB machine paged and every ratio was noise. Keep it to two or three renderers per session.
+
+**Bench switches added** (the game never sets them): `stub` and `stubAll` (`STUB_*`,
+`PER_PIXEL_GROUND`, `CACHED_GRAD`, `NO_BLADE_CACHE`), `skip` (main-pass draws), `privateTables`,
+`taaF32`, `shadeF32`, `heroLate`, and `RealmSpec.stubGround`. Their pipelines fold the constants.
+
 ## Next
 
+- High at 120 fps on this M1 Air: High is at 96–103 fps. What remains, each 4–12 % at High:
+  - the hero (its trace could skip the limb groups its ray never comes near);
+  - the terrain's per-pixel biome and shadows (register pressure: f16 through the lighting);
+  - water, the tree shadow pass and the sky's clouds.
+- A sky civilization on the archipelagos: settlements on the hubs' flat dry ground, built
+  bridges as a new arch kind, roads along each archipelago's graph of islands and arches.
+- A way up to the islands in play (updrafts or launch towers, as in Tears of the Kingdom);
+  today it is fly mode, or `?spawn=sky`.
+- Climbable island undersides and cliffs (the underside is not solid to the hero yet), and
+  falls that feed a lower island's lake.
+- Leafy shadows: the tree shadow map draws the crowns' cores, not their cards. Cut-out cards
+  in the shadow pass would give dappled light under the trees; that pass has no colour to
+  save, so its cost is the cards' depth alone, still to be measured.
+- The far level's crowns are still smooth lumps beyond ~120 m, where the middle level's cards
+  have shrunk away.
 - Cloud shadows drifting over the land by day (a small texture of the cloud layer, once a frame).
 - The horizon bake when flying fast (+2 ms at 200 m/s): bake coarse levels at half rate, or
   reuse the coarser level's far horizon with a height correction.
 - Clouds with volume, and a bloom pass for the shrine lines, the sun and the moon.
-- Leaf cards round the clumps of near trees for a fluffier outline.
 - Erosion-like gullies and cliff bands in the world function (each needs its generation
   cost measured against the E1 budget).
 - The hero rig update allocates about 0.25 MB/s. It predates this work but is the top JS
