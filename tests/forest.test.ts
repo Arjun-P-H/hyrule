@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { PLAYER, SPAWN, VALLEY } from '../src/lib/constants';
+import { PLAYER, SPAWN } from '../src/lib/constants';
 import { trunksNear } from '../src/lib/forest/collision';
 import { buildLeafAtlas, LEAF_MIPS, LEAF_SIZE, LEAF_STYLES } from '../src/lib/forest/leafAtlas';
 import { buildTreeModels, SURFACE_SPAN, trunkColliders, VERTEX_BYTES } from '../src/lib/forest/models';
@@ -7,7 +7,7 @@ import { createHeroState, firstPersonGround, updateHero, type HeroInput } from '
 import { forestAt, forestCanopy, plantInCell, RULES, type Plant } from '../src/lib/forest/placement';
 import { CELL, LODS, SPECIES, SPECIES_INFO, VARIANTS } from '../src/lib/forest/species';
 import { TileWindow } from '../src/lib/forest/tiles';
-import { elevation, updatePlayer, type InputState, type PlayerState } from '../src/lib/terrainMath';
+import { elevation, updatePlayer, waterLevel, type InputState, type PlayerState } from '../src/lib/terrainMath';
 
 const SEED = 1337;
 const models = buildTreeModels();
@@ -161,18 +161,18 @@ describe('tree models', () => {
 describe('where trees grow', () => {
   // Sample the land round the spawn: the dominant zone and forest body on a grid.
   const spots: Array<{ x: number; z: number; zone: string; mask: number }> = [];
-  for (let z = SPAWN.z - 9000; z <= SPAWN.z + 9000; z += 150) {
-    for (let x = SPAWN.x - 9000; x <= SPAWN.x + 9000; x += 150) {
+  for (let z = SPAWN.z - 16000; z <= SPAWN.z + 16000; z += 240) {
+    for (let x = SPAWN.x - 16000; x <= SPAWN.x + 16000; x += 240) {
       const f = forestAt(x, z, SEED);
       if (f) spots.push({ x, z, ...f });
     }
   }
   const inZone = (zone: string) => spots.filter((s) => s.zone === zone);
   /** Plants in the 60 m squares round the first few spots of a zone. */
-  const plantsIn = (zone: string, n: number) => {
+  const plantsIn = (zone: string, n: number, every = 7) => {
     const out: Plant[] = [];
     let cells = 0;
-    for (const s of inZone(zone).filter((_, k) => k % 7 === 0).slice(0, n)) {
+    for (const s of inZone(zone).filter((_, k) => k % every === 0).slice(0, n)) {
       for (let iz = Math.floor((s.z - 30) / CELL); iz < (s.z + 30) / CELL; iz++) {
         for (let ix = Math.floor((s.x - 30) / CELL); ix < (s.x + 30) / CELL; ix++) {
           cells++;
@@ -184,12 +184,19 @@ describe('where trees grow', () => {
     return { out, ha: (cells * CELL * CELL) / 1e4 };
   };
 
-  test('open land is the rule: forests cover a fifth to a third of mild land, none of savanna or desert', () => {
+  test('each zone its own cover: dense woods and taiga, open plains, no forests on the savanna or the desert', () => {
     const cover = (zone: string) => inZone(zone).filter((s) => s.mask > 0.5).length / Math.max(inZone(zone).length, 1);
     expect(inZone('temperate').length).toBeGreaterThan(1000);
-    expect(cover('temperate')).toBeGreaterThan(0.12);
-    expect(cover('temperate')).toBeLessThan(0.3);
-    expect(cover('autumn')).toBeLessThan(0.38);
+    // (TotK-open: woods in bodies with meadows between them, not one canopy. TotK's own share of land
+    // in stands — 50 m blocks of six trees or more — is 12 % in West Necluda, 16 % in Akkala's woods,
+    // 12 % in the Great Hyrule Forest, 6-13 % among the Zora's conifers, 8 % on Hyrule Field; its
+    // jungle (Faron) is no stand but trees spread evenly over two thirds of the land)
+    expect(cover('temperate')).toBeGreaterThan(0.08);
+    expect(cover('temperate')).toBeLessThan(0.35);
+    expect(cover('taiga')).toBeGreaterThan(0.06);
+    expect(cover('sacred')).toBeGreaterThan(0.05);
+    expect(cover('rainforest')).toBeGreaterThan(0.3);
+    expect(cover('plains')).toBeLessThan(0.12);
     expect(cover('savanna')).toBe(0);
     expect(cover('desert')).toBe(0);
   });
@@ -218,22 +225,46 @@ describe('where trees grow', () => {
 
   test('each climate grows its own trees, in the right amounts', () => {
     const top = (zone: string) => {
-      const { out, ha } = plantsIn(zone, 30);
-      const trees = out.filter((p) => p.species !== 'bush');
+      // (TotK-sparse woods come in clumps: enough squares to average over them)
+      const { out, ha } = plantsIn(zone, 120, 3);
+      // (the zone's own trees: not its bushes, nor the line along a shore)
+      const trees = out.filter((p) => p.species !== 'bush' && p.feature !== 'shore');
       const count = new Map<string, number>();
       for (const p of trees) count.set(p.species, (count.get(p.species) ?? 0) + 1);
       return { species: [...count.entries()].sort((a, b) => b[1] - a[1])[0]?.[0], perHa: trees.length / ha };
     };
     const temperate = top('temperate'), mountain = top('mountain'), savanna = top('savanna'), desert = top('desert');
+    const taiga = top('taiga'), plains = top('plains'), rainforest = top('rainforest'), sacred = top('sacred');
     expect(temperate.species).toBe('oak');
     expect(top('autumn').species).toBe('maple');
     expect(mountain.species).toBe('pine');
+    expect(taiga.species).toBe('pine');
+    expect(rainforest.species).toBe('jungle');
+    expect(top('wetland').species).toBe('birch');
+    expect(sacred.species).toBe('oak');
     expect(savanna.species).toBe('acacia');
     expect(desert.species).toBe('cactus');
-    expect(temperate.perHa).toBeGreaterThan(8);
-    expect(temperate.perHa).toBeLessThan(45);
-    expect(savanna.perHa).toBeLessThan(6);
-    expect(desert.perHa).toBeLessThan(5);
+    // (TotK's trees per hectare of land, its 25,163 tree actors counted by climate zone: West Necluda
+    // 8.9, East Necluda 4.1, the Great Hyrule Forest 7.5, the Zora's conifers 4.3-8.3, Hyrule Field
+    // 5.5, the Gerudo plateau's baobabs 0.24, the Gerudo Desert 0.8-1.0, nearly all cacti)
+    expect(temperate.perHa).toBeGreaterThan(4);
+    expect(temperate.perHa).toBeLessThan(14);
+    expect(taiga.perHa).toBeGreaterThan(0.5 * temperate.perHa);
+    expect(sacred.perHa).toBeGreaterThan(0.5 * temperate.perHa);
+    expect(plains.perHa).toBeGreaterThan(2.5);
+    expect(plains.perHa).toBeLessThan(10);
+    expect(savanna.perHa).toBeLessThan(1.2);
+    expect(desert.perHa).toBeLessThan(2);
+  }, 20000); // (each square's trees evaluate the world at every 6 m cell, over 120 squares a zone)
+
+  test('the sacred groves grow old giants, in moss and gold', () => {
+    const { out } = plantsIn('sacred', 30);
+    const trees = out.filter((p) => p.feature === 'forest');
+    const giants = trees.filter((p) => p.scale > 1.6);
+    expect(giants.length / trees.length).toBeGreaterThan(0.15);
+    expect(trees.some((p) => p.palette >= 0)).toBe(true);
+    // (and the temperate woods keep their own colours)
+    expect(plantsIn('temperate', 10).out.every((p) => p.palette < 0)).toBe(true);
   });
 
   test('the far canopy predicts the trees: forest trees grow where and as often as forestCanopy says, of its species', () => {
@@ -244,8 +275,8 @@ describe('where trees grow', () => {
         let p = 0, g = 0;
         const count = new Map<string, number>();
         const want = new Map<string, number>();
-        for (let iz = Math.floor((s.z - 30) / CELL); iz < (s.z + 30) / CELL; iz++) {
-          for (let ix = Math.floor((s.x - 30) / CELL); ix < (s.x + 30) / CELL; ix++) {
+        for (let iz = Math.floor((s.z - 45) / CELL); iz < (s.z + 45) / CELL; iz++) {
+          for (let ix = Math.floor((s.x - 45) / CELL); ix < (s.x + 45) / CELL; ix++) {
             const c = forestCanopy((ix + 0.5) * CELL, (iz + 0.5) * CELL, SEED);
             if (c) { p += c.forest; want.set(c.species, (want.get(c.species) ?? 0) + c.forest); }
             const plant = plantInCell(ix, iz, SEED);
@@ -253,7 +284,7 @@ describe('where trees grow', () => {
           }
         }
         predicted += p; grown += g; squares++;
-        errs.push(Math.abs(g - p) / Math.max(p, 4));
+        errs.push(Math.abs(g - p) / Math.sqrt(Math.max(p, 4)));
         if (g >= 10) {
           speciesSquares++;
           const top = (m: Map<string, number>) => [...m.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
@@ -265,16 +296,26 @@ describe('where trees grow', () => {
     expect(grown).toBeGreaterThan(400);
     // Over all squares the expected count is the count (the draws are independent per cell) ...
     expect(Math.abs(grown - predicted) / predicted).toBeLessThan(0.08);
-    // ... and square by square within the draws' own spread (a 100-cell square at a share of ~0.3: ±~15 %).
+    // ... and square by square within the draws' own spread: about √p trees for p expected (a jungle's
+    // thin stands as well as a temperate wood's), so the median square is within one such spread
+    // (independent draws alone give ~0.67).
     errs.sort((a, b) => a - b);
-    expect(errs[Math.floor(errs.length / 2)]).toBeLessThan(0.2);
+    expect(errs[Math.floor(errs.length / 2)]).toBeLessThan(1);
     // The species painted is the one grown (a stand mixes two near its borders).
     expect(speciesHits / speciesSquares).toBeGreaterThan(0.8);
   });
 
+  test('the zones\' coarse grids are whole lattice cells (the GPU divides them as integers)', () => {
+    for (const r of Object.values(RULES)) {
+      expect(r.groveGrid % CELL).toBe(0);
+      expect(r.loneGrid % CELL).toBe(0);
+    }
+  });
+
   test('lone trees never crowd each other', () => {
     const lone: Plant[] = [];
-    for (let iz = -470; iz < -400; iz++) for (let ix = 300; ix < 420; ix++) {
+    const C0 = Math.floor(SPAWN.x / CELL), R0 = Math.floor(SPAWN.z / CELL);
+    for (let iz = R0 - 150; iz < R0 + 150; iz++) for (let ix = C0 - 150; ix < C0 + 150; ix++) {
       const p = plantInCell(ix, iz, SEED);
       if (p?.feature === 'lone') lone.push(p);
     }
@@ -282,18 +323,26 @@ describe('where trees grow', () => {
     for (const a of lone) for (const b of lone) {
       if (a !== b) expect(Math.hypot(a.x - b.x, a.z - b.z)).toBeGreaterThan(0.29 * RULES.temperate.loneGrid);
     }
+  }, 20000); // (90,000 cells round the spawn, each placed on the ground)
+
+  test('woods stay walkable: no zone fills more than 40 % of its 6 m cells (trunks ~10 m apart and more)', () => {
+    for (const z of Object.keys(RULES) as (keyof typeof RULES)[]) {
+      expect({ z, fill: RULES[z].fill <= 0.4 }).toEqual({ z, fill: true });
+      expect({ z, grove: RULES[z].groveFill <= 0.4 }).toEqual({ z, grove: true });
+    }
   });
 
   test('never in water, never on cliffs; the same cell always grows the same plant', () => {
     let plants = 0;
-    for (let iz = -560; iz < -500; iz++) {
-      for (let ix = 280; ix < 400; ix++) {
+    const C0 = Math.floor(SPAWN.x / CELL), R0 = Math.floor(SPAWN.z / CELL);
+    for (let iz = R0 - 30; iz < R0 + 30; iz++) {
+      for (let ix = C0 - 60; ix < C0 + 60; ix++) {
         const p = plantInCell(ix, iz, SEED);
         expect(plantInCell(ix, iz, SEED)).toEqual(p);
         if (!p) continue;
         plants++;
         const e = elevation(p.x, p.z, SEED, 1);
-        expect(e).toBeGreaterThanOrEqual(VALLEY.wLevel + 0.3);
+        expect(e).toBeGreaterThanOrEqual(waterLevel(p.x, p.z, SEED) + 0.3);
         const slope = Math.hypot(elevation(p.x + 1.5, p.z, SEED, 1) - e, elevation(p.x, p.z + 1.5, SEED, 1) - e) / 1.5;
         expect(slope).toBeLessThan(1.3);
       }
@@ -392,7 +441,8 @@ describe('tree collision', () => {
 
   test('bushes do not block', () => {
     let bushes = 0;
-    for (let iz = -470; iz < -420 && bushes < 20; iz++) for (let ix = 330; ix < 400 && bushes < 20; ix++) {
+    const C0 = Math.floor(SPAWN.x / CELL), R0 = Math.floor(SPAWN.z / CELL);
+    for (let iz = R0 - 40; iz < R0 + 40 && bushes < 20; iz++) for (let ix = C0 - 60; ix < C0 + 60 && bushes < 20; ix++) {
       const p = plantInCell(ix, iz, SEED);
       if (p?.species !== 'bush') continue;
       bushes++;

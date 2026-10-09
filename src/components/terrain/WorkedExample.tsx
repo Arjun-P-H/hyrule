@@ -23,23 +23,21 @@ type Data = {
   hit: boolean;
 };
 
-// Invariant converged pitch targeting the vista ridge under seed 1337
-const BEST_PITCH = 0.0;
 
 /** One-shot deterministic computation — the §30 march with recording on. */
 function compute(): Data {
   const foot = (2 * Math.tan((CAMERA.fov * Math.PI / 180) * 0.5)) / WORKED_EXAMPLE.resY;
   const camY = elevation(SPAWN.x, SPAWN.z, DEFAULT_SEED, 0) + WORKED_EXAMPLE.camHeight;
   const ro: [number, number, number] = [SPAWN.x, camY, SPAWN.z];
-  const cp = Math.cos(BEST_PITCH), sp = Math.sin(BEST_PITCH);
-  const rd: [number, number, number] = [Math.sin(SPAWN.yaw) * cp, sp, Math.cos(SPAWN.yaw) * cp];
+  const cp = Math.cos(WORKED_EXAMPLE.pitch), sp = Math.sin(WORKED_EXAMPLE.pitch);
+  const rd: [number, number, number] = [Math.sin(WORKED_EXAMPLE.yaw) * cp, sp, Math.cos(WORKED_EXAMPLE.yaw) * cp];
 
   const rec = marchRay(ro, rd, DEFAULT_SEED, {
     steps: 96, footprint: foot, record: true,
   });
   return {
     tStar: rec.t,
-    pitch: BEST_PITCH,
+    pitch: WORKED_EXAMPLE.pitch,
     stepsUsed: rec.rows.length,
     rows: rec.rows,
     bisect: rec.bisectRows,

@@ -25,6 +25,22 @@ import type { SkyBiome } from './biomes';
 
 export type IslandKind = 'hub' | 'satellite' | 'isle' | 'debris' | 'lone';
 
+/** What hangs under an island (SKY_CIVILIZATION.md §2, §7): bare rock, rock veined with glowing skystone, roots, basalt, ice. */
+export const UNDERSIDES = ['rock', 'crystal', 'roots', 'basalt', 'ice'] as const;
+export type Underside = (typeof UNDERSIDES)[number];
+
+/** Where an Eyrie has paved and built on an island (eyrie/district.ts builds and reads it). */
+export type DistrictMap = {
+  /** Half side of its square (m) and texel size (m); the square is centred on the island. */
+  half: number;
+  cell: number;
+  /** DISTRICT_N² × 2 bytes: paving, footprints (rg8unorm). */
+  data: Uint8Array<ArrayBuffer>;
+};
+
+/** An extra hanging spike under an island: island-local centre, radius, how far it hangs below the underside's base. */
+export type Lobe = { x: number; z: number; r: number; d: number };
+
 /** A lake: an elliptical bowl with a wobbly shore, island-local. */
 export type Lake = {
   x: number; z: number;     // centre (island-local m)
@@ -65,6 +81,15 @@ export type SkyIsland = {
   cliff: number; depth: number;     // underside: rim wall, inverted mountain (m)
   seed: number;                     // noise seed (int32)
   biome: SkyBiome;
+  /** Shape the Eyries give their islands (0: none): terraces this many metres high, a rim raised round a bowl (× hill), a tilt (rise per metre along x, z). */
+  terrace: number; bowl: number; tiltX: number; tiltZ: number;
+  /** Extra hanging spikes under it (≤ 4), and what its underside is made of. */
+  lobes: Lobe[];
+  under: Underside;
+  /** Its water's tint: 0 the biome's, 1 the turquoise of a tended lagoon. */
+  tint: number;
+  /** Where its Eyrie has paved and built on it (eyrie/district.ts), once its buildings are raised. */
+  district?: DistrictMap;
   lake: Lake | null;
   stream: Stream | null;
   fall: Fall | null;
@@ -96,6 +121,16 @@ export function insideBy(isl: SkyIsland, x: number, z: number): number {
   return isl.R * outline(isl, Math.atan2(qz, qx)) - Math.hypot(qx, qz);
 }
 
+/**
+ * Terraces: a height h folded into level steps T high, each rising to the next over the last
+ * quarter of its run (a steep bank the Eyries face with walls and stairs). Shared with the WGSL.
+ */
+function terraced(h: number, T: number): number {
+  if (T <= 0) return h;
+  const k = Math.floor(h / T), f = h / T - k;
+  return T * (k + smooth(0.75, 1, f));
+}
+
 /** The top before the water is carved into it, at island-local (qx, qz) with normalised radius rho. */
 function relief(isl: SkyIsland, qx: number, qz: number, rho: number): number {
   const wl = isl.wl, s = isl.seed;
@@ -107,7 +142,9 @@ function relief(isl: SkyIsland, qx: number, qz: number, rho: number): number {
     h += isl.hill * isl.crag * 1.1 * k * k;
   }
   if (isl.peak > 0) h += isl.hill * isl.peak * 2.2 * Math.exp(-(rho / 0.32) * (rho / 0.32));
-  return isl.y + h * (1 - smooth(0.72, 1, rho)) - S.rimDrop * smooth(0.84, 1, rho);
+  if (isl.bowl > 0) h += isl.hill * isl.bowl * smooth(0.25, 0.85, rho);
+  h = terraced(h, isl.terrace);
+  return isl.y + h * (1 - smooth(0.72, 1, rho)) - S.rimDrop * smooth(0.84, 1, rho) + isl.tiltX * qx + isl.tiltZ * qz;
 }
 
 /** The top before the water is carved into it (hydrology.ts plans the water on it). */
@@ -213,11 +250,21 @@ export function bottomAt(isl: SkyIsland, x: number, z: number): number {
   const R = isl.R, s = isl.seed;
   const wall = isl.cliff * (1 - smooth(0.86, 1, rho));
   const v = Math.max(0, 1 - rho / 0.86);
-  const cone = isl.depth * Math.pow(v, 0.75) * (0.8 + 0.35 * (0.5 + 0.5 * vnoise(qx / (0.22 * R), qz / (0.22 * R), s + 5)));
-  const rock = 0.035 * R * (0.5 + 0.5 * vnoise(qx / (0.09 * R), qz / (0.09 * R), s + 6)) * (1 - smooth(0.8, 1, rho));
-  const dn = Math.max(0, vnoise(qx / (0.075 * R), qz / (0.075 * R), s + 7));
-  const drip = 0.11 * R * dn * dn * dn * (1 - smooth(0.55, 0.9, rho));
+  const cone = isl.depth * Math.pow(v, 0.9) * (0.8 + 0.35 * (0.5 + 0.5 * vnoise(qx / (0.22 * R), qz / (0.22 * R), s + 5)));
+  const rock = 0.05 * R * (0.5 + 0.5 * vnoise(qx / (0.09 * R), qz / (0.09 * R), s + 6)) * (1 - smooth(0.8, 1, rho));
+  // Hanging spires of rock, two sizes, out nearly to the rim.
+  const dn = Math.max(0, vnoise(qx / (0.07 * R), qz / (0.07 * R), s + 7));
+  const dn2 = Math.max(0, vnoise(qx / (0.042 * R), qz / (0.042 * R), s + 8));
+  const drip = 0.17 * R * dn * dn * dn * (1 - smooth(0.6, 0.95, rho)) + 0.07 * R * dn2 * dn2 * dn2 * (1 - smooth(0.4, 0.97, rho));
   let b = isl.y - S.rimDrop - wall - cone - rock - drip;
+  // The extra spikes: inverted cones off the middle, so an underside hangs as a cluster of spires.
+  // (they die away toward the rim, where top and underside meet)
+  const lobeRim = 1 - smooth(0.85, 1, rho);
+  for (const L of isl.lobes) {
+    const t = Math.max(0, 1 - Math.hypot(qx - L.x, qz - L.z) / L.r);
+    if (t > 0) b = Math.min(b, isl.y - S.rimDrop - wall - L.d * lobeRim * Math.pow(t, 1.6) * (0.88 + 0.24 * (0.5 + 0.5 * vnoise((qx - L.x) / (0.3 * L.r), (qz - L.z) / (0.3 * L.r), s + 9))));
+  }
+  b += isl.tiltX * qx + isl.tiltZ * qz;
   // Where the stream notches the rim, the underside follows the notch down.
   if (isl.stream && rho > 0.8) {
     const n = nearestOnStream(isl.stream, qx, qz, near);
@@ -227,8 +274,10 @@ export function bottomAt(isl: SkyIsland, x: number, z: number): number {
 }
 
 /** The deepest the underside can reach below the top's base height (m): its tip clears SKY_REALM.floor. */
-export function maxDrop(isl: Pick<SkyIsland, 'R' | 'cliff' | 'depth'>): number {
-  return S.rimDrop + isl.cliff + 1.15 * isl.depth + 0.035 * isl.R + 0.11 * isl.R;
+export function maxDrop(isl: Pick<SkyIsland, 'R' | 'cliff' | 'depth'> & { lobes?: readonly Lobe[]; tiltX?: number; tiltZ?: number }): number {
+  const lobes = isl.lobes ? Math.max(0, ...isl.lobes.map((L) => L.d)) : 0;
+  const tilt = (Math.abs(isl.tiltX ?? 0) + Math.abs(isl.tiltZ ?? 0)) * isl.R * 1.2;
+  return S.rimDrop + isl.cliff + Math.max(1.15 * isl.depth + 0.05 * isl.R + 0.24 * isl.R, 1.12 * lobes) + tilt;
 }
 
 /** The water's surface at world (x, z) on this island — its lake or its stream — else NaN. */

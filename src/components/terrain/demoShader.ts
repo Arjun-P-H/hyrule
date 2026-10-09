@@ -13,7 +13,7 @@
  *     therefore follows distance from the origin: 0.6 mm at 3 km, 15 mm at
  *     108 km, 99 mm at 534 km (bench/baseline/parity.json, GROUND_BIAS).
  *   - Restructurings that leave E(x,z) bit-identical (octave unrolling,
- *     vectorized Worley, anomaly pruning) need no CPU mirror; any change to
+ *     vectorized Worley) need no CPU mirror; any change to
  *     the value of E does (tests/mathCore.test.ts pins the shared constants).
  *   - Output transform: gamma 1/2.2 for sRGB monitor calibration.
  *
@@ -21,6 +21,12 @@
  * Camera basis is LEFT-handed (x=right, z=forward) to match the CPU twin's
  * yaw convention: forward = (sin yaw, 0, cos yaw), right = (cos yaw, 0, −sin yaw).
  */
+
+import { CLIMATE, VALLEY } from '../../lib/constants';
+import { LANDS_CONST_GLSL, landsGlsl } from './landsGlsl';
+
+/** A GLSL float literal for a JS number. */
+const glf = (x: number): string => { const t = String(x); return /[.eE]/.test(t) ? t : `${t}.0`; };
 
 export const TERRAIN_VS = /* glsl */ `#version 300 es
 void main() {
@@ -55,42 +61,21 @@ uniform vec3  u_hero_j[18];   // joints (rig.ts J.*), camera-relative
 uniform mat3  u_hero_torso;   // torso frame, columns right / up / forward
 uniform mat3  u_hero_head;    // head frame, columns right / up / forward
 uniform vec4  u_hero_misc;    // x glider open 0..1, y ground under the hero (camera-relative), zw sin/cos facing
+uniform vec3  u_hero_dress;   // the tunic's albedo (src/lib/hero/characters.ts); the cap is a shade darker
 
 out vec4 fragColor;
 
 // ---- contract constants (MIRROR src/lib/constants.ts — audit together) ----
 const float MAXH      = 1300.0;              // early-exit ceiling (§26)
 const float MAXDIST   = 6000.0;              // march cutoff (§16)
-const float F_MACRO   = 512.0  / 1048576.0;  // 1/2048
-const float F_RIDGE   = 341.0  / 1048576.0;  // ~1/3074.6
-const float F_MASK    = 128.0  / 1048576.0;  // 1/8192
-const float F_WARP    = 655.0  / 1048576.0;  // ~1/1600.9
-const float F_VALLEY  = 1942.0 / 1048576.0;  // ~1/539.9
-const float F_CONT    = 64.0   / 1048576.0;  // 1/16384
-const float F_MOIST   = 512.0  / 1048576.0;  // 1/2048
-const float F_DUNE    = 23.0   / 1048576.0;  // dune phase wavelength ~45.6 m
-const float F_CLOUD   = 403.0  / 1048576.0;  // ~1/2601.9
+${LANDS_CONST_GLSL}
 const float VEG_WL    = 14.0;                // vegetation clump wavelength (m)
 
-const int   OCT_MACRO = 9;
-const float LAC_MACRO = 2.0,  GAIN_MACRO = 0.5,  H_BASE  = 90.0;
-const int   OCT_RIDGE = 5;
-const float LAC_RIDGE = 2.17, GAIN_RIDGE = 0.48, H_MOUNT = 880.0;
-const float MASK_LO = 0.28,  MASK_HI = 0.60;
 const int   OCT_WARP = 2;
 const float S_WARP   = 620.0;
-const float C_DEPTH  = 48.0,  W_VALLEY = 0.42, W_LEVEL = 5.0, W_WIDTH = 0.18;
-const float CONT_LO  = 0.22,  CONT_HI  = 0.44, CONT_MIN = 0.2;
-const float REGION_CELL = 8192.0;
-const float REG_BLEND_LO = 0.04, REG_BLEND_HI = 0.18;
-const float REG_HILLS = 0.45, REG_MTN = 1.3, REG_DUNE = 0.85, DUNE_H = 42.0;
-const float ANOM_CELL = 2048.0, P_ANOM = 0.06;
-const float ANOM_R_IN = 380.0,  ANOM_R_OUT = 620.0;
-const float TERRACE_STEP = 70.0, TERRACE_H = 15.0;
-const float SPIRE_H = 250.0, SPIRE_R = 150.0;
-const float SPIRAL_AMP = 16.0, SPIRAL_TURNS = 6.0, SPIRAL_RAD = 0.05;
-const float T_BASE = 14.0, L_LAT = 1.2e-5, L_ALT = 0.02;
-const float M_BASE = 0.5,  M_AMP = 0.40, M_OCEAN = 0.35;
+const float W_VALLEY = ${glf(VALLEY.wValley)}, W_LEVEL = ${glf(VALLEY.wLevel)};
+const float T_BASE = ${glf(CLIMATE.tBase)}, L_LAT = ${glf(CLIMATE.lambdaLat)}, L_ALT = ${glf(CLIMATE.lambdaAlt)};
+const float M_BASE = ${glf(CLIMATE.mBase)},  M_AMP = ${glf(CLIMATE.mNoiseAmp)}, M_OCEAN = ${glf(CLIMATE.mOceanLambda)};
 
 const float LAMBDA  = 0.8;    // Lipschitz step relax (§16)
 const float DMIN    = 0.05;   // minimum step (§16)
@@ -128,8 +113,6 @@ const float HERO_LIMB_PAD = 0.09, HERO_HEAD_REACH = 0.46, HERO_BACK_REACH = 0.52
 const int   HERO_STEPS = 64;
 // Hero palette (linear, pre-exposed for SUN_COL)
 const vec3  HC_SKIN    = vec3(0.38, 0.23, 0.15);
-const vec3  HC_TUNIC   = vec3(0.028, 0.115, 0.022);
-const vec3  HC_CAP     = vec3(0.024, 0.10, 0.019);
 const vec3  HC_HAIR    = vec3(0.40, 0.25, 0.055);
 const vec3  HC_LEATHER = vec3(0.095, 0.045, 0.018);
 const vec3  HC_CREAM   = vec3(0.33, 0.30, 0.23);
@@ -444,336 +427,7 @@ void domainWarp(float x, float y, int seed, float dp, out vec2 q) {
   q = vec2(x + S_WARP * qx, y + S_WARP * qy);
 }
 
-// ---------------------------------------------------------------------------
-// §12 — geological anomalies (Zonai terraces + spire + spiral)
-// ---------------------------------------------------------------------------
-float anomalyE(vec2 g, int seed) {
-  vec2 p_in = g * (1.0 / ANOM_CELL);
-  vec2 ip = floor(p_in);
-  vec2 f = p_in - ip;
-  int cxi0 = int(ip.x);
-  int cyi0 = int(ip.y);
-  uint h0 = hash3(cxi0, cyi0, seed + 400);
-  vec2 p0 = vec2(float(h0 & 0xfffu), float((h0 >> 12u) & 0xfffu)) * (1.0 / 4095.0);
-  vec2 d0 = p0 - f;
-  float f1_sq = dot(d0, d0);
-  vec2 bc = vec2(float(cxi0), float(cyi0)) + p0;
-  float btype = float(h0 >> 24u) * (1.0 / 255.0);
-
-  // A neighbour cell can only change the result if its border lies within
-  // ANOM_R_OUT (beyond it the anomaly is 0 whichever feature owns the point)
-  // and it could hold a nearer feature than the best so far. Pruning against
-  // min(F1², R_out²) visits ~1.5 of 8 neighbours on average, and subsumes the
-  // former cell-interior fast path. Mirrored in terrainMath.anomalyE.
-  const float R_OUT_CELL_SQ = (ANOM_R_OUT / ANOM_CELL) * (ANOM_R_OUT / ANOM_CELL);
-  float fx0_2 = f.x * f.x;
-  float fx1_2 = (1.0 - f.x) * (1.0 - f.x);
-  float fy0_2 = f.y * f.y;
-  float fy1_2 = (1.0 - f.y) * (1.0 - f.y);
-
-  if (fx1_2 < f1_sq && fx1_2 < R_OUT_CELL_SQ) {
-    uint h = hash3(cxi0 + 1, cyi0, seed + 400);
-    vec2 p = vec2(float(h & 0xfffu), float((h >> 12u) & 0xfffu)) * (1.0 / 4095.0);
-    vec2 d = vec2(1.0, 0.0) + p - f;
-    float d2 = dot(d, d);
-    if (d2 < f1_sq) { f1_sq = d2; bc = vec2(float(cxi0 + 1), float(cyi0)) + p; btype = float(h >> 24u) * (1.0 / 255.0); }
-  }
-  if (fy1_2 < f1_sq && fy1_2 < R_OUT_CELL_SQ) {
-    uint h = hash3(cxi0, cyi0 + 1, seed + 400);
-    vec2 p = vec2(float(h & 0xfffu), float((h >> 12u) & 0xfffu)) * (1.0 / 4095.0);
-    vec2 d = vec2(0.0, 1.0) + p - f;
-    float d2 = dot(d, d);
-    if (d2 < f1_sq) { f1_sq = d2; bc = vec2(float(cxi0), float(cyi0 + 1)) + p; btype = float(h >> 24u) * (1.0 / 255.0); }
-  }
-  if (fx0_2 < f1_sq && fx0_2 < R_OUT_CELL_SQ) {
-    uint h = hash3(cxi0 - 1, cyi0, seed + 400);
-    vec2 p = vec2(float(h & 0xfffu), float((h >> 12u) & 0xfffu)) * (1.0 / 4095.0);
-    vec2 d = vec2(-1.0, 0.0) + p - f;
-    float d2 = dot(d, d);
-    if (d2 < f1_sq) { f1_sq = d2; bc = vec2(float(cxi0 - 1), float(cyi0)) + p; btype = float(h >> 24u) * (1.0 / 255.0); }
-  }
-  if (fy0_2 < f1_sq && fy0_2 < R_OUT_CELL_SQ) {
-    uint h = hash3(cxi0, cyi0 - 1, seed + 400);
-    vec2 p = vec2(float(h & 0xfffu), float((h >> 12u) & 0xfffu)) * (1.0 / 4095.0);
-    vec2 d = vec2(0.0, -1.0) + p - f;
-    float d2 = dot(d, d);
-    if (d2 < f1_sq) { f1_sq = d2; bc = vec2(float(cxi0), float(cyi0 - 1)) + p; btype = float(h >> 24u) * (1.0 / 255.0); }
-  }
-  if (fx1_2 + fy1_2 < f1_sq && fx1_2 + fy1_2 < R_OUT_CELL_SQ) {
-    uint h = hash3(cxi0 + 1, cyi0 + 1, seed + 400);
-    vec2 p = vec2(float(h & 0xfffu), float((h >> 12u) & 0xfffu)) * (1.0 / 4095.0);
-    vec2 d = vec2(1.0, 1.0) + p - f;
-    float d2 = dot(d, d);
-    if (d2 < f1_sq) { f1_sq = d2; bc = vec2(float(cxi0 + 1), float(cyi0 + 1)) + p; btype = float(h >> 24u) * (1.0 / 255.0); }
-  }
-  if (fx0_2 + fy1_2 < f1_sq && fx0_2 + fy1_2 < R_OUT_CELL_SQ) {
-    uint h = hash3(cxi0 - 1, cyi0 + 1, seed + 400);
-    vec2 p = vec2(float(h & 0xfffu), float((h >> 12u) & 0xfffu)) * (1.0 / 4095.0);
-    vec2 d = vec2(-1.0, 1.0) + p - f;
-    float d2 = dot(d, d);
-    if (d2 < f1_sq) { f1_sq = d2; bc = vec2(float(cxi0 - 1), float(cyi0 + 1)) + p; btype = float(h >> 24u) * (1.0 / 255.0); }
-  }
-  if (fx1_2 + fy0_2 < f1_sq && fx1_2 + fy0_2 < R_OUT_CELL_SQ) {
-    uint h = hash3(cxi0 + 1, cyi0 - 1, seed + 400);
-    vec2 p = vec2(float(h & 0xfffu), float((h >> 12u) & 0xfffu)) * (1.0 / 4095.0);
-    vec2 d = vec2(1.0, -1.0) + p - f;
-    float d2 = dot(d, d);
-    if (d2 < f1_sq) { f1_sq = d2; bc = vec2(float(cxi0 + 1), float(cyi0 - 1)) + p; btype = float(h >> 24u) * (1.0 / 255.0); }
-  }
-  if (fx0_2 + fy0_2 < f1_sq && fx0_2 + fy0_2 < R_OUT_CELL_SQ) {
-    uint h = hash3(cxi0 - 1, cyi0 - 1, seed + 400);
-    vec2 p = vec2(float(h & 0xfffu), float((h >> 12u) & 0xfffu)) * (1.0 / 4095.0);
-    vec2 d = vec2(-1.0, -1.0) + p - f;
-    float d2 = dot(d, d);
-    if (d2 < f1_sq) { f1_sq = d2; bc = vec2(float(cxi0 - 1), float(cyi0 - 1)) + p; btype = float(h >> 24u) * (1.0 / 255.0); }
-  }
-
-  if (btype >= P_ANOM) return 0.0;
-  vec2 c = bc * ANOM_CELL;
-  vec2 delta = g - c;
-  float r2 = dot(delta, delta);
-  if (r2 >= ANOM_R_OUT * ANOM_R_OUT) return 0.0;
-  float r = sqrt(r2);
-  float theta = atan(delta.y, delta.x);
-  float fall = 1.0 - smoothstep(ANOM_R_IN, ANOM_R_OUT, r);
-  float t = r * (1.0 / TERRACE_STEP);
-  float ft = fract(t);
-  float steps = (floor(t) + smoothstep(0.3, 0.7, ft)) * TERRACE_H;
-  float spire = SPIRE_H * exp(-r2 * (1.0 / (SPIRE_R * SPIRE_R)));
-  float spiral = SPIRAL_AMP * sin(SPIRAL_TURNS * theta + SPIRAL_RAD * r);
-  return fall * (steps + spire + spiral);
-}
-
-// ---------------------------------------------------------------------------
-// §13 — regional rules
-// ---------------------------------------------------------------------------
-struct Reg { float wRegion; float mountFactor; float duneAmount; };
-
-Reg regionField(vec2 g, int seed) {
-  vec2 p_in = g * (1.0 / REGION_CELL);
-  vec2 ip = floor(p_in);
-  vec2 f = p_in - ip;
-  int cxi0 = int(ip.x);
-  int cyi0 = int(ip.y);
-  uint sTerm = uint(seed + 900) * 0x9e3779b9u;
-  uint cy_term = uint(cyi0) * 0x27d4eb2fu;
-  uint row0  = cy_term ^ sTerm;
-  uint rowP1 = (uint(cyi0 + 1) * 0x27d4eb2fu) ^ sTerm;
-  uint rowM1 = (uint(cyi0 - 1) * 0x27d4eb2fu) ^ sTerm;
-  uint cx0  = uint(cxi0);
-  uint cxP1 = uint(cxi0 + 1);
-  uint cxM1 = uint(cxi0 - 1);
-
-  uint h0 = hashU(cx0 ^ row0);
-  vec2 p0 = vec2(float(h0 & 0xfffu), float((h0 >> 12u) & 0xfffu)) * (1.0 / 4095.0);
-  vec2 d0 = p0 - f;
-  float f1_sq = dot(d0, d0);
-  float f2_sq = 64.0;
-  float btype = float(h0 >> 24u) * (1.0 / 255.0);
-
-  // Vectorized 4 orthogonal neighbors: (+1, 0), (0, +1), (-1, 0), (0, -1)
-  uvec4 h_ortho = uvec4(cxP1 ^ row0, cx0 ^ rowP1, cxM1 ^ row0, cx0 ^ rowM1);
-  h_ortho ^= h_ortho >> 16u; h_ortho *= 0x85ebca6bu;
-  h_ortho ^= h_ortho >> 13u; h_ortho *= 0xc2b2ae35u;
-  h_ortho ^= h_ortho >> 16u;
-
-  vec4 px_o = vec4(h_ortho & 0xfffu) * (1.0 / 4095.0);
-  vec4 py_o = vec4((h_ortho >> 12u) & 0xfffu) * (1.0 / 4095.0);
-  vec4 dx_o = px_o - f.x + vec4(1.0, 0.0, -1.0, 0.0);
-  vec4 dy_o = py_o - f.y + vec4(0.0, 1.0, 0.0, -1.0);
-  vec4 d2_o = dx_o * dx_o + dy_o * dy_o;
-
-  for (int k = 0; k < 4; k++) {
-    float d2 = d2_o[k];
-    if (d2 < f1_sq) {
-      f2_sq = f1_sq;
-      f1_sq = d2;
-      btype = float(h_ortho[k] >> 24u) * (1.0 / 255.0);
-    } else if (d2 < f2_sq) {
-      f2_sq = d2;
-    }
-  }
-
-  // 4 Diagonals: (+1, +1), (-1, +1), (+1, -1), (-1, -1)
-  float fx0_2 = f.x * f.x;
-  float fx1_2 = (1.0 - f.x) * (1.0 - f.x);
-  float fy0_2 = f.y * f.y;
-  float fy1_2 = (1.0 - f.y) * (1.0 - f.y);
-  float minDiag = min(min(fx1_2 + fy1_2, fx0_2 + fy1_2), min(fx1_2 + fy0_2, fx0_2 + fy0_2));
-
-  if (minDiag < f2_sq) {
-    uvec4 h_diag = uvec4(cxP1 ^ rowP1, cxM1 ^ rowP1, cxP1 ^ rowM1, cxM1 ^ rowM1);
-    h_diag ^= h_diag >> 16u; h_diag *= 0x85ebca6bu;
-    h_diag ^= h_diag >> 13u; h_diag *= 0xc2b2ae35u;
-    h_diag ^= h_diag >> 16u;
-
-    vec4 px_d = vec4(h_diag & 0xfffu) * (1.0 / 4095.0);
-    vec4 py_d = vec4((h_diag >> 12u) & 0xfffu) * (1.0 / 4095.0);
-    vec4 dx_d = px_d - f.x + vec4(1.0, -1.0, 1.0, -1.0);
-    vec4 dy_d = py_d - f.y + vec4(1.0, 1.0, -1.0, -1.0);
-    vec4 d2_d = dx_d * dx_d + dy_d * dy_d;
-
-    for (int k = 0; k < 4; k++) {
-      float d2 = d2_d[k];
-      if (d2 < f1_sq) {
-        f2_sq = f1_sq;
-        f1_sq = d2;
-        btype = float(h_diag[k] >> 24u) * (1.0 / 255.0);
-      } else if (d2 < f2_sq) {
-        f2_sq = d2;
-      }
-    }
-  }
-
-  float edge = sqrt(f2_sq) - sqrt(f1_sq);
-  Reg r;
-  r.wRegion = smoothstep(REG_BLEND_LO, REG_BLEND_HI, edge);
-  r.mountFactor = btype < 0.33 ? REG_HILLS : (btype < 0.66 ? REG_MTN : REG_DUNE);
-  r.duneAmount = smoothstep(0.66, 0.8, btype) * r.wRegion;
-  return r;
-}
-
-float dunesE(float x, float y, int seed, float dp, float amount) {
-  if (amount <= 0.0) return 0.0;
-  float phase = x * F_DUNE * 6.28318530718
-    + 3.0 * fbm(x * F_WARP, y * F_WARP, seed + 301, 2, 2.0, 0.5, dp, F_WARP, ASUM_WARP);
-  float c = 1.0 - abs(sin(phase));
-  return DUNE_H * amount * c * c * c; // crescent (barchan) profile
-}
-
-// ---------------------------------------------------------------------------
-// Master elevation field — spec §2 composition (mirror terrainMath.elevation)
-// ---------------------------------------------------------------------------
-float elevation(vec2 g, float dp, int seed) {
-  // g = (local + chunk_origin) fp32 globals; CPU twin uses fp64 globals.
-  vec2 wq;
-  domainWarp(g.x, g.y, seed, dp, wq);          // §14 warp
-
-  Reg reg = regionField(g, seed);             // §13 on the RAW plane
-
-  float cont = smoothstep(CONT_LO, CONT_HI,    // §9 continent field
-    0.5 + 0.5 * vnoise(g.x * F_CONT, g.y * F_CONT, seed + 801));
-
-  float base = H_BASE * (0.5 + 0.5 * fbm(      // §5 macro hills (warped)
-    wq.x * F_MACRO, wq.y * F_MACRO, seed + 1,
-    OCT_MACRO, LAC_MACRO, GAIN_MACRO, dp, F_MACRO, ASUM_MACRO));
-
-  float maskVal = 0.5 + 0.5 * vnoise(wq.x * F_MASK, wq.y * F_MASK, seed + 77);
-  float mask = smoothstep(MASK_LO, MASK_HI, maskVal);
-  float hMount = H_MOUNT * (1.0 + (reg.mountFactor - 1.0) * reg.wRegion);
-
-  float ridge = 0.0;
-  if (mask > 0.0) {
-    ridge = ridged(wq.x * F_RIDGE, wq.y * F_RIDGE, seed + 5,
-      OCT_RIDGE, LAC_RIDGE, GAIN_RIDGE, dp, F_RIDGE, ASUM_RIDGE);
-  }
-
-  float de = voronoiEdge(wq * F_VALLEY, seed + 21); // §7 carve
-  float sv = 1.0 - smoothstep(0.0, W_VALLEY, de);
-  float valley = C_DEPTH * sv * sv;
-
-  float dune = reg.duneAmount > 0.0 ? dunesE(g.x, g.y, seed, dp, reg.duneAmount) : 0.0; // §13 dunes (raw)
-  float anom = anomalyE(g, seed);                         // §12 (raw)
-
-  return base * (CONT_MIN + (1.0 - CONT_MIN) * cont)
-       + hMount * mask * ridge
-       + dune
-       - valley
-       + anom;
-}
-
-// §17 — analytic normal via central differences at the pixel footprint.
-// Note: This must remain a central difference (4 taps) to match the CPU twin
-// (Nyquist-consistent normals); the CPU twin queries near-field with ε = 0.25.
-vec2 gradient(vec2 g, float eps, float dp, int seed) {
-  float e = max(eps, 0.05);
-  float inv2e = 0.5 / e;
-  float gx = (elevation(g + vec2(e, 0.0), dp, seed) - elevation(g - vec2(e, 0.0), dp, seed)) * inv2e;
-  float gz = (elevation(g + vec2(0.0, e), dp, seed) - elevation(g - vec2(0.0, e), dp, seed)) * inv2e;
-  return vec2(gx, gz);
-}
-
-// ---------------------------------------------------------------------------
-// §9 — climate fields
-// ---------------------------------------------------------------------------
-float temperature(vec2 g, float e, int seed) {
-  return T_BASE - L_LAT * abs(g.y) - L_ALT * max(e, 0.0);
-}
-float moisture(vec2 g, int seed) {
-  float n = fbm(g.x * F_MOIST, g.y * F_MOIST, seed + 61, 2, 2.0, 0.5, 0.0, F_MOIST, ASUM_WARP);
-  float cont = smoothstep(CONT_LO, CONT_HI,
-    0.5 + 0.5 * vnoise(g.x * F_CONT, g.y * F_CONT, seed + 801));
-  return M_BASE + M_AMP * n + M_OCEAN * (1.0 - cont);
-}
-
-// ---------------------------------------------------------------------------
-// §10/§11/§21 — biome RBF anchors in OKLab (mirror constants.ts BIOME_ANCHORS)
-// ---------------------------------------------------------------------------
-const mat3 OKLAB_TO_LINEAR_MAT = mat3(
-  4.0767416621, -1.2684380046, -0.0041960863,
-  -3.3077115913, 2.6097574011, -0.7034186147,
-  0.2309699292, -0.3413193965, 1.7076147010
-);
-
-vec3 oklabToLinear(vec3 lab) {
-  float l_ = lab.x + 0.3963377774 * lab.y + 0.2158037573 * lab.z;
-  float m_ = lab.x - 0.1055613458 * lab.y - 0.0638541728 * lab.z;
-  float s_ = lab.x - 0.0894841775 * lab.y - 1.2914855480 * lab.z;
-  return OKLAB_TO_LINEAR_MAT * vec3(l_ * l_ * l_, m_ * m_ * m_, s_ * s_ * s_);
-}
-
-const vec4 C0_CTR = vec4(-4.0, 0.55, 800.0, 1.0);
-const vec4 C0_INV = vec4(1.0 / 4.5, 1.0 / 0.45, 1.0 / 600.0, 1.0 / 1.1);
-
-const vec4 C1_CTR = vec4(9.0, 0.45, 550.0, 1.7);
-const vec4 C1_INV = vec4(1.0 / 22.0, 1.0 / 0.55, 1.0 / 600.0, 1.0 / 0.8);
-
-const vec4 C2_CTR = vec4(13.0, 0.72, 90.0, 0.32);
-const vec4 C2_INV = vec4(1.0 / 6.5, 1.0 / 0.22, 1.0 / 260.0, 1.0 / 0.5);
-
-const vec4 C3_CTR = vec4(11.0, 0.90, 230.0, 0.45);
-const vec4 C3_INV = vec4(1.0 / 7.0, 1.0 / 0.15, 1.0 / 380.0, 1.0 / 0.55);
-
-const vec4 C4_CTR = vec4(16.0, 0.13, 55.0, 0.35);
-const vec4 C4_INV = vec4(1.0 / 8.0, 1.0 / 0.17, 1.0 / 320.0, 1.0 / 0.5);
-
-// Single-exp RBF over (T, M, E, slope); colours mix in OKLab, convert once (§21).
-// Vectorized 4D SIMD distance evaluations save instruction cycles per shaded pixel!
-vec3 biomeColor(float T, float M, float e, float slopeM, float vegNoise, out float vegOut) {
-  vec4 clim = vec4(T, M, e, slopeM);
-
-  vec4 v0 = (clim - C0_CTR) * C0_INV;
-  float w0 = exp(-dot(v0, v0));
-
-  vec4 v1 = (clim - C1_CTR) * C1_INV;
-  float w1 = exp(-dot(v1, v1));
-
-  vec4 v2 = (clim - C2_CTR) * C2_INV;
-  float w2 = exp(-dot(v2, v2));
-
-  vec4 v3 = (clim - C3_CTR) * C3_INV;
-  float w3 = exp(-dot(v3, v3));
-
-  vec4 v4 = (clim - C4_CTR) * C4_INV;
-  float w4 = exp(-dot(v4, v4));
-
-  float wsum = max(w0 + w1 + w2 + w3 + w4, 1e-6);
-  float invWsum = 1.0 / wsum;
-  vec3 lab = (
-    w0 * vec3(0.93,  0.0,    -0.015) +
-    w1 * vec3(0.44,  0.004,   0.008) +
-    w2 * vec3(0.52, -0.058,   0.048) +
-    w3 * vec3(0.32, -0.072,   0.032) +
-    w4 * vec3(0.79,  0.012,   0.072)) * invWsum;
-
-  vegOut = (w2 * 0.92 + w3 * 1.0 + w1 * 0.06 + w4 * 0.05) * invWsum;
-
-  // §11 vegetation clumps: canopy darkening modulated at the 14 m wavelength
-  float clump = smoothstep(0.2, 0.8, 0.5 + 0.5 * vegNoise);
-  vec3 col = oklabToLinear(lab);
-  return mix(col, col * 0.52 + vec3(0.002, 0.020, 0.004), vegOut * clump * 0.85);
-}
-
+${landsGlsl()}
 // ---------------------------------------------------------------------------
 // §18 — soft shadow ray (4× footprint → free penumbra)
 // ---------------------------------------------------------------------------
@@ -1009,8 +663,8 @@ vec3 heroAlbedo(int id, vec3 pr, out float spec) {
     if (h.z > 0.07 && dot(e, e) < 0.017 * 0.017) { spec = 0.5; return HC_EYE; }
     return HC_SKIN;
   }
-  if (id == 1) return HC_TUNIC;
-  if (id == 2) return HC_CAP;
+  if (id == 1) return u_hero_dress;
+  if (id == 2) return u_hero_dress * 0.87;
   if (id == 3) return HC_HAIR;
   if (id == 4) return HC_LEATHER;
   if (id == 5) return HC_CREAM;
@@ -1094,8 +748,9 @@ void main() {
   vec3 rd = normalize(u_basis * dirView);
   vec3 ro = u_cam_pos;
 
-  // Underwater camera: cheap depth fog (rare gameplay state).
-  if (ro.y < W_LEVEL) {
+  // Underwater camera (below the water under it: the sea, a lake, a river's pool): cheap depth fog.
+  float camWater = landSurface(ro.xz + u_chunk_origin, 0.0, u_seed).y;
+  if (ro.y < camWater) {
     vec3 deep = vec3(0.012, 0.055, 0.075);
     fragColor = vec4(pow(deep * (0.6 + 0.4 * max(rd.y, 0.0)), vec3(1.0 / 2.2)), 1.0);
     return;
@@ -1119,6 +774,7 @@ void main() {
   // Analytical water-plane intersection distance
   float tWaterPlane = (rd.y < -1e-5 && ro.y > W_LEVEL) ? (W_LEVEL - ro.y) / rd.y : -1.0;
   bool waterChecked = false;
+  float wWater = W_LEVEL;  // the water's surface where the ray meets water (the sea; a lake or river below)
 
   float t = START_T;
   float tPrev = t;
@@ -1200,6 +856,13 @@ void main() {
       if ((hi - lo) < BISECT_TOL) break;
     }
     tHit = 0.5 * (lo + hi);
+    // Inland water (a lake, a river's pool above the sea): the ray crossed its surface before the bed.
+    vec3 ph = ro + rd * tHit;
+    float wl = landSurface(ph.xz + u_chunk_origin, 0.0, u_seed).y;
+    if (wl > ph.y + 0.02 && rd.y < -1e-5) {
+      float tW = (wl - ro.y) / rd.y;
+      if (tW > 0.0 && tW < tHit) { tWater = tW; eWater = ph.y; wWater = wl; }
+    }
   }
 
   vec3 col;
@@ -1256,12 +919,9 @@ void main() {
     if (terrainFront) {
       // ---------------- terrain shading ----------------
       float e = p.y; // bisection-converged surface hit point elevation (§16/§30)
-      float T = temperature(g, e, u_seed);
-      float M = moisture(g, u_seed);
-
-      float vegNoise = vnoise(g.x / VEG_WL, g.y / VEG_WL, u_seed + 171);
-      float veg;
-      vec3 albedo = biomeColor(T, M, e, sqrt(gradLenSq), vegNoise, veg);
+      vec3 glow;
+      float wlHere = landSurface(g, 0.0, u_seed).y;
+      vec3 albedo = groundAlbedo(g, e, sqrt(gradLenSq), wlHere, u_seed, glow);
 
       vec3 sunTerm = albedo * SUN_COL * ndl * sh;
       vec3 ambTerm = albedo * SKY_TINT * (0.22 + 0.28 * max(n.y, 0.0));
@@ -1269,11 +929,11 @@ void main() {
       if (u_hero_bound.w > 0.0) ambTerm *= heroContactAO(rd * tHit);
 #endif
 
-      col = sunTerm + ambTerm;
+      col = sunTerm + ambTerm + glow;
       col = applyFog(col, tHit, p.y, rd);
     } else {
       // ---------------- water plane (§8) ----------------
-      float depth = max(W_LEVEL - eWater, 0.0);
+      float depth = max(wWater - eWater, 0.0);
       vec3 shallow = vec3(0.110, 0.320, 0.300);
       vec3 deep    = vec3(0.016, 0.075, 0.100);
       vec3 body = mix(shallow, deep, smoothstep(1.5, 14.0, depth))
@@ -1304,7 +964,7 @@ void main() {
       }
 
       col = mix(body, refl, fres) + SUN_COL * spec / 3.4;
-      col = applyFog(col, tWater, W_LEVEL, rd);
+      col = applyFog(col, tWater, wWater, rd);
     }
   } else {
     // ---------------- sky + clouds (§20/§22) ----------------

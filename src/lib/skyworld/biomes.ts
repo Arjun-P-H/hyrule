@@ -26,11 +26,11 @@ import type { Species } from '../forest/species';
 
 type V3 = readonly [number, number, number];
 
-export const SKY_BIOMES = ['meadow', 'mistwood', 'blossom', 'crags', 'frost'] as const;
+export const SKY_BIOMES = ['meadow', 'mistwood', 'blossom', 'crags', 'frost', 'garden', 'ember'] as const;
 export type SkyBiome = (typeof SKY_BIOMES)[number];
 
 /** Sky tree palettes: leaves (shade, light) and bark, for the ground's tree shapes up here. */
-export const SKY_FLORA = ['golden', 'blossom', 'pearl', 'mossy', 'silver', 'fern', 'gale', 'rime'] as const;
+export const SKY_FLORA = ['golden', 'blossom', 'pearl', 'mossy', 'silver', 'fern', 'gale', 'rime', 'wisteria', 'emberred'] as const;
 type Palette = (typeof SKY_FLORA)[number];
 export const SKY_FLORA_COLOURS: Record<Palette, { leaf: readonly [V3, V3]; bark: V3 }> = {
   golden: { leaf: [[0.3, 0.2, 0.03], [0.62, 0.48, 0.09]], bark: [0.13, 0.11, 0.08] },
@@ -41,6 +41,9 @@ export const SKY_FLORA_COLOURS: Record<Palette, { leaf: readonly [V3, V3]; bark:
   fern: { leaf: [[0.04, 0.13, 0.03], [0.13, 0.3, 0.06]], bark: [0.07, 0.05, 0.035] },
   gale: { leaf: [[0.025, 0.065, 0.045], [0.07, 0.14, 0.08]], bark: [0.13, 0.1, 0.07] },
   rime: { leaf: [[0.07, 0.12, 0.12], [0.2, 0.28, 0.29]], bark: [0.13, 0.12, 0.12] },
+  // wisteria and jacaranda over palace terraces (SKY_CIVILIZATION.md §9.1), ember maples on warm soil
+  wisteria: { leaf: [[0.18, 0.08, 0.3], [0.5, 0.33, 0.75]], bark: [0.1, 0.08, 0.07] },
+  emberred: { leaf: [[0.32, 0.025, 0.015], [0.72, 0.11, 0.035]], bark: [0.06, 0.04, 0.035] },
 };
 
 /** A tree a biome grows: shape, palette, its share of the stands, scale range, and snow on it. */
@@ -149,6 +152,40 @@ export const SKY_BIOME_INFO: Record<SkyBiome, SkyBiomeInfo> = {
       ],
     },
   },
+  // The two the Eyries add (eyrie/classes.ts): gardens tended round their buildings, and the forge isles' ash.
+  // Tended gardens: mown grass full of flowers, orchards of blossoming trees, wisteria; few groves.
+  garden: {
+    name: 'Eyrie gardens',
+    lush: [0.07, 0.135, 0.035], dry: [0.12, 0.14, 0.055], soil: [0.12, 0.09, 0.06], rock: [0.3, 0.27, 0.22], snow: 0,
+    grass: { density: 0.85, height: 0.7, flowers: 0.09, flower: [[0.88, 0.42, 0.6], [0.88, 0.86, 0.82], [0.5, 0.36, 0.78]] },
+    relief: { hill: 0.45, crag: 0, peak: 0 },
+    strata: [[0.3, 0.26, 0.2], [0.42, 0.37, 0.3]], rimCover: [0.07, 0.1, 0.04],
+    lake: 0.85, frozen: false,
+    trees: {
+      forest: 0.06, lone: 0.42, bush: 0.05, bushPalette: 'blossom',
+      kinds: [
+        { species: 'maple', palette: 'blossom', weight: 0.45, scale: [0.95, 1.3] },
+        { species: 'oak', palette: 'pearl', weight: 0.3, scale: [0.9, 1.2] },
+        { species: 'maple', palette: 'wisteria', weight: 0.25, scale: [0.9, 1.15] },
+      ],
+    },
+  },
+  // Ash and basalt: black soil, sparse tawny grass, ember maples, dead trees.
+  ember: {
+    name: 'Ember isles',
+    lush: [0.06, 0.06, 0.035], dry: [0.11, 0.085, 0.05], soil: [0.045, 0.038, 0.034], rock: [0.07, 0.064, 0.062], snow: 0,
+    grass: { density: 0.4, height: 0.6, flowers: 0.02, flower: [[0.85, 0.25, 0.05], [0.9, 0.55, 0.1], [0.6, 0.1, 0.05]] },
+    relief: { hill: 1.2, crag: 1, peak: 0.35 },
+    strata: [[0.045, 0.04, 0.04], [0.1, 0.09, 0.085]], rimCover: [0.08, 0.06, 0.05],
+    lake: 0, frozen: false,
+    trees: {
+      forest: 0.04, lone: 0.3, bush: 0.02, bushPalette: 'gale',
+      kinds: [
+        { species: 'maple', palette: 'emberred', weight: 0.7, scale: [0.85, 1.2] },
+        { species: 'dead', palette: 'gale', weight: 0.3, scale: [0.6, 0.9] },
+      ],
+    },
+  },
 };
 
 /** Each archipelago's lineage, shared by its islands (a lone isle draws its own). */
@@ -189,6 +226,9 @@ export function pickBiome(top: number, tip: number, radius: number, trait: SkyTr
     blossom: 0.2 - 0.5 * c.cold + (trait === 'blossom' ? 0.85 : 0),
     crags: 0.1 + 0.45 * c.exposed + 0.35 * c.high - 0.25 * c.cloud + (trait === 'wild' ? 0.15 : 0),
     frost: 1.3 * c.cold + (trait === 'frost' ? 0.7 * c.high : 0),
+    // (given by an Eyrie's class, never by the climate)
+    garden: -Infinity,
+    ember: -Infinity,
   };
   let best: SkyBiome = 'meadow';
   let bestScore = -Infinity;

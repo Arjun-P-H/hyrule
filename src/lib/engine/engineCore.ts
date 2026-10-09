@@ -20,6 +20,7 @@
  * sets the hour, pause and day length through the handle.
  */
 
+import { HydroTexture } from './hydroTexture';
 import { assertNever } from '@/lib/utils';
 import type { CamMode, RenderApi, StatsStore } from './statsStore';
 import { TERRAIN_FS, TERRAIN_VS, minifyGlsl, withHero } from '@/components/terrain/demoShader';
@@ -31,7 +32,11 @@ import { createHeroCamera, updateHeroCamera } from '@/lib/hero/camera';
 import { skySpawn } from '@/lib/skyworld/realm';
 import type { GpuBackend, SkyMode } from '@/lib/gpu/engineGpu';
 import { advanceClock, createSkyClock, hourOf, setHour } from '@/lib/sky/clock';
-import type { FrameParams } from '@/lib/gpu/frame';
+import { landName } from '@/lib/sky/air';
+import { MAX_REMOTE_HEROES, type FrameParams } from '@/lib/gpu/frame';
+import { characterOf } from '@/lib/hero/characters';
+import type { ClockState, NetLink } from '@/lib/net/link';
+import { RemoteHeroes, SEND_INTERVAL, encodeSnapshot } from '@/lib/net/remoteHeroes';
 import {
   CHUNK_SIZE,
   FLY_CEILING,
@@ -67,6 +72,12 @@ export type EngineInputs = {
   onPointerLockChange: Ref<((locked: boolean) => void) | undefined>;
   /** The sky wanted (drawn by the WebGPU view; the WebGL2 view has only the classic sky). */
   sky: Ref<SkyMode>;
+  /** The keys do nothing while this is true (the multiplayer lobby is open). */
+  inputBlocked?: Ref<boolean>;
+  /** The hero's character (src/lib/hero/characters.ts): its dress, and its place in the spawn line-up. */
+  character?: Ref<number>;
+  /** Multiplayer: the session the hero is sent through and other players' heroes come from. */
+  net?: Ref<NetLink | null>;
 };
 
 /** Where the day starts: the hour, and real minutes per game day. */
@@ -84,10 +95,16 @@ export type EngineHandle = {
   setHour: (hour: number) => void;
   setTimePaused: (paused: boolean) => void;
   setDayMinutes: (minutes: number) => void;
+  /** The sky clock now (multiplayer: an empty world takes the first player's). */
+  clock: () => ClockState;
 };
 
 /** Game hours per real second while T is held. */
 const FAST_TIME = 1;
+
+/** Metres between characters side by side at the spawn (multiplayer). */
+const SPAWN_GAP = 1.6;
+const NO_REMOTES: readonly Float32Array[] = [];
 
 /** What the loop hands the view each frame: one object, refilled. */
 type DrawState = {
@@ -114,6 +131,8 @@ type DrawState = {
   days: number;
   /** Pack the hero for this camera (rig.ts HERO_UNIFORM) and return the buffer. */
   packHero: () => Float32Array;
+  /** Pack the other players' heroes for this camera (multiplayer; none without). */
+  packRemotes: () => readonly Float32Array[];
 };
 
 type View = {
@@ -170,8 +189,14 @@ function uniformLocations(gl: WebGL2RenderingContext, prog: WebGLProgram) {
     heroHead: U('u_hero_head'),
     heroBound: U('u_hero_bound'),
     heroMisc: U('u_hero_misc'),
+    heroDress: U('u_hero_dress'),
+    hydro: U('u_hydro'),
+    hydroHead: U('u_hydro_head'),
   };
 }
+
+/** The texture unit the rivers' node table is bound to. */
+const HYDRO_UNIT = 1;
 
 /** The WebGL2 view: terrain program, background-compiled hero program, cached uniforms, frame fence. */
 function createGlView(canvas: HTMLCanvasElement, initialMode: CamMode): View {
@@ -204,6 +229,12 @@ function createGlView(canvas: HTMLCanvasElement, initialMode: CamMode): View {
   }
   gl.useProgram(prog);
   const terrainU = uniformLocations(gl, prog);
+  // the rivers' node table round the camera (landsGlsl.ts u_hydro)
+  const hydro = new HydroTexture(gl);
+  gl.activeTexture(gl.TEXTURE0 + HYDRO_UNIT);
+  gl.bindTexture(gl.TEXTURE_2D, hydro.tex);
+  gl.activeTexture(gl.TEXTURE0);
+  let hydroDirty = true;
   let u = terrainU;
   let activeProg: WebGLProgram = prog;
   let fence: WebGLSync | null = null;
@@ -228,7 +259,7 @@ function createGlView(canvas: HTMLCanvasElement, initialMode: CamMode): View {
   if (initialMode === 'hero') compileHero();
 
   // Views of the packed hero buffer, made on first use (the buffer is reused).
-  let heroViews: { j: Float32Array; torso: Float32Array; head: Float32Array; bound: Float32Array; misc: Float32Array } | null = null;
+  let heroViews: { j: Float32Array; torso: Float32Array; head: Float32Array; bound: Float32Array; misc: Float32Array; dress: Float32Array } | null = null;
 
   let lastW = -1, lastH = -1;
   let lastFov = -1;
@@ -271,6 +302,14 @@ function createGlView(canvas: HTMLCanvasElement, initialMode: CamMode): View {
         lastW = -1; lastH = -1; lastFov = -1; lastSeed = -999999; lastMarch = -1; lastShadow = -1;
         lastCamX = NaN; lastCamY = NaN; lastCamZ = NaN; lastOx = NaN; lastOz = NaN;
         ds.basisDirty = true;
+        hydroDirty = true;
+      }
+
+      if (hydro.update(ds.x, ds.z, ds.seed)) hydroDirty = true;
+      if (hydroDirty) {
+        hydroDirty = false;
+        gl.uniform1i(u.hydro, HYDRO_UNIT);
+        gl.uniform4fv(u.hydroHead, hydro.head);
       }
 
       let tanHalf = lastTanHalf;
@@ -337,13 +376,15 @@ function createGlView(canvas: HTMLCanvasElement, initialMode: CamMode): View {
           torso: hb.subarray(HERO_UNIFORM.torso, HERO_UNIFORM.head),
           head: hb.subarray(HERO_UNIFORM.head, HERO_UNIFORM.bound),
           bound: hb.subarray(HERO_UNIFORM.bound, HERO_UNIFORM.misc),
-          misc: hb.subarray(HERO_UNIFORM.misc, HERO_UNIFORM.length),
+          misc: hb.subarray(HERO_UNIFORM.misc, HERO_UNIFORM.dress),
+          dress: hb.subarray(HERO_UNIFORM.dress, HERO_UNIFORM.dress + 3),
         };
         gl.uniform3fv(u.heroJ, heroViews.j);
         gl.uniformMatrix3fv(u.heroTorso, false, heroViews.torso);
         gl.uniformMatrix3fv(u.heroHead, false, heroViews.head);
         gl.uniform4fv(u.heroBound, heroViews.bound);
         gl.uniform4fv(u.heroMisc, heroViews.misc);
+        gl.uniform3fv(u.heroDress, heroViews.dress);
       }
 
       gl.drawArrays(gl.TRIANGLES, 0, 3);
@@ -397,6 +438,7 @@ function createGpuView(canvas: HTMLCanvasElement, gpu: GpuBackend): View {
       fp.days = ds.days;
       fp.renderScale = ds.renderScale;
       fp.hero = ds.thirdPerson ? ds.packHero() : null;
+      fp.remotes = ds.packRemotes();
       ds.basisDirty = false;
       gpu.draw(fp);
     },
@@ -428,8 +470,13 @@ export function startEngine(
   const hudToggleRef = inputs.onToggleHud;
   const onPointerLockChangeRef = inputs.onPointerLockChange;
   const skyRef = inputs.sky;
+  const charRef = inputs.character;
+  const netRef = inputs.net;
   const clock = createSkyClock(clockStart.hour, clockStart.dayMinutes);
   let fastTime = false;
+  // Multiplayer: the clock changed here (sent at the next frame), when the last snapshot / clock went.
+  let clockDirty = false;
+  let sentStateAt = -Infinity, sentClockAt = -Infinity;
 
   let raf = 0;
   let ro: ResizeObserver | null = null;
@@ -479,10 +526,13 @@ export function startEngine(
     const tp = createHeroCamera();
     const heroBuf = new Float32Array(HERO_UNIFORM.length);
 
-    // The start: the land's spawn, or (?spawn=sky) a spot up on the nearest archipelago's hub.
+    // The start: the land's spawn, or (?spawn=sky) a spot up on the nearest archipelago's hub. In a
+    // multiplayer world the five characters start side by side (SPAWN_GAP apart across the view).
     const spawnFor = (seed: number) => {
       const sky = spawnAt === 'sky' ? skySpawn(SPAWN.x, SPAWN.z, seed) : null;
-      return sky ?? { x: SPAWN.x, y: elevation(SPAWN.x, SPAWN.z, seed, 0), z: SPAWN.z, yaw: SPAWN.yaw };
+      const slot = netRef?.current?.inWorld() ? (charRef?.current ?? 0) - 2 : 0;
+      const x = SPAWN.x + Math.cos(SPAWN.yaw) * slot * SPAWN_GAP, z = SPAWN.z - Math.sin(SPAWN.yaw) * slot * SPAWN_GAP;
+      return sky ?? { x, y: elevation(x, z, seed, 0), z, yaw: SPAWN.yaw };
     };
     let spawn = spawnFor(seedRef.current);
 
@@ -628,6 +678,11 @@ export function startEngine(
 
     const onKey = (e: KeyboardEvent, down: boolean) => {
       if ((e.target as HTMLElement)?.tagName === 'INPUT' || (e.target as HTMLElement)?.tagName === 'TEXTAREA') {
+        return;
+      }
+      if (inputs.inputBlocked?.current) {
+        keyMask = 0;
+        fastTime = false;
         return;
       }
 
@@ -801,9 +856,50 @@ export function startEngine(
       x: 0, y: 0, z: 0, lx: 0, lz: 0, ox: 0, oz: 0,
       thirdPerson: false, renderScale: 1, days: clock.days,
       packHero: () => {
-        packHeroUniforms(rig, cam.hero, ds.x, ds.y, ds.z, heroBuf);
+        packHeroUniforms(rig, cam.hero, ds.x, ds.y, ds.z, heroBuf, characterOf(charRef?.current ?? 0).dress);
         return heroBuf;
       },
+      packRemotes: () => (netRef?.current ? remotes.pack(ds.x, ds.y, ds.z, MAX_REMOTE_HEROES) : NO_REMOTES),
+    };
+
+    // Multiplayer: other players' heroes, this player's snapshot (the hero, or the first-person /
+    // flying camera as a hero standing or gliding there), and the shared clock.
+    const remotes = new RemoteHeroes();
+    const snap: number[] = [];
+    const proxy = createHeroState(spawn.x, spawn.z, spawn.yaw, seedRef.current);
+    const netFrame = (net: NetLink, now: number, dt: number) => {
+      remotes.update(net, now, dt);
+      if (!net.inWorld()) return;
+      const c = net.takeClock();
+      if (c) {
+        clock.days = c.days;
+        clock.paused = c.paused;
+        clock.dayMinutes = c.dayMinutes;
+        clockDirty = false;
+      }
+      if (now - sentStateAt >= SEND_INTERVAL) {
+        sentStateAt = now;
+        let h = cam.hero;
+        if (cam.mode !== 'hero') {
+          h = proxy;
+          const fly = cam.mode === 'fly';
+          const p = fly ? cam.fly : cam.player;
+          h.x = p.x; h.y = p.y - PLAYER.height; h.z = p.z;
+          if (fly) { h.vx = cam.flyVel.x; h.vy = cam.flyVel.y; h.vz = cam.flyVel.z; }
+          else { h.vx = cam.player.vx; h.vy = cam.player.vy; h.vz = cam.player.vz; }
+          h.yaw = cam.yaw;
+          h.move = fly ? 'glide' : cam.player.grounded ? 'ground' : 'air';
+          h.ground = fly || !cam.player.grounded ? h.y - 50 : h.y - PLAYER.groundBias;
+          h.gx = 0; h.gz = 0;
+        }
+        net.sendState(encodeSnapshot(h, now, snap));
+      }
+      // The world's clock: when changed here (T held: a few times a second), and now and then from its keeper.
+      if ((clockDirty && now - sentClockAt > 250) || (net.keepsClock() && now - sentClockAt > 2000)) {
+        sentClockAt = now;
+        clockDirty = false;
+        net.sendClock({ days: clock.days, paused: clock.paused, dayMinutes: clock.dayMinutes });
+      }
     };
 
     // Telemetry for the HUD at most every 200 ms; created once so the 60 Hz
@@ -830,6 +926,7 @@ export function startEngine(
         hour: hourOf(clock.days),
         paused: clock.paused,
         dayMinutes: clock.dayMinutes,
+        land: landName(x, z, seedRef.current),
       });
     };
 
@@ -868,8 +965,10 @@ export function startEngine(
       const p = PRESET_MAP[software ? 'low' : (presetRef.current ?? 'med')] ?? PRESET_MAP.med;
       // The sky: the one wanted (the view builds it in the background), and the clock.
       if (view.sky() !== null && skyRef.current !== view.sky()) view.setSky(skyRef.current);
-      if (fastTime) clock.days += (dt * FAST_TIME) / 24;
-      else advanceClock(clock, dt);
+      if (fastTime) {
+        clock.days += (dt * FAST_TIME) / 24;
+        clockDirty = true;
+      } else advanceClock(clock, dt);
       // A new preset changes the render resolution now, not at the next DRS step.
       if (presetRef.current !== lastPreset) {
         lastPreset = presetRef.current;
@@ -958,6 +1057,9 @@ export function startEngine(
       const ox = Math.floor(px / CHUNK_SIZE) * CHUNK_SIZE;
       const oz = Math.floor(pz / CHUNK_SIZE) * CHUNK_SIZE;
 
+      const net = netRef?.current;
+      if (net) netFrame(net, now, dt);
+
       if (view.busy()) {
         if (now - statsAt > 200) publishStats(now, px, py, pz, grounded, ox, oz, p.resScale);
         return;
@@ -1016,9 +1118,10 @@ export function startEngine(
     };
     return {
       dispose, respawn: doRespawn, toggleMode: doToggleMode, toggleView: doToggleView,
-      setHour: (hour) => setHour(clock, hour),
-      setTimePaused: (paused) => { clock.paused = paused; },
-      setDayMinutes: (minutes) => { clock.dayMinutes = minutes; },
+      setHour: (hour) => { setHour(clock, hour); clockDirty = true; },
+      setTimePaused: (paused) => { clock.paused = paused; clockDirty = true; },
+      setDayMinutes: (minutes) => { clock.dayMinutes = minutes; clockDirty = true; },
+      clock: () => ({ days: clock.days, paused: clock.paused, dayMinutes: clock.dayMinutes }),
     };
   } catch (e) {
     ro?.disconnect();

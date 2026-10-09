@@ -37,6 +37,8 @@ export type EngineStats = {
   hour: number;
   paused: boolean;
   dayMinutes: number;
+  /** The land under the camera (sky/air.ts landName). */
+  land: string;
 };
 
 export type StatsStore = {

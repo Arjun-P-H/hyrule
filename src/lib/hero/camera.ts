@@ -9,9 +9,9 @@
  * framed. One elevation() call per settled frame (two while the boom moves).
  */
 
-import { elevation } from '../terrainMath';
+import { elevation, waterLevel } from '../terrainMath';
 import { skyGround, skyWater } from '../skyworld/realm';
-import { HERO_CAMERA as C, PLAYER, VALLEY } from '../constants';
+import { HERO_CAMERA as C, PLAYER } from '../constants';
 import type { HeroState } from './locomotion';
 
 /** Ground under an eye at height y: a sky island's top or an arch's deck when the eye is above one, else the terrain. */
@@ -23,7 +23,7 @@ function groundBelow(x: number, y: number, z: number, seed: number): number {
 /** The water an eye at height y must stay above: a sky lake or stream under it, else the lakes and sea. */
 function waterBelow(x: number, y: number, z: number, seed: number): number {
   const w = skyWater(x, y, z, seed);
-  return w === w ? w : VALLEY.wLevel;
+  return w === w ? w : waterLevel(x, z, seed);
 }
 
 export type HeroCamera = {

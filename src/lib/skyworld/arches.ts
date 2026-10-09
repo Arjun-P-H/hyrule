@@ -11,12 +11,13 @@
  * maps back to (t, s) exactly, bow included). The renderer draws the same
  * surfaces (gpu/skyIslands.wgsl.ts); the hero stands on archGround.
  *
- * `kind` leaves room for the sky civilization to come: its built bridges
- * (stone, timber, rope) will be arches of another kind on the same axis.
+ * `kind`: a natural arch, or a bridge the Aelari built (eyrie/bridges.ts draws
+ * its spans, piers and parapets as structures) — the same axis, its deck flat
+ * across (no crown), walked the same way.
  */
 
 export type Arch = {
-  kind: 'arch';
+  kind: 'arch' | 'bridge';
   from: number; to: number;            // the islands it joins (indices in the archipelago)
   ax: number; az: number; ay: number;  // deck axis start (world m), inside the first island's rim
   bx: number; bz: number; by: number;  // end, inside the second's
@@ -43,6 +44,7 @@ const archBow = (A: Arch, t: number) => A.bow * Math.sin(Math.PI * t);
 
 /** The deck's surface across it (crowned: highest on the axis), at t and s, for |s| ≤ half its width. */
 function archDeckY(A: Arch, t: number, s: number): number {
+  if (A.kind === 'bridge') return archY(A, t);
   const w = archWidth(A, t);
   const u = (2 * s) / w;
   return archY(A, t) + 0.3 * (1 - u * u);

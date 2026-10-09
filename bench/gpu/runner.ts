@@ -13,6 +13,7 @@
  *   evalcost   — production main renamed; main() runs K elevation() calls/px
  */
 
+import { hydroTable } from '../../src/lib/hydro';
 import path from 'node:path';
 import { launchChrome } from '../lib/chrome';
 import type { CameraFrame } from '../spline';
@@ -200,6 +201,15 @@ export async function runSession(cfg: SessionConfig | (SessionLimits & Record<st
   let lastAt = Date.now();
   const touch = (what: string) => { lastMessage = what; lastAt = Date.now(); };
   const stallMs = limits.stallMs ?? 120_000;
+
+  // The rivers' node table for the GLSL world function (landsGlsl.ts u_hydro), centred on the first
+  // frame or probe (its window reaches ±64 km).
+  const c = cfg as { seed?: number; hydro?: unknown; frames?: Array<{ x: number; z: number }>; probes?: Array<{ origin: [number, number]; local0: [number, number] }> };
+  if (c.seed !== undefined && c.hydro === undefined) {
+    const at = c.frames?.[0] ?? (c.probes?.[0] ? { x: c.probes[0].origin[0] + c.probes[0].local0[0], z: c.probes[0].origin[1] + c.probes[0].local0[1] } : { x: 0, z: 0 });
+    const t = hydroTable(at.x, at.z, c.seed);
+    c.hydro = { head: Array.from(t.data.subarray(0, 4)), data: Buffer.from(t.data.buffer, t.data.byteOffset + 16).toString('base64') };
+  }
 
   const server = Bun.serve({
     port: 0,

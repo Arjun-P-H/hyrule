@@ -12,6 +12,7 @@
  */
 
 import { HERO_SHAPE as P, PLAYER } from '../constants';
+import { DEFAULT_DRESS } from './characters';
 import type { HeroState } from './locomotion';
 
 /** Joint indices, mirrored by the u_hero_j[] reads in demoShader.ts. */
@@ -25,8 +26,8 @@ export const J = {
 } as const;
 export const HERO_JOINTS = 18;
 
-/** Float32Array layout read by the engine's uniform uploads. */
-export const HERO_UNIFORM = { joints: 0, torso: 54, head: 63, bound: 72, misc: 76, length: 80 } as const;
+/** Float32Array layout read by the engine's uniform uploads (dress: the tunic's rgb, then a pad). */
+export const HERO_UNIFORM = { joints: 0, torso: 54, head: 63, bound: 72, misc: 76, dress: 80, length: 84 } as const;
 
 const POSES = 5; // ground, air, glide, climb, swim
 const W_GROUND = 0, W_AIR = 1, W_GLIDE = 2, W_CLIMB = 3, W_SWIM = 4;
@@ -472,12 +473,14 @@ export function updateHeroRig(r: HeroRig, s: HeroState, dt: number): void {
 /**
  * Pack the posed hero camera-relative for the shader (layout HERO_UNIFORM):
  * joints, torso and head frames (column-major mat3), bounding sphere, and
- * misc = (glider open, terrain height under the hero, sin yaw, cos yaw).
- * Differences are taken in fp64 before the fp32 store, so the body keeps
- * sub-millimetre precision at any distance from the world origin.
+ * misc = (glider open, terrain height under the hero, sin yaw, cos yaw), and
+ * the dress (characters.ts). Differences are taken in fp64 before the fp32
+ * store, so the body keeps sub-millimetre precision at any distance from the
+ * world origin.
  */
 export function packHeroUniforms(
   r: HeroRig, s: HeroState, camX: number, camY: number, camZ: number, out: Float32Array,
+  dress: ArrayLike<number> = DEFAULT_DRESS,
 ): void {
   const sy = Math.sin(s.yaw), cy = Math.cos(s.yaw);
   const ox = s.x - camX, oy = s.y - PLAYER.groundBias - camY, oz = s.z - camZ;
@@ -506,4 +509,9 @@ export function packHeroUniforms(
   out[om + 1] = s.ground - camY;
   out[om + 2] = sy;
   out[om + 3] = cy;
+  const od = HERO_UNIFORM.dress;
+  out[od] = dress[0];
+  out[od + 1] = dress[1];
+  out[od + 2] = dress[2];
+  out[od + 3] = 0;
 }

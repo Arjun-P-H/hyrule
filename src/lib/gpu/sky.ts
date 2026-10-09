@@ -15,6 +15,7 @@
  * light for the tree shadow map, the hour for the HUD).
  */
 
+import type { BiomeAir } from '../sky/air';
 import { computeLightRig, createLightRig, KEY_ALTS, KEY_TOP, MOON_E, SUN_E, moonLightShare, type LightRig } from '../sky/lightRig';
 import { MS_LUT, SKY_BYTES, SKY_LIGHT_BYTES, SKY_LUT_WGSL, TRANS_LUT, VIEW_LUT } from './sky.wgsl';
 import { stamped } from './profile';
@@ -39,6 +40,8 @@ const EXPOSURE_BIAS = 1;
 /** Morning mist: extinction (1/m) at its densest, and its scale height (m) over the water level. */
 const MIST_DENSITY = 2.4e-3;
 const MIST_HEIGHT = 38;
+/** A biome's mist (sky/air.ts: marshes, sacred groves, the rainforest) at its thickest, as a share of the morning's. */
+const AIR_MIST = 0.55;
 
 export type SkyBindings = { sky: number; light: number; view: number };
 
@@ -138,8 +141,11 @@ export class SkyCycle {
     d.queue.submit([enc.finish()]);
   }
 
-  /** The light at `days` (game days since day 0, 00:00) for a camera at altitude camY (m); `time` (s) moves the stars' twinkle. */
-  setFrame(days: number, camY: number, time: number): void {
+  /**
+   * The light at `days` (game days since day 0, 00:00) for a camera at altitude camY (m); `time` (s)
+   * moves the stars' twinkle; `air` is the lands' air round the camera (sky/air.ts: haze, mist, tint).
+   */
+  setFrame(days: number, camY: number, time: number, air?: BiomeAir): void {
     const r = computeLightRig(days, camY, this.rig);
     const D = this.data;
     put(D, 0, r.sun, r.sunTheta);
@@ -152,11 +158,12 @@ export class SkyCycle {
     put(D, 28, r.starRows[0], r.stars);
     put(D, 32, r.starRows[1], time);
     put(D, 36, r.starRows[2], r.night);
-    D[40] = EXPOSURE_BIAS; D[41] = r.saturation; D[42] = r.night; D[43] = 0;
-    D[44] = r.haze; D[45] = r.mist * MIST_DENSITY; D[46] = MIST_HEIGHT; D[47] = camY;
+    // (the haze's tint in the spare lanes: grade.w blue, keyAz.zw red and green)
+    D[40] = EXPOSURE_BIAS; D[41] = r.saturation; D[42] = r.night; D[43] = air ? air.tint[2] : 1;
+    D[44] = r.haze * (air ? air.haze : 1); D[45] = Math.max(r.mist, AIR_MIST * (air ? air.mist : 0)) * MIST_DENSITY; D[46] = MIST_HEIGHT; D[47] = camY;
     D[48] = r.cloudShift; D[49] = r.cloudLight; D[50] = r.milkyWay; D[51] = r.twilight;
     const kl = Math.hypot(r.key[0], r.key[2]) || 1;
-    D[52] = r.key[0] / kl; D[53] = r.key[2] / kl; D[54] = 0; D[55] = 0;
+    D[52] = r.key[0] / kl; D[53] = r.key[2] / kl; D[54] = air ? air.tint[0] : 1; D[55] = air ? air.tint[1] : 1;
     // the key light at the camera's altitude, as keyCol() interpolates it
     const kf = Math.sqrt(Math.min(Math.max(camY / KEY_TOP, 0), 1)) * (KEY_ALTS - 1);
     const ki = Math.min(Math.floor(kf), KEY_ALTS - 2), kt = kf - ki;

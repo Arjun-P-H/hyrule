@@ -19,12 +19,18 @@ import { HERO_WGSL, NO_HERO_WGSL } from './hero.wgsl';
 import { grassWGSL, type GrassSpec } from './grass.wgsl';
 import { skyRealmWGSL } from './skyRealm.wgsl';
 import { WATERFALLS_WGSL } from './waterfalls.wgsl';
+import { structuresWGSL } from './structures.wgsl';
+import { effectsWGSL } from './effects.wgsl';
+import { faunaWGSL } from './fauna.wgsl';
+import { motesWGSL } from './motes.wgsl';
+import { lanternsWGSL } from './lanterns';
 import { RUINS_WGSL, RUIN_SITES_WGSL } from './ruins.wgsl';
 import { canopyWGSL, forestWGSL, type ForestSpec } from './forest.wgsl';
 import { PLACE } from '../forest/placement';
 import { SPECIES, SPECIES_INFO } from '../forest/species';
 import { CLASSIC_LIGHT_WGSL, cycleSkyWGSL } from './sky.wgsl';
-import { CAMERA, MARCH, SHADOW } from '../constants';
+import { CAMERA, CLIMATE, LANDS, MARCH, SHADOW } from '../constants';
+import { BIOME_COUNT, SNOW_ALBEDO } from '../biomes';
 import { RING_BLOCK, ringBlockOrder } from './rings';
 import { PATH_N, SKY } from '../sky/celestial';
 
@@ -68,33 +74,32 @@ const HALF_WGSL = (f16: boolean) => f16
   : 'alias hf = f32;\nalias hv3 = vec3f;';
 
 const NO_TINT_WGSL = /* wgsl */ `
-fn groundTint(col: vec3f, veg: f32, slope: f32, g: vec2f, seed: i32) -> vec3f { return col; }
-fn groundTintFrom(col: vec3f, veg: f32, slope: f32, patchN: f32, patchHue: f32) -> vec3f { return col; }
-`;
-
-/**
- * The noise fields under the ground's colour at world g — moisture, the
- * vegetation clumping, the grass's density and hue patches — which the
- * terrain's shading evaluated per pixel every frame; baked once per lattice
- * point into the material layer (by sunShader / horizonShader) and sampled.
- * Height and slope, which shape the colour sharply, stay per pixel.
- */
-const GROUND_FIELDS_WGSL = /* wgsl */ `
-fn groundFields(g: vec2f, seed: i32) -> vec4f {
-  return vec4f(moisture(g, seed), vnoise(g.x / VEG_WL, g.y / VEG_WL, seed + 171),
-    0.5 + 0.5 * vnoise(g.x * 0.045, g.y * 0.045, seed + 7777), 0.5 + 0.5 * vnoise(g.x * 0.033, g.y * 0.033, seed + 7707));
+fn grassDensityFrom(veg: f32, slope: f32, patchN: f32) -> f32 {
+  return veg * smoothstep(0.15, 0.55, patchN + 0.25 * veg) * (1.0 - smoothstep(0.7, 1.1, slope));
 }
 `;
 
 /**
+ * The ground's biome look (its tables: worldgen.wgsl.ts LK_*), and
+ * its encoding in the clipmap's biome layers (biomeShader writes them per lattice point, the raster
+ * ground and grass read them): mat (rgba16f) — the snow line (m), wetness (≥ 0) or lava (< 0), the
+ * meadow patches, flowers; bioA — soil (√rgb), grass cover; bioB — grass (√rgb, its hue patches baked
+ * in), blade height / BLADE_SCALE; bioC — rock (√rgb), strata.
+ */
+const BLADE_SCALE = 3;
+const lookWGSL = () => /* wgsl */ `
+const BLADE_SCALE: f32 = ${f(BLADE_SCALE)};
+`;
+
+/**
  * The far forest's canopy at a lattice point (forest.wgsl.ts canopyAt), into the clipmap's canopy
- * layer (binding 6), from the ground there: its height e, gradient, moisture M, and its relief over
+ * layer (binding 6), from the ground there: its height e, its water, gradient, and its relief over
  * the forest bodies' hill step (placement.ts PLACE.hills; no finer than the lattice).
  */
 const CANOPY_LAYER_WGSL = /* wgsl */ `
 @group(0) @binding(6) var canopyOut: texture_storage_2d_array<rgba8unorm, write>;
 ${canopyWGSL()}
-fn writeCanopy(st: vec2u, xz: vec2f, e: f32, grad: vec2f, M: f32, s: f32) {
+fn writeCanopy(st: vec2u, xz: vec2f, e: f32, grad: vec2f, s: f32) {
   let H = max(${f(PLACE.hills.step)}, s);
   let hE = heightAt(xz, vec2f(H, 0.0), s);
   let hW = heightAt(xz, vec2f(-H, 0.0), s);
@@ -102,7 +107,7 @@ fn writeCanopy(st: vec2u, xz: vec2f, e: f32, grad: vec2f, M: f32, s: f32) {
   let hS = heightAt(xz, vec2f(0.0, -H), s);
   let hills = (hE + hW + hN + hS - 4.0 * e) / H;
   let hillSlope = length(vec2f(hE - hW, hN - hS)) / (2.0 * H);
-  textureStore(canopyOut, st, gen.level, canopyAt(xz + gen.origin, e, length(grad), hills, hillSlope, M, gen.seed));
+  textureStore(canopyOut, st, gen.level, canopyAt(xz + gen.origin, e, waterAt(xz), length(grad), hills, hillSlope, gen.seed));
 }
 `;
 
@@ -118,7 +123,7 @@ struct Frame {
   seed: i32,
   marchSteps: i32,
   shadowSteps: i32,
-  pad0: f32,
+  camWater: f32,       // the water's surface under the camera (lakes, rivers, the sea): below it, the view is underwater
   jitter: vec2f,       // TAA projection jitter (NDC); 0 without TAA
 };
 @group(0) @binding(0) var<uniform> u: Frame;
@@ -129,6 +134,12 @@ function heightSourceWGSL(opts: TerrainShaderOptions): string {
     return /* wgsl */ `
 fn heightAt(xz: vec2f, off: vec2f, dp: f32) -> f32 {
   return elevation(xz + u.origin + off, dp, u.seed);
+}
+fn waterAt(xz: vec2f) -> f32 {
+  return landSurface(xz + u.origin, 0.0, u.seed).w;
+}
+fn flowAt(xz: vec2f) -> vec2f {
+  return landSurface(xz + u.origin, 0.0, u.seed).flow;
 }
 `;
   }
@@ -169,6 +180,31 @@ fn clipLookup(t: texture_2d_array<f32>, xz: vec2f, off: vec2f) -> f32 {
 
 fn heightAt(xz: vec2f, off: vec2f, dp: f32) -> f32 {
   return clipLookup(hTex, xz, off);
+}
+// The clipmap's two channels at chunk-local xz: the ground's height and the water's surface (the
+// sea, a lake, a river's pool), from the level (or two, in a blend band) that holds it.
+fn clipLookupRG(t: texture_2d_array<f32>, xz: vec2f) -> vec2f {
+  let rel = xz - clip.cam.xy;
+  let lf = log2(max(max(abs(rel.x), abs(rel.y)) * clip.cam.z, 1e-6));
+  let lc = clamp(ceil(lf), 0.0, CLIP_LMAX);
+  let l = i32(lc);
+  let L = clip.lv[l];
+  var v = textureSampleLevel(t, hSamp, (rel * L.z + L.xy) * CLIP_INV_N, l, 0.0).rg;
+  let b = clamp((lf - lc) / CLIP_BLEND + 1.0, 0.0, 1.0);
+  if (b > 0.0 && lc < CLIP_LMAX) {
+    let L1 = clip.lv[l + 1];
+    v = mix(v, textureSampleLevel(t, hSamp, (rel * L1.z + L1.xy) * CLIP_INV_N, l + 1, 0.0).rg, b);
+  }
+  return v;
+}
+fn waterAt(xz: vec2f) -> f32 { return clipLookupRG(hTex, xz).y; }
+// The rivers' flow at chunk-local xz (m/s, world xz): the clipmap's third and fourth channels.
+fn flowAt(xz: vec2f) -> vec2f {
+  let rel = xz - clip.cam.xy;
+  let lf = log2(max(max(abs(rel.x), abs(rel.y)) * clip.cam.z, 1e-6));
+  let l = i32(clamp(ceil(lf), 0.0, CLIP_LMAX));
+  let L = clip.lv[l];
+  return textureSampleLevel(hTex, hSamp, (rel * L.z + L.xy) * CLIP_INV_N, l, 0.0).ba;
 }
 ${opts.sun === 'classic' ? `
 // Cached sun visibility of the ground (clipmapCache.ts, sunShader below).
@@ -309,13 +345,10 @@ fn shadeSurface(terrain: bool, p: vec3f, rd: vec3f, tS: f32, eWater: f32) -> vec
     let e = p.y;
     var albedo = vec3f(0.1, 0.16, 0.05);
     if (!STUB_BIOME) {
-      let T = temperature(g, e);
-      let M = moisture(g, u.seed);
-      let vegNoise = vnoise(g.x / VEG_WL, g.y / VEG_WL, u.seed + 171);
-      let bio = biomeColor(T, M, e, sqrt(gradLenSq), vegNoise);
-      albedo = bedTint(groundTint(bio.col, bio.veg, sqrt(gradLenSq), g, u.seed), p);
+      let wl = waterAt(p.xz);
+      albedo = bedTint(groundAt(g, e, sqrt(gradLenSq), wl, u.seed).col, p, wl);
     }
-    let sunTerm = albedo * keyCol(p.y) * ndl * sh * causticsAt(p);
+    let sunTerm = albedo * keyCol(p.y) * ndl * sh * causticsAt(p, W_LEVEL);
     let ambTerm = albedo * skyAmb(n, 0.22 + 0.28 * max(n.y, 0.0)) * heroAOAt(p - u.camPos);
     col = sunTerm + ambTerm;
     if (!STUB_FOG) { col = surfaceFog(col, tS, p.y, rd); }
@@ -402,13 +435,12 @@ ${CLASSIC_LIGHT_WGSL}
 ${SHADE_WGSL}
 ${classicDomeWGSL('shadeSky')}
 ${NO_HERO_WGSL}
-fn groundTint(col: vec3f, veg: f32, slope: f32, g: vec2f, seed: i32) -> vec3f { return col; }
 fn sunVisibility(p: vec3f, so: vec3f) -> f32 { return softShadow(p + so, u.footprint); }
 fn surfaceFog(col: vec3f, t: f32, h: f32, rd: vec3f) -> vec3f { return applyFog(col, t, h, rd); }
 fn outputTransform(col: vec3f) -> vec3f { return col; }
 fn skyGrade(col: vec3f, rd: vec3f) -> vec3f { return col; }
-fn bedTint(albedo: vec3f, p: vec3f) -> vec3f { return albedo; }
-fn causticsAt(p: vec3f) -> f32 { return 1.0; }
+fn bedTint(albedo: vec3f, p: vec3f, wl: f32) -> vec3f { return albedo; }
+fn causticsAt(p: vec3f, wl: f32) -> f32 { return 1.0; }
 
 const LAMBDA: f32 = ${f(MARCH.lambdaStep)};
 const DMIN: f32 = ${f(MARCH.deltaMin)};
@@ -434,7 +466,7 @@ fn fs(@builtin(position) fc: vec4f) -> @location(0) vec4f {
   let rd = cameraRay(fc.xy);
   let ro = u.camPos;
 
-  if (ro.y < W_LEVEL) { return underwater(rd); }
+  if (ro.y < u.camWater) { return underwater(rd); }
   if (ro.y > MAXH && rd.y >= 0.0) { return display(skyColor(rd)); }
 
   let tMax = MAXDIST;
@@ -666,6 +698,10 @@ struct RingJob {
 };
 @group(1) @binding(14) var<uniform> ringJob: RingJob;
 @group(1) @binding(15) var<storage, read_write> ringTrisOut: array<u32>;
+// The ring's cells that hold water (the water's draw: vsWaterCell), and per ring its indirect draw
+// arguments (vertex count, instances, first vertex, first instance; the count grows by 6 a cell).
+@group(1) @binding(16) var<storage, read_write> waterCellsOut: array<u32>;
+@group(1) @binding(17) var<storage, read_write> waterArgs: array<atomic<u32>>;
 const RING_B: u32 = ${RING_BLOCK}u;
 // Each block's slot in the buffer (row-major blocks).
 const RING_SLOT = array<u32, ${slot.length}>(${Array.from(slot, (x) => `${x}u`).join(', ')});
@@ -728,6 +764,21 @@ fn ringTris(@builtin(global_invocation_id) id: vec3u) {
   let v10 = v00 + 1u;
   let v01 = v00 + RING_SIDE;
   let v11 = v01 + 1u;
+  // Water here (some corner truly wet, and its water above another's ground, with a margin): onto the
+  // ring's water list. (Dry corners' tables lie under their ground: a cliff with none wet holds none.)
+  let w00 = meshGW(vec2f(P), l);
+  let w10 = meshGW(vec2f(P + vec2i(st, 0)), l);
+  let w01 = meshGW(vec2f(P + vec2i(0, st)), l);
+  let w11 = meshGW(vec2f(P + vec2i(st, st)), l);
+  // (on the coarse rings a cell needs two wet corners: a channel narrower than a cell would only clip
+  // one, and stand as a sliver of steep water — a spike — on a slope)
+  let nWet = select(0, 1, w00.y > w00.x + 0.02) + select(0, 1, w10.y > w10.x + 0.02) + select(0, 1, w01.y > w01.x + 0.02) + select(0, 1, w11.y > w11.x + 0.02);
+  let cellM = f32(st) * mesh.cam.w; // (P and st are in level-0 lattice units)
+  let anyWet = nWet >= select(1, 2, cellM > 4.0);
+  if (anyWet && max(max(w00.y, w10.y), max(w01.y, w11.y)) > min(min(w00.x, w10.x), min(w01.x, w11.x)) - 0.6) {
+    let n = atomicAdd(&waterArgs[ringJob.ring * 4u], 6u) / 6u;
+    waterCellsOut[ringJob.ring * side2 * side2 + n] = (ringJob.ring << 20u) | i;
+  }
   if (anti) {
     ringTrisOut[o] = v00; ringTrisOut[o + 1u] = v01; ringTrisOut[o + 2u] = v10;
     ringTrisOut[o + 3u] = v10; ringTrisOut[o + 4u] = v01; ringTrisOut[o + 5u] = v11;
@@ -764,7 +815,7 @@ ${cycle ? cycleSkyWGSL({ sky: 17, light: 18, view: 19 }) : CLASSIC_LIGHT_WGSL + 
 ${opts.grass ? grassWGSL(opts.grass, islands) : NO_TINT_WGSL}
 ${opts.forest ? forestWGSL(opts.forest.spec, opts.forest.bounds, islands) : 'fn treeShadowAt(p: vec3f) -> f32 { return 1.0; }'}
 ${opts.ruins ? RUIN_SITES_WGSL + RUINS_WGSL : 'fn inRuinSite(xz: vec2f) -> bool { return false; }'}
-${islands ? skyRealmWGSL(!!opts.clip) + WATERFALLS_WGSL : 'fn skyShadowAt(p: vec3f) -> f32 { return 1.0; }'}
+${islands ? skyRealmWGSL(!!opts.clip) + WATERFALLS_WGSL + structuresWGSL(!!opts.forest) + effectsWGSL() + faunaWGSL() + motesWGSL() + lanternsWGSL() : 'fn skyShadowAt(p: vec3f) -> f32 { return 1.0; }'}
 
 struct Mesh {
   cam: vec4f,                        // camera rel. the reference lattice point: x, y (height), z; spacing0
@@ -778,8 +829,14 @@ struct Mesh {
 const RING_SIDE: u32 = ${2 * opts.k + 1}u;
 const CAMERA_NEAR: f32 = ${f(CAMERA.near)};
 
-// The ground's material layer (clipmapCache.ts): its noise fields per lattice point (groundFields).
+// The ground's biome layers (clipmapCache.ts, biomeShader): mat — the snow line (m), wetness (≥ 0) or
+// lava (< 0), the meadow patches, flowers; bioA — soil (√rgb), grass cover; bioB — grass (√rgb), blade
+// height / BLADE_SCALE; bioC — rock (√rgb), strata.
 @group(0) @binding(28) var matTex: texture_2d_array<f32>;
+@group(0) @binding(38) var bioATex: texture_2d_array<f32>;
+@group(0) @binding(39) var bioBTex: texture_2d_array<f32>;
+@group(0) @binding(40) var bioCTex: texture_2d_array<f32>;
+${lookWGSL()}
 // The far forest's canopy layer (forest.wgsl.ts canopyAt): its albedo (√, premultiplied by its cover), its cover.
 @group(0) @binding(25) var canopyTex: texture_2d_array<f32>;
 
@@ -826,7 +883,7 @@ fn reachOd(rel: vec2f) -> f32 {
 
 // Everything the ground's shading reads from the clipmap at xz, from the one level (or two, in a
 // blend band) that holds it: height, the sun layer (light, gradient) and the material.
-struct GroundCache { h: f32, sun: vec4f, mat: vec4f };
+struct GroundCache { h: f32, wt: f32, sun: vec4f, mat: vec4f, bioA: vec4f, bioB: vec4f, bioC: vec4f };
 fn groundCacheAt(xz: vec2f) -> GroundCache {
   let rel = xz - clip.cam.xy;
   let d = max(abs(rel.x), abs(rel.y));
@@ -835,17 +892,140 @@ fn groundCacheAt(xz: vec2f) -> GroundCache {
   let l = i32(lc);
   let L = clip.lv[l];
   let uv = (rel * L.z + L.xy) * CLIP_INV_N;
-  var g = GroundCache(textureSampleLevel(hTex, hSamp, uv, l, 0.0).r,
-    textureSampleLevel(sunTex, hSamp, uv, l, 0.0), textureSampleLevel(matTex, hSamp, uv, l, 0.0));
+  let hw = textureSampleLevel(hTex, hSamp, uv, l, 0.0).rg;
+  var g = GroundCache(hw.x, hw.y, textureSampleLevel(sunTex, hSamp, uv, l, 0.0), textureSampleLevel(matTex, hSamp, uv, l, 0.0),
+    textureSampleLevel(bioATex, hSamp, uv, l, 0.0), textureSampleLevel(bioBTex, hSamp, uv, l, 0.0), textureSampleLevel(bioCTex, hSamp, uv, l, 0.0));
   let b = clamp((lf - lc) / CLIP_BLEND + 1.0, 0.0, 1.0);
   if (b > 0.0 && lc < CLIP_LMAX) {
     let L1 = clip.lv[l + 1];
     let uv1 = (rel * L1.z + L1.xy) * CLIP_INV_N;
-    g.h = mix(g.h, textureSampleLevel(hTex, hSamp, uv1, l + 1, 0.0).r, b);
+    let hw1 = textureSampleLevel(hTex, hSamp, uv1, l + 1, 0.0).rg;
+    g.h = mix(g.h, hw1.x, b);
+    g.wt = mix(g.wt, hw1.y, b);
     g.sun = mix(g.sun, textureSampleLevel(sunTex, hSamp, uv1, l + 1, 0.0), b);
     g.mat = mix(g.mat, textureSampleLevel(matTex, hSamp, uv1, l + 1, 0.0), b);
+    g.bioA = mix(g.bioA, textureSampleLevel(bioATex, hSamp, uv1, l + 1, 0.0), b);
+    g.bioB = mix(g.bioB, textureSampleLevel(bioBTex, hSamp, uv1, l + 1, 0.0), b);
+    g.bioC = mix(g.bioC, textureSampleLevel(bioCTex, hSamp, uv1, l + 1, 0.0), b);
   }
   return g;
+}
+
+// The ground's mat layer alone at xz (the snow line, wetness or lava, the patches, flowers).
+fn matAt(xz: vec2f) -> vec4f {
+  let rel = xz - clip.cam.xy;
+  let lf = log2(max(max(abs(rel.x), abs(rel.y)) * clip.cam.z, 1e-6));
+  let lc = clamp(ceil(lf), 0.0, CLIP_LMAX);
+  let l = i32(lc);
+  let L = clip.lv[l];
+  var m = textureSampleLevel(matTex, hSamp, (rel * L.z + L.xy) * CLIP_INV_N, l, 0.0);
+  let b = clamp((lf - lc) / CLIP_BLEND + 1.0, 0.0, 1.0);
+  if (b > 0.0 && lc < CLIP_LMAX) {
+    let L1 = clip.lv[l + 1];
+    m = mix(m, textureSampleLevel(matTex, hSamp, (rel * L1.z + L1.xy) * CLIP_INV_N, l + 1, 0.0), b);
+  }
+  return m;
+}
+// Water freezes this far above the snow line (terrainMath.ts lastIce).
+const ICE_ABOVE: f32 = ${f(CLIMATE.iceAbove)};
+
+// ---- the ground's biome look, finished per pixel ------------------------------------------------
+const SAND: vec3f = vec3f(0.6, 0.5, 0.34);
+const SNOW: vec3f = vec3f(${SNOW_ALBEDO.map(f).join(', ')});
+const LAVA_GLOW: vec3f = vec3f(5.0, 1.15, 0.14);
+
+// Snow cover at p: above the biome's snow line (mat.x), broken into drifts, none on cliffs.
+fn snowAt(gc: GroundCache, p: vec3f, slope: f32) -> f32 {
+  let snowAlt = gc.mat.x;
+  if (p.y < snowAlt - 40.0) { return 0.0; }
+  let g = p.xz + u.origin;
+  let drift = vnoise(g.x / 23.0, g.y / 23.0, 4451) * 18.0 + vnoise(g.x / 7.0, g.y / 7.0, 4452) * 5.0;
+  return smoothstep(snowAlt - 15.0, snowAlt + 15.0, p.y + drift) * (1.0 - smoothstep(0.85, 1.35, slope));
+}
+
+// Sand on the sea's low, gentle shores, and by inland water where little grows (an oasis, a tundra
+// lake's gravel); grass runs down to the rivers and lakes elsewhere.
+fn beachAt(gc: GroundCache, p: vec3f, slope: f32) -> f32 {
+  let above = p.y - gc.wt;
+  if (above > 1.8) { return 0.0; }
+  let seaShore = 1.0 - smoothstep(SEA + 0.5, SEA + 1.5, gc.wt);
+  return (1.0 - smoothstep(0.3, 1.8, above)) * (1.0 - smoothstep(0.35, 0.7, slope)) * (1.0 - 0.75 * max(gc.mat.y, 0.0))
+    * max(seaShore, 0.8 * (1.0 - gc.bioA.a));
+}
+
+struct GroundLook { albedo: vec3f, glow: vec3f, snow: f32 };
+// The ground's colour at p from its biome layers (gc), its slope and its height above the water:
+// grass over soil, rock on the steep (banded in strata in canyon country), sand on low gentle shores,
+// mud by the water in wet lands, snow above the snow line, lava's glow on a volcano.
+fn groundLook(gc: GroundCache, p: vec3f, slope: f32) -> GroundLook {
+  let soil = gc.bioA.rgb * gc.bioA.rgb;
+  let cover = gc.bioA.a;
+  let grassCol = gc.bioB.rgb * gc.bioB.rgb;
+  let rock = gc.bioC.rgb * gc.bioC.rgb;
+  let strata = gc.bioC.a;
+  let wetLava = gc.mat.y;
+  let g = p.xz + u.origin;
+  let dens = grassDensityFrom(cover, slope, gc.mat.z);
+  var col = mix(soil, grassCol * 0.8, clamp(dens * 1.2, 0.0, 0.9));
+  // rock: the steep, and outcrops where little grows
+  let rockAmt = smoothstep(0.72, 1.15, slope + (1.0 - cover) * 0.22);
+  if (rockAmt > 0.0) {
+    var rk = rock;
+    if (strata > 0.01) {
+      // Strata: layers by height, warped a little, each its own tint (cream, rust, purple-grey).
+      let hb = p.y / 7.5 + 0.6 * vnoise(g.x / 90.0, g.y / 90.0, 4441);
+      let layer = floor(hb);
+      let pick = fract(sin(layer * 12.9898) * 43758.547);
+      var tint = vec3f(1.0, 0.86, 0.72);
+      if (pick < 0.3) { tint = vec3f(1.3, 1.18, 1.0); } else if (pick > 0.75) { tint = vec3f(0.78, 0.66, 0.66); }
+      let edge = smoothstep(0.42, 0.5, abs(fract(hb) - 0.5));
+      rk = mix(rock, rock * tint * (1.0 - 0.25 * edge), strata);
+    }
+    col = mix(col, rk, rockAmt);
+  }
+  // the shore: sand (beachAt), damp and darker by the water, more so in wet lands
+  let above = p.y - gc.wt;
+  let wet = max(wetLava, 0.0);
+  let beach = beachAt(gc, p, slope);
+  col = mix(col, mix(SAND, soil, 0.3), beach * 0.85);
+  col *= 1.0 - 0.4 * ((1.0 - smoothstep(0.0, 1.5, above)) * 0.55 + wet * 0.35);
+  let snow = snowAt(gc, p, slope);
+  col = mix(col, SNOW, snow);
+  var glow = vec3f(0.0);
+  if (wetLava < -0.01) {
+    // Lava: a dark crust broken over the glow, slowly drifting and pulsing.
+    let lv = -wetLava;
+    let crust = smoothstep(0.3, 0.75, 0.5 + 0.5 * vnoise(g.x / 3.5 + u.time * 0.05, g.y / 3.5, 4461));
+    col = mix(col, vec3f(0.02, 0.016, 0.014), lv);
+    glow = LAVA_GLOW * lv * (0.3 + 0.7 * (1.0 - crust)) * (0.85 + 0.15 * sin(u.time * 1.3 + g.x * 0.05));
+  }
+  return GroundLook(col, glow, snow);
+}
+
+// Wind-packed snow near the camera: drifts (~12 m across) and sastrugi ridges (~2.5 m) lying across
+// the wind, as a tilt of the normal n (the cover, amt), each faded out as it shrinks under the
+// pixel's footprint dp. The snow is bright, so its relief is what shows its form.
+fn snowRelief(n: vec3f, p: vec3f, dp: f32, amt: f32) -> vec3f {
+  let kD = amt * (1.0 - smoothstep(1.5, 4.0, dp));
+  if (kD <= 0.0) { return n; }
+  let kS = amt * (1.0 - smoothstep(0.3, 0.8, dp));
+  let g = p.xz + u.origin;
+  let wd = vec2f(0.8, 0.6);
+  let a = dot(g, wd);
+  let b = dot(g, vec2f(-wd.y, wd.x));
+  // h(a, b) = 1.1·N(a/12, b/26) + 0.16·N(a/2.5, b/7): its slopes along and across the wind
+  let e = 0.25;
+  let d0 = vnoise(a / 12.0, b / 26.0, 4471);
+  var ha = 1.1 * kD * (vnoise((a + e) / 12.0, b / 26.0, 4471) - d0) / e;
+  var hb = 1.1 * kD * (vnoise(a / 12.0, (b + e) / 26.0, 4471) - d0) / e;
+  if (kS > 0.0) {
+    let s0 = vnoise(a / 2.5, b / 7.0, 4472);
+    ha += 0.16 * kS * (vnoise((a + e) / 2.5, b / 7.0, 4472) - s0) / e;
+    hb += 0.16 * kS * (vnoise(a / 2.5, (b + e) / 7.0, 4472) - s0) / e;
+  }
+  let hx = ha * wd.x - hb * wd.y;
+  let hz = ha * wd.y + hb * wd.x;
+  return normalize(n - vec3f(hx, 0.0, hz) * n.y);
 }
 
 // The ground at p (its height from gc), seen at distance tS along rd: shadeSurface's terrain
@@ -870,6 +1050,14 @@ fn shadeGround(p: vec3f, rd: vec3f, tS: f32, gc: GroundCache) -> vec3f {
     }
     n = vec3f(-grad.x, 1.0, -grad.y) * inverseSqrt(dot(grad, grad) + 1.0);
   }
+  var albedo = vec3f(0.1, 0.16, 0.05);
+  var glow = vec3f(0.0);
+  if (!STUB_BIOME) {
+    let look = groundLook(gc, p, length(grad));
+    albedo = bedTint(look.albedo, p, gc.wt);
+    glow = look.glow;
+    if (look.snow > 0.01 && !STUB_GRAD) { n = snowRelief(n, p, tS * u.footprint, look.snow); }
+  }
   let L = keyDir();
   let ndl = max(dot(n, L), 0.0);
   // Past the trees' reach the forest is painted on (canopyAt), lit as its trees are: it needs the
@@ -882,16 +1070,10 @@ fn shadeGround(p: vec3f, rd: vec3f, tS: f32, gc: GroundCache) -> vec3f {
     sh = sunFrom(gc.sun) * treeShadowAt(p) * skyShadowAt(p);
     if (sh > 0.0) { sh = min(sh, heroShadowAt(p - u.camPos)); }
   }
-  var albedo = vec3f(0.1, 0.16, 0.05);
-  if (!STUB_BIOME) {
-    let slope = length(grad);
-    let bio = biomeColor(temperature(p.xz + u.origin, p.y), gc.mat.x, p.y, slope, gc.mat.y);
-    albedo = bedTint(groundTintFrom(bio.col, bio.veg, slope, gc.mat.z, gc.mat.w), p);
-  }
   let kc = keyCol(p.y);
-  let sunTerm = albedo * kc * ndl * sh * causticsAt(p);
+  let sunTerm = albedo * kc * ndl * sh * causticsAt(p, gc.wt);
   let ambTerm = albedo * skyAmb(n, 0.22 + 0.28 * max(n.y, 0.0)) * heroAOAt(p - u.camPos);
-  var col = sunTerm + ambTerm;
+  var col = sunTerm + ambTerm + glow;
   // The far forest over the ground (once the ground is lit, so little else is held meanwhile): its
   // canopy by its cover, broken into crowns while they are bigger than a pixel.
   if (canopyFar) {
@@ -930,6 +1112,16 @@ fn meshHeight(P: vec2f, l: i32) -> f32 {
   let o = mesh.texOff[l];
   return textureSampleLevel(hTex, hSamp, (P * o.z + o.xy + 0.5) * CLIP_INV_N, l, 0.0).r;
 }
+// The ground and the water at a lattice point (the clipmap's two channels).
+fn meshGW(P: vec2f, l: i32) -> vec2f {
+  let o = mesh.texOff[l];
+  return textureSampleLevel(hTex, hSamp, (P * o.z + o.xy + 0.5) * CLIP_INV_N, l, 0.0).rg;
+}
+// The water's surface at a lattice point (the clipmap's second channel).
+fn meshWater(P: vec2f, l: i32) -> f32 {
+  let o = mesh.texOff[l];
+  return textureSampleLevel(hTex, hSamp, (P * o.z + o.xy + 0.5) * CLIP_INV_N, l, 0.0).g;
+}
 
 struct TOut {
   @builtin(position) pos: vec4f,
@@ -942,8 +1134,18 @@ fn project(rel: vec3f) -> vec4f {
   return vec4f(v.x * mesh.proj.x + u.jitter.x * v.z, v.y * mesh.proj.y + u.jitter.y * v.z, mesh.proj.z, v.z);
 }
 
-@vertex
-fn vsTerrain(@builtin(vertex_index) vi: u32, @builtin(instance_index) ring: u32) -> TOut {
+// The water mesh's height at a lattice point (ground, water): the water where it stands; where it is dry,
+// flatTo (a water cell's lowest wet corner) held just under the ground, so the surface runs on level
+// under a bank and the ground hides it there — never up the bank, a sloped sheet over a shore or a cliff.
+// (flatTo ≥ 1e8: no cell known; the table there kept just under the ground.)
+fn waterVertexH(gw: vec2f, flatTo: f32) -> f32 {
+  if (gw.y > gw.x + 0.02) { return gw.y; }
+  if (flatTo < 1e8) { return min(flatTo, gw.x - 0.05); }
+  return max(gw.y, gw.x - 0.5);
+}
+
+// A ring's vertex: on the ground, or (water) on the water's surface there.
+fn ringVertex(vi: u32, ring: u32, water: bool, flatTo: f32) -> TOut {
   let R = mesh.rings[ring];
   let ci = vec2i(i32(vi % RING_SIDE), i32(vi / RING_SIDE));
   let P = R.xy + ci * R.z;
@@ -953,13 +1155,26 @@ fn vsTerrain(@builtin(vertex_index) vi: u32, @builtin(instance_index) ring: u32)
   if (f32(ring) >= mesh.morph.z) { mu = 0.0; }
   let odd = vec2f(f32(ci.x & 1), f32(ci.y & 1));
   let Pm = vec2f(P) - odd * (f32(R.z) * mu);
-  var h = meshHeight(Pm, R.w);
-  if (mu > 0.0) { h = mix(h, meshHeight(Pm, R.w + 1), mu); }
+  var h: f32;
+  if (water) {
+    // (where it is dry the table lies far under the ground; the mesh keeps it just under, so a shore's
+    // triangles meet the land gently instead of plunging under the bank)
+    h = waterVertexH(meshGW(Pm, R.w), flatTo);
+    if (mu > 0.0) { h = mix(h, waterVertexH(meshGW(Pm, R.w + 1), flatTo), mu); }
+  } else {
+    h = meshHeight(Pm, R.w);
+    if (mu > 0.0) { h = mix(h, meshHeight(Pm, R.w + 1), mu); }
+  }
   let rel = vec3f(Pm.x * mesh.cam.w - mesh.cam.x, h - mesh.cam.y, Pm.y * mesh.cam.w - mesh.cam.z);
   var o: TOut;
   o.pos = project(rel);
   o.rel = rel;
   return o;
+}
+
+@vertex
+fn vsTerrain(@builtin(vertex_index) vi: u32, @builtin(instance_index) ring: u32) -> TOut {
+  return ringVertex(vi, ring, false, 1e9);
 }
 
 ${opts.diag ? ringTrisWGSL(opts.k) : ''}
@@ -968,7 +1183,7 @@ fn fsTerrain(i: TOut) -> @location(0) vec4f {
   let ro = u.camPos;
   let tS = length(i.rel);
   let rd = i.rel / tS;
-  if (ro.y < W_LEVEL) { return underwater(rd); }
+  if (ro.y < u.camWater) { return underwater(rd); }
   if (STUB_SHADE) { return vec4f(0.3, 0.45, 0.2, 1.0); }
   // Shade on the cached surface under the mesh point: the triangles cut
   // below it in concave spots, and a shadow ray starting there self-shadows.
@@ -982,27 +1197,45 @@ fn fsTerrain(i: TOut) -> @location(0) vec4f {
   return display(shadeGround(p, rd, tS, gc));
 }
 
-// Water: one quad at W_LEVEL as far round the camera as the land reaches.
+// Water: the rings again, on the water's surface (the sea, lakes, rivers' pools; where the surface
+// runs under the ground the ground hides it). Where the table steps the surface stands steep: a fall.
 @vertex
-fn vsWater(@builtin(vertex_index) vi: u32) -> TOut {
-  let c = array<vec2f, 6>(vec2f(-1.0, -1.0), vec2f(1.0, -1.0), vec2f(1.0, 1.0), vec2f(-1.0, -1.0), vec2f(1.0, 1.0), vec2f(-1.0, 1.0));
-  let xz = c[vi] / mesh.morph.w;
-  let rel = vec3f(xz.x, W_LEVEL - u.camPos.y, xz.y);
-  var o: TOut;
-  o.pos = project(rel);
-  o.rel = rel;
-  return o;
+fn vsWater(@builtin(vertex_index) vi: u32, @builtin(instance_index) ring: u32) -> TOut {
+  return ringVertex(vi, ring, true, 1e9);
 }
-
+${opts.diag ? `
+// With the rings' water lists (ringTris): only the cells that hold water, six vertices a cell, each
+// entry its ring (high bits) and its cell.
+@group(1) @binding(18) var<storage, read> waterCellsIn: array<u32>;
+const WC_DX = array<u32, 6>(0u, 1u, 1u, 0u, 0u, 1u);
+const WC_DZ = array<u32, 6>(0u, 1u, 0u, 0u, 1u, 1u);
+@vertex
+fn vsWaterCell(@builtin(vertex_index) vi: u32) -> TOut {
+  let e = waterCellsIn[vi / 6u];
+  let ring = e >> 20u;
+  let c = e & 0xfffffu;
+  let side2 = RING_SIDE - 1u;
+  let k = vi % 6u;
+  // the cell's lowest wet corner: its dry corners are laid level with it
+  let R = mesh.rings[ring];
+  let P = R.xy + vec2i(i32(c % side2), i32(c / side2)) * R.z;
+  var wetMin = 1e9;
+  for (var q = 0u; q < 4u; q++) {
+    let gw = meshGW(vec2f(P + vec2i(i32(q & 1u), i32(q >> 1u)) * R.z), R.w);
+    if (gw.y > gw.x + 0.02) { wetMin = min(wetMin, gw.y); }
+  }
+  return ringVertex((c / side2 + WC_DZ[k]) * RING_SIDE + c % side2 + WC_DX[k], ring, true, wetMin);
+}
+` : ''}
 // ---- stylized water (drawn blended over the lake bed, premultiplied alpha) ----
 // Lake bed under the surface: sand toward the water, caustics in the shallows.
-fn bedTint(albedo: vec3f, p: vec3f) -> vec3f {
-  let d = W_LEVEL - p.y;
+fn bedTint(albedo: vec3f, p: vec3f, wl: f32) -> vec3f {
+  let d = wl - p.y;
   if (d <= 0.0) { return albedo; }
   return mix(albedo, vec3f(0.2, 0.18, 0.12), smoothstep(0.0, 0.6, d) * 0.7);
 }
-fn causticsAt(p: vec3f) -> f32 {
-  let d = W_LEVEL - p.y;
+fn causticsAt(p: vec3f, wl: f32) -> f32 {
+  let d = wl - p.y;
   if (d <= 0.0) { return 1.0; }
   let g = p.xz + u.origin;
   let t = u.time;
@@ -1026,33 +1259,105 @@ fn waterNormal(g: vec2f, t: f32, strength: f32) -> vec3f {
   let hz = waterHeight(g + vec2f(0.0, e), t);
   return normalize(vec3f(-(hx - h0) / e * strength, 1.0, -(hz - h0) / e * strength));
 }
+// The ripples' slope on flowing water (a river's flow, m/s): the ripple field carried downstream
+// in two phases half a cycle apart, each faded out as it restarts (flow maps, Vlachos 2010), and
+// stretched along the current. Still water keeps its own ripples.
+fn flowRippleSlope(g: vec2f, flow: vec2f, t: f32) -> vec2f {
+  let sp = length(flow);
+  let dir = flow / max(sp, 1e-4);
+  let side = vec2f(-dir.y, dir.x);
+  // ripples in a frame stretched along the current (streaks), more so as it runs faster
+  let stretch = 1.0 + 1.6 * smoothstep(0.3, 2.5, sp);
+  let PERIOD = 1.6;
+  let ph0 = fract(t / PERIOD);
+  let ph1 = fract(t / PERIOD + 0.5);
+  let w0 = 1.0 - abs(2.0 * ph0 - 1.0);
+  var grad = vec2f(0.0);
+  for (var k = 0; k < 2; k++) {
+    let ph = select(ph1, ph0, k == 0);
+    let wk = select(1.0 - w0, w0, k == 0);
+    let q0 = g - flow * (ph * PERIOD) + select(vec2f(13.7, -5.3), vec2f(0.0), k == 0);
+    let q = vec2f(dot(q0, dir) / stretch, dot(q0, side));
+    let e = 0.08;
+    let h0 = waterHeight(q, t * 0.35);
+    let hu = waterHeight(q + vec2f(e, 0.0), t * 0.35);
+    let hv = waterHeight(q + vec2f(0.0, e), t * 0.35);
+    grad += wk * ((hu - h0) / (e * stretch) * dir + (hv - h0) / e * side);
+  }
+  return grad;
+}
+// Molten lava's surface at world g (flow: its creep, m/s): rafts of dark crust broken into plates that
+// drift with the flow and slowly turn over, molten rock glowing through the cracks and in the open
+// channels between the rafts. Returns (crust shade, crack glow, crust cover).
+fn lavaSurface(g: vec2f, flow: vec2f, t: f32) -> vec3f {
+  let PERIOD = 9.0;
+  let ph0 = fract(t / PERIOD);
+  let w0 = 1.0 - abs(2.0 * ph0 - 1.0);
+  let creep = flow * 0.35 + vec2f(0.05, 0.03);
+  var crack = 0.0;
+  var swirl = 0.0;
+  for (var k = 0; k < 2; k++) {
+    let ph = select(fract(t / PERIOD + 0.5), ph0, k == 0);
+    let wk = select(1.0 - w0, w0, k == 0);
+    let q = g - creep * (ph * PERIOD) + select(vec2f(7.1, 3.9), vec2f(0.0), k == 0);
+    // plates ~4 m, cracks between them; finer cracks inside the plates
+    let warp = vec2f(vnoise(q.x / 6.0, q.y / 6.0, 971), vnoise(q.x / 6.0 + 4.1, q.y / 6.0 - 2.7, 972));
+    let e1 = voronoiEdge((q + 1.6 * warp) / 4.2, 973);
+    let e2 = voronoiEdge((q + 0.8 * warp) / 1.3, 974);
+    crack += wk * max(1.0 - smoothstep(0.02, 0.16, e1), 0.55 * (1.0 - smoothstep(0.01, 0.08, e2)));
+    swirl += wk * (0.5 + 0.5 * vnoise(q.x / 3.0 + t * 0.07, q.y / 3.0, 975));
+  }
+  // the rafts: a slow ~25 m field of crust, open molten channels between
+  let raft = vnoise(g.x / 26.0 - creep.x * t * 0.3, g.y / 26.0 - creep.y * t * 0.3, 976) + 0.35 * vnoise(g.x / 9.0, g.y / 9.0 + t * 0.02, 977);
+  return vec3f(0.55 + 0.45 * swirl, crack, smoothstep(-0.25, 0.2, raft));
+}
 
 @fragment
 fn fsWater(i: TOut) -> @location(0) vec4f {
+  // The surface's own slope, from the mesh (before any early return: derivatives need the whole
+  // quad): level on a pool, a lake, the sea; steep where the water table steps — a fall.
+  let dX = dpdx(i.rel);
+  let dY = dpdy(i.rel);
   let ro = u.camPos;
-  // The point from the pixel's own ray: interpolated across a quad as wide as the land's reach, the
-  // position would carry centimetres of rounding right under the camera.
-  let rd = cameraRay(i.pos.xy);
-  if (ro.y < W_LEVEL) { return underwater(rd); }
-  let tS = (ro.y - W_LEVEL) / max(-rd.y, 1e-7);
-  let rel = rd * tS;
+  let tS = length(i.rel);
+  let rd = i.rel / tS;
+  if (ro.y < u.camWater) { return underwater(rd); }
+  var nGeo = normalize(cross(dX, dY));
+  if (nGeo.y < 0.0) { nGeo = -nGeo; }
+  let fall = 1.0 - smoothstep(0.55, 0.92, nGeo.y);
+  let p = ro + i.rel;
+  let wy = p.y;
   // Behind fog too thick to see through: the fog alone, laid on opaquely (as the full path would end).
-  let od = fogOd(tS, rd) + reachOd(rel.xz);
-  if (od > FOG_OPAQUE) { return display(surfaceFogOd(vec3f(0.0), tS, W_LEVEL, rd, od)); }
-  let p = ro + rel;
+  let od = fogOd(tS, rd) + reachOd(i.rel.xz);
+  if (od > FOG_OPAQUE) { return display(surfaceFogOd(vec3f(0.0), tS, wy, rd, od)); }
   let g = p.xz + u.origin;
-  let depthV = max(W_LEVEL - heightAt(p.xz, vec2f(0.0), 0.0), 0.0);
+  let depthV = max(wy - heightAt(p.xz, vec2f(0.0), 0.0), 0.0);
   // Ripples: calmer at the shore, faded out with distance (no sub-pixel noise; none past 300 m,
   // where the water's normal is its plane's and its noise is not evaluated).
-  let strength = mix(0.03, 0.14, smoothstep(0.0, 1.5, depthV)) * (1.0 - smoothstep(40.0, 300.0, tS));
+  let strength = mix(0.03, 0.14, smoothstep(0.0, 1.5, depthV)) * (1.0 - smoothstep(40.0, 300.0, tS)) * (1.0 - fall);
+  let flow = flowAt(p.xz);
+  let speed = length(flow);
+  let lava = clamp(-matAt(p.xz).y, 0.0, 1.0);
   var n = vec3f(0.0, 1.0, 0.0);
-  if (strength > 0.0) { n = waterNormal(g, u.time, strength); }
+  var rapids = 0.0;
+  if (strength > 0.0 && lava < 0.5) {
+    if (speed > 0.08) {
+      // flowing: the ripples ride the current, rougher and foaming where it runs fast
+      let sl = flowRippleSlope(g, flow, u.time) * strength * (1.0 + 0.8 * smoothstep(0.8, 3.0, speed));
+      n = normalize(vec3f(-sl.x, 1.0, -sl.y));
+      let fz = 0.5 + 0.5 * vnoise(dot(g - flow * u.time, normalize(flow)) / 1.6, dot(g, vec2f(-flow.y, flow.x) / speed) / 0.7, 981);
+      rapids = smoothstep(1.4, 3.2, speed) * smoothstep(0.55, 0.8, fz);
+    } else {
+      n = waterNormal(g, u.time, strength);
+    }
+  }
   let sh = sunVisibility(p, vec3f(0.0, 0.15, 0.0));
-  // Light through the water column under this point, per channel (red dies first).
+  // Light through the water column under this point, per channel (red dies first): clear over a
+  // shallow bed, blue-green over a deep one (a third of the light reaches a bed 8 m down).
   let path = depthV / max(-rd.y, 0.06);
-  let T = exp(-vec3f(0.42, 0.085, 0.05) * path);
+  let T = exp(-vec3f(0.5, 0.14, 0.09) * path);
   let Tl = dot(T, vec3f(0.2126, 0.7152, 0.0722));
-  let kc = keyCol(W_LEVEL);
+  let kc = keyCol(wy);
   let up = vec3f(0.0, 1.0, 0.0);
   let body = vec3f(0.006, 0.065, 0.12) * (kc * 0.35 * (0.4 + 0.6 * sh) + skyAmb(up, 0.8));
   let refl = reflect(rd, n);
@@ -1071,10 +1376,50 @@ fn fsWater(i: TOut) -> @location(0) vec4f {
   // Premultiplied: sky reflection and in-scatter over the transmitted bed.
   var col = skyReflect(refl) * F + body * (vec3f(1.0) - T) * (1.0 - F) + kc * glint * sh;
   var alpha = 1.0 - (1.0 - F) * Tl;
+  foam = max(foam, rapids * (1.0 - smoothstep(60.0, 220.0, tS)));
   col = mix(col, foamCol, foam);
   alpha = mix(alpha, 1.0, foam);
+  // Molten lava: opaque, its crust lit as ground, its cracks glowing (and the glow lights the crust).
+  if (lava > 0.01) {
+    let ls = lavaSurface(g, flow, u.time);
+    let pulse = 0.85 + 0.15 * sin(u.time * 1.1 + g.x * 0.07 + g.y * 0.05);
+    let crustAlb = vec3f(0.03, 0.02, 0.017) * ls.x;
+    let heat = ls.y * pulse;
+    // the crusted rafts: dark rock lit as ground, faint warmth, the cracks glowing
+    let crusted = crustAlb * (kc * max(keyDir().y, 0.0) * sh + skyAmb(up, 0.5)) + crustAlb * LAVA_GLOW * 0.25
+      + LAVA_GLOW * (0.02 + 1.1 * heat) * mix(vec3f(1.0), vec3f(1.0, 1.25, 1.9), heat * heat);
+    // the open melt: bright, hotter (yellower) where it churns
+    let molten = LAVA_GLOW * (0.3 + 0.28 * ls.x) * mix(vec3f(1.0), vec3f(1.0, 1.2, 1.8), 0.3 * ls.x);
+    let lavaCol = mix(molten, crusted, ls.z);
+    col = mix(col, lavaCol, lava);
+    alpha = mix(alpha, 1.0, lava);
+  }
+  // Ice where the water is frozen (high above the snow line: tundra lakes, the cold sea, high tarns):
+  // pale, cracked, dusted with snow, opaque, lit as ground.
+  let ice = smoothstep(ICE_ABOVE - 10.0, ICE_ABOVE + 10.0, wy - matAt(p.xz).x) * (1.0 - fall) * (1.0 - lava);
+  if (ice > 0.01) {
+    let cr = smoothstep(0.93, 0.985, 1.0 - abs(vnoise(g.x / 9.0, g.y / 9.0, 961))) + 0.6 * smoothstep(0.95, 0.99, 1.0 - abs(vnoise(g.x / 3.1, g.y / 3.1, 962)));
+    let dust = smoothstep(0.45, 0.85, 0.5 + 0.5 * vnoise(g.x / 23.0, g.y / 23.0, 963));
+    let iceAlb = mix(vec3f(0.16, 0.27, 0.34), SNOW, dust) * (1.0 - 0.35 * min(cr, 1.0) * (1.0 - dust));
+    // clear ice is glossy: it keeps some of the water's reflection of the sky
+    let iceCol = iceAlb * (kc * max(keyDir().y, 0.0) * sh + skyAmb(up, 0.55)) + skyReflect(refl) * F * 0.6 * (1.0 - dust)
+      + kc * glint * sh * 0.25;
+    col = mix(col, iceCol, ice);
+    alpha = mix(alpha, 1.0, ice);
+  }
+  // A fall: white water pouring down the step, streaked, all but opaque (lava keeps its own look).
+  if (fall > 0.01 && lava < 0.5) {
+    let down = normalize(nGeo.xz + vec2f(1e-5, 0.0));
+    let a = dot(g, vec2f(-down.y, down.x));
+    let v = wy + u.time * 7.0;
+    let streak = 0.6 * vnoise(a * 0.9, v * 0.12, 951) + 0.4 * vnoise(a * 2.3, v * 0.35, 953);
+    let white = smoothstep(-0.3, 0.5, streak);
+    let fallCol = mix(vec3f(0.42, 0.56, 0.6), vec3f(0.93, 0.96, 0.98), white) * (kc * 0.45 * (0.4 + 0.6 * sh) + skyAmb(nGeo, 0.7));
+    col = mix(col, fallCol, fall);
+    alpha = mix(alpha, 0.86 + 0.12 * white, fall);
+  }
   let a = max(alpha, 1e-3);
-  let shown = display(surfaceFogOd(col / a, tS, W_LEVEL, rd, od));
+  let shown = display(surfaceFogOd(col / a, tS, wy, rd, od));
   return vec4f(shown.rgb * alpha, alpha);
 }
 
@@ -1087,7 +1432,7 @@ struct HeroOut {
 
 @fragment
 fn fsHero(@builtin(position) fc: vec4f) -> HeroOut {
-  if (hero.bound.w <= 0.0 || u.camPos.y < W_LEVEL) { discard; }
+  if (hero.bound.w <= 0.0 || u.camPos.y < u.camWater) { discard; }
   let rd = cameraRay(fc.xy);
   let hit = heroTrace(rd);
   let tH = hit.x;
@@ -1115,7 +1460,7 @@ fn vsSky(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4f {
 @fragment
 fn fsSky(@builtin(position) fc: vec4f) -> @location(0) vec4f {
   let rd = cameraRay(fc.xy);
-  if (u.camPos.y < W_LEVEL) { return underwater(rd); }
+  if (u.camPos.y < u.camWater) { return underwater(rd); }
   return display(shadeSky(u.camPos, rd));
 }
 `;
@@ -1140,15 +1485,16 @@ struct Gen {
   seed: i32,
 };
 @group(0) @binding(0) var<uniform> gen: Gen;
-@group(0) @binding(1) var hOut: texture_storage_2d_array<r32float, write>;
+@group(0) @binding(1) var hOut: texture_storage_2d_array<rgba32float, write>;
 
 @compute @workgroup_size(8, 8)
 fn main(@builtin(global_invocation_id) id: vec3u) {
   if (any(id.xy >= gen.size)) { return; }
   let local = vec2f(gen.rel0 + vec2i(id.xy)) * gen.spacing;
-  let e = elevation(local + gen.origin, gen.dp, gen.seed);
+  // The ground's height and the water's surface (the sea, a lake, a river's pool) at the lattice point.
+  let s = landSurface(local + gen.origin, gen.dp, gen.seed);
   let st = (gen.store0 + id.xy) % vec2u(${n}u);
-  textureStore(hOut, st, gen.level, vec4f(e, 0.0, 0.0, 0.0));
+  textureStore(hOut, st, gen.level, vec4f(s.e, s.w, s.flow));
 }
 `;
 }
@@ -1176,8 +1522,6 @@ struct Gen {
 @group(0) @binding(0) var<uniform> gen: Gen;
 ${heightSourceWGSL({ height: 'cached', ...opts, sun: undefined })}
 @group(0) @binding(4) var sunOut: texture_storage_2d_array<rgba16float, write>;
-@group(0) @binding(5) var matOut: texture_storage_2d_array<rgba16float, write>;
-${GROUND_FIELDS_WGSL}
 ${CANOPY_LAYER_WGSL}
 const SH_K: f32 = ${f(SHADOW.penumbraK)};
 const SH_CUTOFF: f32 = ${f(SHADOW.cutoff)};
@@ -1192,9 +1536,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   let gz = (heightAt(xz, vec2f(0.0, s), s) - heightAt(xz, vec2f(0.0, -s), s)) / (2.0 * s);
   let n = normalize(vec3f(-gx, 1.0, -gz));
   let st = (gen.store0 + id.xy) % vec2u(${opts.n}u);
-  let fields = groundFields(xz + gen.origin, gen.seed);
-  textureStore(matOut, st, gen.level, fields);
-  writeCanopy(st, xz, e, vec2f(gx, gz), fields.x, s);
+  writeCanopy(st, xz, e, vec2f(gx, gz), s);
   let p = vec3f(xz.x, e, xz.y) + n * (0.15 + 0.5 * s);
   var res = 1.0;
   var t = max(0.6, 1.5 * s);
@@ -1209,6 +1551,79 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   }
   // The visibility, and the ground's gradient (the shading's normal) beside it.
   textureStore(sunOut, st, gen.level, vec4f(clamp(res, 0.0, 1.0), 0.0, gx, gz));
+}
+`;
+}
+
+/**
+ * The ground's biome layers (clipmapCache.ts): for each lattice point of an update rectangle, the
+ * biome regions there (worldgen.wgsl.ts landRegions) and their looks blended (lookWGSL), the snow
+ * line from the sea-level temperature, the volcano's lava (its crater and the flows down its gullies),
+ * and the meadow patches; written to the mat and bioA/B/C layers (see lookWGSL for the encoding).
+ */
+export function biomeShader(opts: CachedOptions): string {
+  return /* wgsl */ `
+${WORLD_WGSL}
+struct Gen {
+  origin: vec2f,
+  rel0: vec2i,
+  store0: vec2u,
+  size: vec2u,
+  spacing: f32,
+  dp: f32,
+  level: u32,
+  seed: i32,
+};
+@group(0) @binding(0) var<uniform> gen: Gen;
+${heightSourceWGSL({ height: 'cached', ...opts, sun: undefined })}
+@group(0) @binding(4) var matOut: texture_storage_2d_array<rgba16float, write>;
+@group(0) @binding(5) var bioAOut: texture_storage_2d_array<rgba8unorm, write>;
+@group(0) @binding(6) var bioBOut: texture_storage_2d_array<rgba8unorm, write>;
+@group(0) @binding(7) var bioCOut: texture_storage_2d_array<rgba8unorm, write>;
+${lookWGSL()}
+
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) id: vec3u) {
+  if (any(id.xy >= gen.size)) { return; }
+  let s = gen.spacing;
+  let xz = vec2f(gen.rel0 + vec2i(id.xy)) * s;
+  let g = xz + gen.origin;
+  let st = (gen.store0 + id.xy) % vec2u(${opts.n}u);
+  let r = landRegions(g, domainWarp(g.x, g.y, gen.seed, 0.0), gen.seed);
+  var soil = vec3f(0.0);
+  var grass = vec3f(0.0);
+  var dry = vec3f(0.0);
+  var rock = vec3f(0.0);
+  var a = vec4f(0.0);
+  var b = vec2f(0.0);
+  for (var k = 0; k < ${BIOME_COUNT}; k++) {
+    let w = r.w[k];
+    if (w <= 0.0) { continue; }
+    soil += w * LK_SOIL[k];
+    grass += w * LK_GRASS[k];
+    dry += w * LK_DRY[k];
+    rock += w * LK_ROCK[k];
+    a += w * LK_A[k];
+    b += w * LK_B[k];
+  }
+  // Meadow patches (density, 22 m) and the grass's hue patches (30 m): lush to dry, drier in dry air.
+  let patchN = 0.5 + 0.5 * vnoise(g.x * 0.045, g.y * 0.045, gen.seed + 7777);
+  let patchHue = 0.5 + 0.5 * vnoise(g.x * 0.033, g.y * 0.033, gen.seed + 7707);
+  let dryness = clamp(patchHue * 1.3 - 0.45 + (0.5 - r.M) * 0.8, 0.0, 1.0);
+  let grassCol = mix(grass, dry, dryness * 0.75);
+  // The snow line (m): where the air is SNOW_T, lowered by the biome's frost.
+  let snowAlt = (r.T0 - SNOW_T - b.x) / L_ALT;
+  // Lava: the liquid of a volcano's crater lake and of the rivers high on its cone (terrainMath.ts lastLava).
+  var lava = 0.0;
+  if (r.vol.z > 0.0 && waterAt(xz) > heightAt(xz, vec2f(0.0), 0.0) - 0.01) {
+    let w = domainWarp(g.x, g.y, gen.seed, 0.0);
+    lava = 1.0 - smoothstep(0.45, 0.6, length(w - r.vol.xy) / (${f(LANDS.volcano.cone)} * r.vol.z));
+  }
+  let wl = select(a.w, -lava, lava > 0.01);
+  textureStore(matOut, st, gen.level, vec4f(snowAlt, wl, patchN, b.y));
+  textureStore(bioAOut, st, gen.level, vec4f(sqrt(soil), a.x));
+  textureStore(bioBOut, st, gen.level, vec4f(sqrt(grassCol), a.y / BLADE_SCALE));
+  textureStore(bioCOut, st, gen.level, vec4f(sqrt(rock), a.z));
 }
 `;
 }
@@ -1246,8 +1661,6 @@ struct Gen {
 @group(0) @binding(0) var<uniform> gen: Gen;
 ${heightSourceWGSL({ height: 'cached', ...opts, sun: undefined })}
 @group(0) @binding(4) var horizonOut: texture_storage_2d_array<rgba16float, write>;
-@group(0) @binding(5) var matOut: texture_storage_2d_array<rgba16float, write>;
-${GROUND_FIELDS_WGSL}
 ${CANOPY_LAYER_WGSL}
 const PATH_UP: vec3f = vec3f(${f(PATH_N[0])}, ${f(PATH_N[1])}, ${f(PATH_N[2])});
 const COS_LAT: f32 = ${f(cosLat)};
@@ -1308,9 +1721,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   let gz = (heightAt(xz, vec2f(0.0, s), s) - heightAt(xz, vec2f(0.0, -s), s)) / (2.0 * s);
   let n = normalize(vec3f(-gx, 1.0, -gz));
   let st = (gen.store0 + id.xy) % vec2u(${opts.n}u);
-  let fields = groundFields(xz + gen.origin, gen.seed);
-  textureStore(matOut, st, gen.level, fields);
-  writeCanopy(st, xz, e, vec2f(gx, gz), fields.x, s);
+  writeCanopy(st, xz, e, vec2f(gx, gz), s);
   let p = vec3f(xz.x, e, xz.y) + n * (0.15 + 0.5 * s);
   let rise = pathHorizon(p, 1.0, s);
   let sinks = 3.14159265 - pathHorizon(p, -1.0, s);
@@ -1340,6 +1751,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   if (id.x >= pr.w || id.y >= h) { return; }
   let local = pr.local0 + vec2f(id.xy) * pr.step;
   let g = local + pr.origin;
-  outBuf[id.y * pr.w + id.x] = vec4f(elevation(g, pr.dp, pr.seed), g.x, g.y, 0.0);
+  let sf = landSurface(g, pr.dp, pr.seed);
+  outBuf[id.y * pr.w + id.x] = vec4f(sf.e, g.x, g.y, sf.w);
 }
 `;

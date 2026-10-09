@@ -1086,14 +1086,451 @@ the ratios hold.
 - configs `vista`, `forest` and `canopy` (`bench/out/.cache/framed-*.json`);
 - `bench/play.ts` mode `fly` (climbs at full boost, then cruises).
 
+### The Eyries: an avian civilization on the sky islands
+
+What the player asked for, with ten reference images: the sky islands redesigned as clusters, each
+unlike the next, settled by an avian people whose every artefact, outside and in, has its reason;
+water life, a moving ecosystem, the mystical feel of the images. The story came first
+(`docs/SKY_CIVILIZATION.md`: the Aelari, skystone and sunstone, the Long Gale, the Accord of Breath;
+the catalogue of artefacts with what each is for and what is inside it), then the plan
+(`docs/EYRIES.md`), then the code.
+
+**The Eyries** (`skyworld/eyrie/`): every archipelago is now an Eyrie of one of 11 classes, laid
+out its own way and built by its own grammars:
+- the Crown of Wings (a city of wards round its cathedral, plaza and Moot Rotunda);
+- Mirrorwell (a lagoon in a bowl, the Rotunda of the Accord on its islet);
+- Ringhold (the Great Halo, runestones floating round it, a pilgrims' helix of isles);
+- Lanternpeak (the Vaelspire's crystals sending up the Thread, observatories);
+- Petalfall (a chain of terraces stepping down: wind-houses, tea pavilions, torii, rope bridges);
+- Galeharbour (a ring of isles round an anchorage: docks, cranes, moored and flying skyships);
+- Mistwells, Cinderforge, Rimewatch (the Gyre's Eye turning overhead), the Elder Bough, Hushfall
+  (everything the Long Gale broke).
+All 11 appear within 26 km of the spawn (seed 1337); the Crown is 3.9 km ahead of it.
+
+**The building kit** (`skyworld/kit/`): 105 pieces at three levels of detail, built at start-up in
+49 ms, one vertex buffer of 66,911 vertices (2.0 MB) and 51,883 triangles in all (31,036 at level
+0). Stretchable pieces keep painted detail metric (windows per floor, courses, tiles); radial rings
+fit any radius; a doorway's jambs carry `ANIM.door` and the vertex shader sets them 1.05 m either
+side of the door's axis, so one ring of wall serves towers of every size.
+
+**Drawn instanced** (`gpu/structures.ts`): per structure one CPU sphere test and one level of
+detail by its on-screen size, a counting sort of its pieces by (piece, level), one instanced draw a
+bucket in use. Within 16 km of the spawn: 3,067 structures, 38,484 instances. Shadows go into the
+trees' near map.
+
+**What lives in them:**
+- *Light and air* (`gpu/effects.wgsl.ts`): the Thread (a ribbon that keeps ≥ 0.7 px of core far
+  off, its light spread thinner), forge smoke (puffs rising, drifting, fading), the Gyre's Eye
+  (stacked spiral layers and an eyewall, lightning by night).
+- *Birds* (`skyworld/fauna.ts`, `gpu/fauna.wgsl.ts`): up to 64 flocks round the camera, every bird
+  one instance of seven triangles flown in the vertex shader (banked, flapping or gliding by
+  species): swifts, gyre-hawks, herons, crows, gulls, white birds, snow-hawks; swifts round the
+  Thread by night.
+- *Skyships under way* (`skyworld/ships.ts`): loops inside Galeharbour's ring and round every
+  Eyrie, trade lanes between neighbours high above every island; moved every frame as structures.
+- *Lake life* (`eyrie/lakes.ts`, `kit/water.ts`): lily pads and lotus, reeds, waterweed swaying on
+  the bed, koi swimming their circles (`ANIM.swim`). Mirrorwell's lagoon: 546 pads, 134 lotus,
+  137 reed clumps, 169 weed beds, 14 koi.
+- *Motes* (`gpu/motes.wgsl.ts`): petals, snow, sparks, leaves, butterflies by day, fireflies by
+  dusk, in a 44 m box round the camera that wraps as it moves.
+- *Aqueducts* (`eyrie/bridges.ts`): every bridge in these Eyries climbs 7–61 m, so a channel
+  follows the spans down.
+  - It runs inside one parapet, its water carried downstream, and falls into the next span's
+    channel at every step.
+  - A cistern head stands at the top, a spout pours into a basin at the foot.
+  - It is on 60 % of the Crown's, Mirrorwell's and Galeharbour's bridges.
+
+**Interiors** (`kit/interiors.ts`): a building of a kind with an inside can be walked into.
+- Roosts and hall-houses: a ground storey with a real doorway, floor and ceiling, furnished as the
+  catalogue says: store jars, a hearth with its pot, a loom, a nest bowl, a rug, tables, perch
+  bars, shelves; in a round roost the flightless's ramp winding up the wall to a hatch.
+- The Gyre Cathedral's nave, entered by its west door:
+  - galleries of perches at three heights on columns;
+  - rows of perches facing the wind altar on the crossing's feather mosaic;
+  - chandeliers, and a half-round apse;
+  - the lancet windows and the rose glowing with the day.
+- The Moot Rotunda's tiered perch-rings round its speaking floor; the Rotunda of the Accord's
+  Measure; the observatory's orrery and telescope; the greenhouse's beds; all under domes whose
+  insides are painted with gold stars.
+- The rest of the catalogue:
+  - the cistern's sunken store and measuring rods;
+  - the keep's garrison hall;
+  - the forge's furnaces under their chimneys, with anvils and a workbench;
+  - the market's stalls under an open colonnade;
+  - the wind-house's seed jars, drying racks and shrine;
+  - the archive spire's ramp winding turn on turn up its 30–40 m shaft, with the cord racks on
+    the walls between the turns (`ramp.slab`: a slab collider with room under it).
+- Inside is a surface seen from behind (inner walls are built facing out). The shader finishes it
+  as an inside: limewash over a timber dado, boards and beams, rafters under a roof. It is lit by
+  its share of the sky and its lamps, never the sun. Furnishings carry `PFLAG.indoor` to be lit
+  the same.
+- Collision: ring walls with doorway gaps, a helical ramp. Bodies over a storey are hollow, so a
+  hero on the ramp is not thrown out through the wall.
+
+**Bloom** (`gpu/taa.wgsl.ts`):
+- The resolved image's bright part (a soft knee over 0.72) taken to half size, four more mips down
+  (13 taps), back up (tent).
+- Added at the present at 0.06 by day, up to 0.71 by night: windows, lanterns, the Thread, the rose
+  window glow.
+
+**Lantern light** (`gpu/lanterns.ts`):
+- The outdoor lanterns, paper lanterns and braziers of the Eyries round the camera are splatted on
+  the CPU into a 256² map, a metre a texel, when the camera has moved 32 m or they change.
+  - Red: the light, falling to nothing at its reach.
+  - Green: the height it comes from (a half float).
+- The map is anchored to the world and wraps round, the chunk origin a multiple of its size, so
+  shaders index it by chunk-local metres with no uniform. Both shader stages were already at their
+  12 uniform buffers.
+- The island ground and the buildings' outsides add its warm light by night: one fetch a pixel,
+  within a few metres of the light's height.
+
+**No frame stalls from building:**
+- An Eyrie is laid out and built a slice at a time: generators, ≤ 3 ms a frame, the next slice
+  guessed from the last.
+- The worst slice fell from 8.4 ms to 4.2 ms:
+  - the district maps' stamping was the 8 ms step; it now yields every 40k texels;
+  - an archipelago's layout is sliced per island's water plan;
+  - the water planner's stream search costs half (coarse candidates, an early out on the gorge).
+- Layouts: the worst (Petalfall) from 13.8 ms to 6.7 ms in all, in slices of ≤ ~2 ms.
+
+**Cost:**
+- **GPU**, harness stills (15 Eyrie views, High, 1280×800, 3 reps), everything against the same
+  build with the structures and the birds and motes skipped:
+  - with all of it against without: × 1.12 [0.98, 1.29];
+  - the order reversed, without against with: × 0.93 [0.82, 1.05], i.e. × 1.08 the other way;
+  - about 10 % of a ~4.3 ms frame, with the interiors in.
+  - Before the interiors the same two runs read × 0.97 [0.85, 1.11] (with / without) and × 0.96
+    [0.84, 1.10] (without / with): no cost within the noise.
+  - By night (21:00, lanterns, bloom and lit windows in), frames ~4.7 ms: with / without × 1.02
+    [0.88, 1.18], without / with × 0.90 [0.81, 1.00].
+- **In game.** Production build, uncapped, 2880×1580, after only (no build of the old code to
+  compare):
+
+| Scene | Medium fps | High fps | CPU per tick (p50 / p95) |
+| :--- | ---: | ---: | ---: |
+| On the Crown's hub (`?spawn=sky`, third person) | 156 | 110 | 0.5–0.6 / 0.6–0.7 ms |
+| Flying among the islands | 164 | 108 | 0.6–1.0 / 0.7–1.5 ms |
+
+  At 1280×633 the same sessions drew 297 / 350 fps (Medium) and 259 / 297 (High).
+
+**Bugs found on the way:**
+- Additive glows (the Thread, fireflies) showed their quads as squares by night. The output's black
+  level lifts black (`display(0) ≠ 0`), and added over a quad it showed. Added light now adds
+  `display(c) − display(0)` and fades to zero at its quad's edge.
+- Inside by night was blown out: the night's exposure magnifies any lamp term ~20×. Floors showed
+  navy, reflecting the sky. Inside now takes no reflection, and its lamps are tuned under that
+  exposure.
+- A painted star dome's stars smeared into spiral streaks: its surface coordinates pinch at the
+  apex. The stars are now cells on the sphere of directions.
+
+**Tests:** 19 in `tests/eyries.test.ts`:
+- the kit and every class's landmarks;
+- lake life in place;
+- flocks and ship routes (smooth, bow first, lanes clear of every island);
+- the hero crossing every Crown bridge, stopped by a wall, and walking into a roost and up its ramp.
+
+All 259 tests pass and the quality gate passes.
+
+**Bench switches added:** variants `eyrie-high`, `eyrie-high-nostruct`, `eyrie-high-skipst`,
+`eyrie-high-skipall`; skip `'fauna'`; config `eyrie` (`bench/out/.cache/framed-eyrie.json`).
+
+### The lands: fifteen biomes, their landforms, water and air
+
+What the player asked for: scenic landscapes everywhere, in diverse biomes each with its own
+character. The fifteen asked for, as built (design and tables: `docs/LANDS.md`):
+- grassland plains, temperate forest, tropical rainforest, jungle karst, wetland marsh;
+- desert dunes, canyon badlands, savanna, volcanic fields;
+- rocky mountains, alpine highland, snowy tundra, boreal taiga;
+- the ancient (sacred) forest and the lake district;
+- coasts (a band where any land meets the sea) and river, lake and waterfall ecosystems (in every
+  region, by its own parameters).
+
+**What changed:**
+- **The world function.** It is now regions over climate and geology (`biomes.ts`,
+  `terrainMath.ts` §13 `landRegions` / `landSurface`). The old continent, region anchors and
+  global water plane are gone.
+- **One source for three twins.** The CPU twin, the WGSL world function and a new GLSL port
+  (`landsGlsl.ts`, used by the WebGL2 renderer) are generated from the same tables.
+- **Each region shapes its own land:** karst towers, mesas, dunes, volcano cones with craters, marsh
+  flats, ranges, coasts with beaches or cliffs.
+- **Water stands where the land holds it.** A water table is terraced from the low land, giving
+  river pools and falls; lakes lie level at their own height; marshes hold water; the sea.
+  Elsewhere the water lies 3 m under the ground. Water freezes far above the snow line.
+- **The ground's look** is baked per lattice point by a new pass (four layers) and finished per
+  pixel.
+- **Trees** come from 17 flora zones, with giants and the ancient forest's palettes.
+- **The air:** haze, mist and tint per region round the camera.
+- **The HUD** names the land under the camera.
+
+**Measured** (seed 1337, M1 Air, headless Chrome, 1600×900):
+- GPU vs CPU elevation (`landprobe`, new mode): at most 6 mm over 64 × 64 probes at each of the
+  41 `lands` views. WGSL vs GLSL ≤ 0.3 mm (`port`).
+- Forest placement GPU vs CPU (`parity --config=lands`): 99.999–100 % of plants agree, none of
+  another species, none moved.
+- GPU time per frame, fastest of 4 reps per view over the 41 views:
+  - Medium 1.8–6.8 ms (p50 5.0 ms);
+  - High 2.8–8.0 ms (p50 5.5 ms), × 1.30 [1.19, 1.42] Medium's;
+  - the forest floors are the heaviest views;
+  - no A/B against the old world: it had none of these places to compare.
+- The water mesh first cost about 21 % of a frame (every ring cell drawn). Compacting each ring's
+  wet cells (`ringTris`) and drawing them indirectly brought it to about 3 %.
+
+**Bugs found on the way:**
+- Vertical walls up to 65 m: the old anomaly took only the nearest feature, and stepped where the
+  nearest one changed. Anomalies are now summed (all twins).
+- The water table stood too high in the mountains: the ridges' mean was in the low land it is cut
+  from. The mean is now taken out.
+- Terraced pools and white walls of water:
+  - lakes now hold one level over their whole reach;
+  - offshore water stood at 72 m off cliffed coasts, and now blends to the sea's level;
+  - dams along the contours drew rice-paddy stripes, and dams along river banks drew ridges; both
+    are gone, and banks now rise from the channel's level.
+- Lava drew leopard spots (a noise term over the whole field): it is now confined to the crater.
+- Tree parity fell to 99.1 %, from two causes:
+  - grove and lone-tree grids that were not multiples of the 6 m cell (a test now pins them);
+  - a dry water level of ground − 0.4 m, which equalled a 0.4 m threshold and shaded all dry land
+    as shore. The dry table is now 3 m down.
+- Snow was flat white: 84–99 % of a snowfield's pixels clipped in the tone curve's shoulder. Snow's
+  albedo is now 0.4–0.5 (`SNOW_ALBEDO`, shared by the three renderers), with wind-drift relief near
+  the camera; no pixel clips. Frozen lakes are now clear, glossy blue ice with snow in patches.
+- Volcanic ash read as pale grey-brown. At this exposure a 0.115 albedo in full sun renders at
+  about 200/255. The ash and rock are now basalt-dark (0.05–0.065), and the volcanic haze is eased
+  from × 1.9 to × 1.25. Beyond a few hundred metres the base haze (9e-4 /m at sea level) still pales
+  a cone to blue-grey: that is the world's aerial perspective, not the ash.
+
+**Tests:** 265 pass, and the quality gate passes. New:
+- the lands survey (every biome, sea, inland water, ice, level lakes);
+- climate, regions, dunes;
+- the GLSL contract generated from `F`;
+- zone cover and species, sacred giants and palettes, cell-multiple grids;
+- water and ice under the hero.
+
+**Bench switches added:**
+- mode `landprobe`;
+- `parity --dump`;
+- config `lands` (`bench/out/.cache/framed-lands.json`: 41 views, every biome from the ground and
+  the air, plus dunes, mesas, karst, a crater, a waterfall, the coast and ice).
+
+### A Tears of the Kingdom–style world: ranges, rivers that drain, walkable woods, molten lava
+
+What the player asked for: the surface laid out like Tears of the Kingdom's Hyrule (its mountains,
+rivers, lakes, ponds, seas, biome sizes and tree spacing), woods you can move through, better
+flowing water, and lava that reads as a dense liquid. Research, audit and design:
+`docs/TOTK_TERRAIN.md`.
+
+**What changed:**
+- **Geography first** (`hydro.ts`): connected ranges with peaks and passes, lone massifs,
+  tablelands with cliff walls, lake basins, volcanoes off the ranges, coasts with beaches or
+  45–95 m cliffs.
+- **Rivers from a drainage graph:**
+  - one node per 2,048 m, each draining to its steepest lower neighbour that no ridge blocks;
+  - exact drainage, levels that never rise downstream, profiles along the meandering channel;
+  - falls only at concentrated drops, lakes at the sinks;
+  - the valleys cut into the land (`min(max(land, terraces), valleys)`).
+
+  It replaces the Voronoi rivers and the terraced water table. The GPUs read the CPU's node graph
+  from a 64 × 64 table round the camera (`gpu/hydroBuffer.ts`, `engine/hydroTexture.ts`).
+- **Gully erosion** (`erosion.ts`): Johansen's filter (MPL-2.0), ported to the three twins.
+- **Ponds** in flat meadows. Marshes now lie only on flat land.
+- **TotK scales:**
+  - climate fields of 9.4 km (temperature) and 5.2 km (moisture), so regions are 2–5 km across;
+  - lapse rate 10.5 °C/km;
+  - fog 2.8e-4 /m (was 9e-4), for long, clear vistas.
+- **Walkable woods:**
+  - forest fill × 0.6 and forest bodies rarer, so trunks stand ~11 m apart and meadows open;
+  - lone trees checked at their own spot;
+  - placement's relief reads a cheap `landCoarse`.
+- **Water:** the height texture now carries the current (rgba32float). Ripples are flow-mapped
+  along it, rapids foam, and swimmers drift with the current.
+- **Lava:** a liquid in the crater lake and on gentle volcano rivers, with crust rafts, cracks and
+  churning melt. It is no longer a ground colour.
+
+**Rejected:** downloading a shallow-water simulation. The land's water is generated (infinite,
+deterministic, free to stream) and its motion is drawn with flow maps. A dynamic simulation adds
+GPU cost every frame and has no gameplay use yet.
+
+**Measured** (seed 1337, M1 Air):
+- **Parity:**
+  - GPU vs CPU heights ≤ 23 mm at 38 views, water equal;
+  - trees 99.99–100 % equal;
+  - GLSL ≤ 36 mm at 12 km, seams ≤ 0.5 mm.
+- **Frame:** Medium 1.7–6.5 ms (median 3.0), High 2.6–7.0 ms (median 4.4), unchanged.
+- **Costs that grew:**
+  - one CPU world evaluation, 6.6 µs (was 2 µs);
+  - a clipmap rebuild, 262 ms (was 104);
+  - the first node window, 170 ms (re-centres 30 ms);
+  - the WebGL2 fallback and the `direct` WGSL ray-march (the `port` bench's direct variant now
+    times out the GPU).
+
+**Tests:** 282 pass, and the quality gate passes. New: `tests/hydro.test.ts` (drainage, monotone
+levels, growth downstream, banks, level lakes, the GPU table), and walkable woods.
+
+**Bench switches added:**
+- config `totk` (`bench/out/.cache/framed-totk.json`: 39 views, every biome plus a river, a lake,
+  a fall, a volcano, a crater, the coast, a pond and lava);
+- `landprobe` also compares water levels.
+
+### Water that stays in its banks, and the world checked against TotK's own data
+
+What the player asked for, with a screenshot of a white sheet of water standing at the spawn: fix
+the water (rivers, lakes, everything about it) entirely; then check the TotK plan in depth against
+TotK itself (the landscape, how often trees grow in each biome, rivers and their widths, ponds and
+their depth, the ocean, lakes), skeptically. Research and audit: `docs/TOTK_TERRAIN.md`.
+
+**The water** (`hydro.ts`, the three twins, `terrain.wgsl.ts`):
+- **The white sheets.** The water mesh climbed every steep bank toward its dry vertices. A water
+  cell's dry corners now lie level just under the bank's ground (`waterVertexH`), so the ground hides
+  the water and the shoreline is where the two meet.
+- **The sea climbed cliffs** where the coast faded out. It now fills only land below its level by
+  the coast, and the land rises from the sea floor over a steep but continuous face (`COAST_RAMP`).
+- **Rivers stood over their banks**, on embankments or 24 m over a neighbouring valley's floor:
+  - levels now follow the lowest land across each floor;
+  - a river's water is capped at the lowest surface out to its far bank (the bank cap; reaches that
+    meet at a node are kin);
+  - a tributary comes down into the valley it meets, and of two siblings the higher comes down to
+    the lower (profiles in three stages);
+  - reaches never cross (one diagonal per 2 × 2 block of nodes).
+- **Dry ditches:** a river too small to show cuts no channel.
+- **New water:** lakes on rivers, held level by their outlet; marsh pools only in a marsh's heart,
+  with a rim of hummocks raised over them; ponds judged on the land's broad shape. Shores are judged
+  from the water actually beside a point (`lastShore`), not from the dry land's water table.
+
+**TotK, measured** from the ZeldaMods object map's game data: 25,163 tree actors, 108 field areas and
+19 climates, heights from 65,825 placed objects, and the map texture's water read at 2 m per pixel.
+
+**The audit, in two passes.** The first rescaled the world to TotK's: regions 2–5 km across, fields
+~50 m over the sea, mountains to ~0.9 km. It also set tree densities from TotK's and fixed eight
+faults, among them shore trees everywhere, a snow-capped volcano and plaster-white cliffs. The
+second re-measured over far more land (16 windows of 5 × 4 km on three seeds, where the first read
+four) and fixed ten more:
+- **Two seams.** A sacred grove's region was cut at a circle in the world plane while it faded in
+  the warped plane: its weight jumped from 1 to 0 at 68 of 81 groves. The groves' lattice now lies
+  in the warped plane. A volcano's fade ended past its cut, a 3 % step that made ground steps of up
+  to 15 m beside tall relief; it now ends at the cut.
+- **Trees by TotK's numbers** (`RULES`): lone trees 2–4 times rarer, so wooded regions hold a tree in
+  a third to half of their 50 m blocks, about five in each, as TotK's do (before, nearly two
+  thirds). The jungle's stands are thin but cover most of the land, as Faron's trees do (3–6 % dense
+  blocks, from 16–26 %). The marsh and the savanna were thinned.
+- **Ponds** now draw radii of 14 + 50·u³ m: TotK's long tail of larger ponds, which a "skewed small"
+  comment had promised and the code never drew.
+- **Rivers a quarter wider:** 4 + 17.5·(acc − 1)^0.95 m, fitted to TotK's widths read the same way.
+- **Twice the lakes on rivers:** at 90 % of the eligible nodes.
+- **Volcanoes:** a candidate in every 8 km cell, regions to the cell's limit, only in land of at
+  least 4 °C, cones lower (summits to ~900 m, as Death Mountain's). They no longer rise from
+  snowfields among snowy pines: trees carry snow by the ground's own snow line, the regions' frost
+  included, and the volcanic zone keeps its snags up to the tree line.
+- **A marsh's rim** was raised by subtracting 50 m outside a narrow band of the marsh's weight, so
+  the twins' rounding grew into ground differences of up to 0.29 m. It is raised in proportion now.
+- **The project page's parameter table:** eleven rows still showed values from before the TotK pass.
+- **Two tests:**
+  - the lake test's inverse warp missed 37 of 242 lake centres; it is Newton's method now, which
+    converges at 99 % of nodes, and skips the ~1 % where the warp folds the plane;
+  - the far-canopy test assumed every square held trees at a share of ~0.15. It now measures each
+    square's error in units of the draws' own spread.
+
+**Measured, against TotK** (TotK in brackets; three seeds):
+- **Rivers:** widths 4 / 8 / 20 / 40 / 60 m at the 10th–90th percentiles (4 / 8 / 21 / 41 / 64 m).
+- **Ponds:** 2.4 per km² of land, 30 m across at the median and 77 m at the 90th percentile (2.5,
+  31 m, 76 m).
+- **Sea:** 7.6 % of the map (~8 %).
+- **Trees per hectare:**
+  - temperate woods 5.4–7.5 (4.1–9.5), taiga 5.1–6.7 (4.3–8.3), plains 4.8–5.8 (5.5);
+  - jungle 6.8–7.5 (7.2–7.5), ancient forest 6.7–7.4 (7.5);
+  - mountains 2.7–4.3 (2.5–3.3), desert 0.9–1.1 (0.8–1.0), volcanic 0.56–0.70 (0.6–0.9).
+- **Heights above the sea:** fields 51 m at the median (16–48 m), mountains to 882 m (630–730 m),
+  volcano summits to 900 m (~870–896 m).
+- **Short of TotK:**
+  - inland water 2.6 % of the land (6.5 %);
+  - channels 0.35 km per km² (0.6);
+  - a lake on a river per 10–19 km² (a compact lake per ~8 km²);
+  - volcanic land 5.6–6.8 % (11 %).
+
+**Parity and cost** (seed 1337, M1 Air):
+- **Parity:**
+  - GPU vs CPU heights ≤ 33 mm at the 40 views, wet water levels equal;
+  - trees 99.999–100 % equal;
+  - WebGL2 1.6 mm at 3 km, 6.1 mm at 12 km, seams ≤ 0.5 mm.
+- **Water audits:** no water stands over dry ground in 6.4 million samples; visible channels are dry
+  along 0.04–0.07 % of their length.
+- **Frame:** Medium 1.5–6.6 ms (median 2.9), High 2.4–5.5 ms (median 3.8), unchanged.
+- **Streaming:** 0.44 ms walking, 2.2 ms at 200 m/s. A rebuild takes ~200 ms of generation and adds
+  ~385 ms to its frame.
+- **CPU:** 8.5 µs a world evaluation; the river table takes 273 ms the first time, then 27 ms.
+
+**Tests:** 283 pass, and the quality gate passes.
+
+### A player's review: rivers from reservoirs, deep ponds, natural mountains
+
+What the player asked for, with screenshots of seven places: wider and deeper rivers and lakes (one
+river was a thin stream), every river flowing from a huge reservoir, much deeper ponds; mountains
+without their rows of sine-wave peaks; no strange holes in the desert mountains. The audit's third
+pass: `docs/TOTK_TERRAIN.md`, items 19–25.
+
+**Water** (`hydro.ts`, the three twins):
+- **Rivers flow from lakes.** A reach shows only below a lake (`fedOf`), and each river system starts
+  at a reservoir: up to 840 m across and 12–35 m deep, held by land above its level all round, clear
+  of other valleys, shrinking until it fits. Rivers leave their lake 14 m wide and widen to 180 m,
+  in channels 3 + √acc m deep: wider than TotK's, as asked. Lakes on rivers form at half the
+  eligible nodes, 9.5–27 m deep.
+- **Lakes over falling land.** A lake needs land above its level out to 1.28 radii, an outlet within
+  0.5 m of its node, and a shore judged by the nearest channel that shows.
+- **Ponds** are 4–8 m deep (from 1–2.5 m). They are judged on the land itself at their centre and
+  round their rim: judged on the broad shape, a pond in hill country sank a shaft to its water (the
+  screenshot's pit). The stricter test needed a chance half again as high to keep TotK's count.
+- **Dry valleys.** A valley with no lake above it carries no channel and no falls. Its channel's
+  width without depth had stood a rock riser at each edge, and its falls scarps across it: pale
+  strips that read as thin rivers. Every valley's walls now leave the floor at the floor's own slope
+  and steepen over ~12 m (`HYDRO.wallRound`).
+- **Colour:** the water absorbs more light per metre (red first), so deep water reads deep: a third
+  of the light reaches a bed 8 m down.
+
+**Mountains** (`terrainMath.ts`, `erosion.ts`):
+- **The sine waves** had two causes. The gully filter's fade target lifted gentle crests by up to
+  ~150 m but not their steep flanks, which stood walls along the ridges; it is gone. And the gullies
+  were laid out in the warped plane and ran down the smooth uplift alone, so they lay side by side
+  for kilometres: a comb of even crests. They now run down the land itself (uplift, hills and ridges,
+  128 m apart) and are laid out in the world, so they branch down each flank.
+- **The holes** were the "anomaly" features (terraces, spires, spirals); they are removed, with their
+  four tests.
+- **Mountain trees** had drifted to 3.5–5.1 per hectare (TotK 2.5–3.3). The mountains' warm foot now
+  begins at 22–26 °C, so most slopes carry montane pines: 2.9–4.0.
+
+**Along the way:**
+- **A WebGL2 miscompile.** With the three gully samples inlined side by side, WebGL2 on the M1 put
+  their gradient metres off (6.5 m at 12 km) though each alone was exact. They run in one loop now,
+  which also reuses the point's own uplift: 38 ns an evaluation, 8 % over the old gullies.
+- **The CPU** shares a pond's verdict among the points round it: 7.4 µs an evaluation (from 8.5).
+- **The spawn** is no longer a knoll: the fields now rise gently ahead toward the Crown Eyrie. The
+  worked example's ray was re-aimed (t* = 1,968.8 m).
+
+**Measured** (three seeds; TotK in brackets):
+- **Rivers:** widths 16 / 24 / 40 / 56 / 80 m (4 / 8 / 21 / 41 / 64 m); channels 0.21 km per km²
+  (0.6); inland water 4.0 % of the land (6.5 %).
+- **Lakes:** one per 14–25 km² of the map, a median 380–445 m across.
+- **Ponds:** 2.2 per km² of land, 32 m across at the median and 82 m at the 90th percentile (2.5, 31 m,
+  76 m).
+- **Heights:** mountains 322 m at the median and 676 m at most (244–297, 630–730 m); volcano summits
+  ~910 m (~870–896 m).
+
+**Parity and cost** (seed 1337, M1 Air):
+- **Parity:** GPU vs CPU heights ≤ 46 mm at the 40 views (14 mm but for a marsh's hummocks) and
+  ≤ 5 mm at the seven places; trees 100 % equal; WebGL2 1.3 mm at 3 km, 3.4 mm at 12 km, seams
+  ≤ 0.5 mm.
+- **Water audits:** no water over dry ground in 2.6 million samples; round 215 lakes, one ray of 24
+  meets a drop, a waterfall at an outlet; visible channels dry along 0.02 % of their length.
+- **Streaming:** the new gullies cost 1–5 % more generation (an A/B under the same load).
+
+**Tests:** 279 pass.
+
 ## Next
 
 - High at 120 fps on this M1 Air: High is at 96–103 fps. What remains, each 4–12 % at High:
   - the hero (its trace could skip the limb groups its ray never comes near);
   - the terrain's per-pixel biome and shadows (register pressure: f16 through the lighting);
   - water, the tree shadow pass and the sky's clouds.
-- A sky civilization on the archipelagos: settlements on the hubs' flat dry ground, built
-  bridges as a new arch kind, roads along each archipelago's graph of islands and arches.
+- The Eyries, still to do (`docs/EYRIES.md`):
+  - the upper floors' insides (the ramps end at hatches);
+  - an in-game A/B against a build of the code before them.
 - A way up to the islands in play (updrafts or launch towers, as in Tears of the Kingdom);
   today it is fly mode, or `?spawn=sky`.
 - Climbable island undersides and cliffs (the underside is not solid to the hero yet), and
@@ -1108,13 +1545,30 @@ the ratios hold.
   from above the deck, part of what flight costs since the land reaches the horizon.
 - The horizon bake when flying fast (+2 ms at 200 m/s): bake coarse levels at half rate, or
   reuse the coarser level's far horizon with a height correction.
-- The full clipmap rebuild (spawn, teleport) is 104 ms with 12 levels. Generate the four far levels
-  over the next frames instead; until then the land past 16 km would show as haze.
+- The full clipmap rebuild (spawn, teleport) adds ~385 ms to its frame (~200 ms of generation) with
+  12 levels since the rivers. Generate the four far levels over the next frames instead; until then
+  the land past 16 km would show as haze. Build the rivers' node window in a worker (~320 ms the first
+  time, 32 ms per re-centre).
+- More rivers: they now need a lake upstream, so channels run 0.21 km per km² of land against TotK's
+  0.6. Reservoirs on steeper heads (mountain tarns) would bring rivers back to the uplands.
+- Soften the ridged noise's crests: its cusps draw sharp crease lines on gentle slopes, seen from
+  above as folds.
+- A fall right at a lake's outlet stands its floor's terrace as a pale shelf, like a dam.
+- A height cache for the WebGL2 fallback, which ray-marches the full world per pixel and has grown
+  about 3× dearer with the rivers.
 - Far ring blocks that lie below the camera and wholly past opaque fog could be left undrawn: the
   sky below the horizon is already that haze. It would save their vertices at altitude only, and the
   water and the sky would then cover those pixels.
-- Clouds with volume, and a bloom pass for the shrine lines, the sun and the moon.
-- Erosion-like gullies and cliff bands in the world function (each needs its generation
-  cost measured against the E1 budget).
+- Clouds with volume. (Bloom is in; the sun and the moon could use their own glare.)
+- The lands, still to do:
+  - boulders on mountain slopes, and caves (which need geometry beyond the heightfield);
+  - lava rivers down a volcano's steep flanks, and lava that harms;
+  - smoother river confluences: where the bank cap holds a river under its channel's level (by up
+    to ~0.5 m at a lake's outlet), the channel's edges show dry;
+  - more water, toward TotK's: inland water is 2.6 % of the land against its 6.5 %, with fewer
+    lakes (one per 10–19 km² against a compact one per ~8 km²) and sparser channels;
+  - volcanic land at 5.6–6.8 % against Eldin's 11 %;
+  - a volcano's smoke plume;
+  - more ruins in the ancient forests.
 - The hero rig update allocates about 0.25 MB/s. It predates this work but is the top JS
   allocation in third person.

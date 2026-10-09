@@ -14,10 +14,11 @@ const SEED = 1337;
 describe('the sky realm on the GPU: its buffer', () => {
   test('the packed layout matches the WGSL structs', () => {
     const w = skyRealmWGSL(true);
-    // Records: SkyIsl 9 vec4, SkyArch 5, SkyFall 3, SkyCluster 2.
+    // Records: SkyIsl 14 vec4, SkyArch 5, SkyFall 3, SkyCluster 2.
     const fields = (name: string) => {
       const body = w.slice(w.indexOf(`struct ${name} {`), w.indexOf('};', w.indexOf(`struct ${name} {`)));
-      return (body.match(/: vec4[fu]/g) ?? []).length;
+      const arrays = [...body.matchAll(/: array<vec4[fu], (\d+)>/g)].reduce((n, m) => n + Number(m[1]), 0);
+      return (body.match(/: vec4[fu]/g) ?? []).length + arrays;
     };
     expect(fields('SkyIsl') * 16).toBe(REALM_LAYOUT.islStride);
     expect(fields('SkyArch') * 16).toBe(REALM_LAYOUT.archStride);
@@ -26,7 +27,7 @@ describe('the sky realm on the GPU: its buffer', () => {
     expect(w).toContain(`array<SkyCluster, ${REALM_MAX.clusters}>`);
     expect(w).toContain(`array<SkyIsl, ${REALM_MAX.islands}>`);
     expect(w).toContain(`array<vec4f, ${REALM_MAX.points}>`);
-    expect(REALM_LAYOUT.bytes).toBe(16 + REALM_MAX.clusters * 32 + REALM_MAX.islands * 144 + REALM_MAX.points * 16 + REALM_MAX.arches * 80 + REALM_MAX.falls * 48);
+    expect(REALM_LAYOUT.bytes).toBe(16 + REALM_MAX.clusters * 32 + REALM_MAX.islands * 224 + REALM_MAX.points * 16 + REALM_MAX.arches * 80 + REALM_MAX.falls * 48);
   });
 
   test('clip distances cut the tops when the device has them; discard stands in otherwise', () => {
@@ -132,7 +133,10 @@ describe('the sky realm on the GPU: its buffer', () => {
     };
     for (const c of pending) expect(cellD(c) + SKY_REALM.archCell).toBeGreaterThan(REALM_NEAR);
     for (let k = 1; k < pending.length; k++) expect(cellD(pending[k])).toBeGreaterThanOrEqual(cellD(pending[k - 1]) - 1e-6);
-    for (const c of pending) buildCell(c, seed);
+    // (each a slice at a time, as the realm builds them: a few frames each)
+    let slices = 0;
+    for (const c of pending) while (!buildCell(c, seed, 0.25)) slices++;
+    expect(slices).toBeGreaterThan(0);
     const again: PendingCell[] = [];
     const second = packRealm(x, z, seed, ox, oz, undefined, again);
     expect(again.length).toBe(0);

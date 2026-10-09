@@ -9,14 +9,21 @@
  * between the feet; when grounded y = E + PLAYER.groundBias like the first-
  * person eye, so switching views keeps the same collision contract. Up in
  * the sky realm (skyworld/realm.ts) an island's top or an arch's deck is the
- * ground instead, and a sky lake or stream the water.
+ * ground instead, and a sky lake or stream the water; the Eyries' structures
+ * (skyworld/colliders.ts) stop the hero at their walls and bear it on their
+ * plazas, bridge decks, stairs, ledges and roofs.
  */
 
-import { elevation, type PlayerState } from '../terrainMath';
+import { elevation, lastFlow, lastIce, lastLava, surfaceAt, type PlayerState } from '../terrainMath';
 import { floorHeight, skyFloorUnder, skyGround, skyWater } from '../skyworld/realm';
 import { ruinSiteAt, toBoxLocal } from '../ruins';
 import { trunksNear, type Trunk } from '../forest/collision';
-import { HERO, PLAYER, VALLEY } from '../constants';
+import { eyrieIfBuilt } from '../skyworld/eyrie/eyrie';
+import { collide } from '../skyworld/colliders';
+import { HERO, PLAYER, SKY_REALM, LANDS } from '../constants';
+
+/** Scratch for the ground and the water under the hero. */
+const SURF: [number, number] = [0, 0];
 
 export type HeroMove = 'ground' | 'air' | 'glide' | 'climb' | 'swim';
 
@@ -36,6 +43,7 @@ export type HeroState = {
   ground: number;                   // E under the root at the last sample
   gx: number; gz: number;           // ∇E there (forward differences)
   water: number;                    // the water's surface there: the lakes and sea, a sky lake or stream, or −∞ (dry)
+  flowX: number; flowZ: number;     // a river's current there (m/s, world xz); 0 on still water and land
   impact: number;                   // downward speed at the last landing (m/s)
   landings: number;                 // counts landings so the rig reacts to each once
 };
@@ -113,6 +121,16 @@ function collideRuins(s: Body, feetY: number, seed: number): number {
   return floor;
 }
 
+/**
+ * The Eyries' structures (skyworld/colliders.ts): push a body whose feet are at `feetY` out of their
+ * walls; return the highest floor it stands on within a step (a plaza, a deck, a stair, a roof), or −∞.
+ * Only an Eyrie already built is asked (the renderer builds the nearest first).
+ */
+function collideStructures(s: Body, feetY: number, seed: number): number {
+  const e = eyrieIfBuilt(Math.floor(s.x / SKY_REALM.archCell), Math.floor(s.z / SKY_REALM.archCell), seed);
+  return e ? collide(e.colliders, s, feetY, HERO_RADIUS, BODY_HEIGHT) : -Infinity;
+}
+
 const nearTrunks: Trunk[] = [];
 
 /**
@@ -140,14 +158,14 @@ function collideTrees(s: Body, feetY: number, seed: number): void {
  */
 export function firstPersonGround(p: PlayerState, feetY: number, seed: number): number {
   collideTrees(p, feetY, seed);
-  const box = collideRuins(p, feetY, seed);
+  const box = Math.max(collideRuins(p, feetY, seed), collideStructures(p, feetY, seed));
   const sky = skyGround(p.x, feetY, p.z, seed);
   return Math.max(box, sky === sky ? sky : -Infinity);
 }
 
 function sampleGround(s: HeroState, seed: number): void {
   collideTrees(s, s.y, seed);
-  const boxTop = collideRuins(s, s.y, seed);
+  const boxTop = Math.max(collideRuins(s, s.y, seed), collideStructures(s, s.y, seed));
   sampleSurface(s, seed);
   if (boxTop > s.ground) {
     s.ground = boxTop;
@@ -167,13 +185,29 @@ function sampleSurface(s: HeroState, seed: number): void {
     s.ground = t;
     const w = skyWater(s.x, s.y, s.z, seed);
     s.water = w === w ? w : -Infinity;
+    s.flowX = 0;
+    s.flowZ = 0;
     return;
   }
-  const e = elevation(s.x, s.z, seed, 0);
+  // the ground, and the water there: the sea, a lake or a river's pool at its own level (under the ground where it is dry)
+  surfaceAt(s.x, s.z, seed, SURF);
+  const e = SURF[0];
+  s.water = SURF[1];
+  const [fx, fz, fs] = lastFlow();
+  s.flowX = fx * fs;
+  s.flowZ = fz * fs;
+  // Ice (frozen lakes and seas in the cold) and lava (a crater's lake, a volcano's rivers): their surface
+  // is ground (no swimming in either).
+  if (s.water > e && (lastIce() || lastLava() > 0.5)) {
+    s.ground = s.water;
+    s.water = -Infinity;
+    s.gx = 0;
+    s.gz = 0;
+    return;
+  }
   s.gx = (elevation(s.x + GRAD_H, s.z, seed, 0) - e) / GRAD_H;
   s.gz = (elevation(s.x, s.z + GRAD_H, seed, 0) - e) / GRAD_H;
   s.ground = e;
-  s.water = VALLEY.wLevel;
 }
 
 function deepWater(s: HeroState): boolean {
@@ -226,7 +260,7 @@ export function createHeroState(x: number, z: number, yaw: number, seed: number)
     x, y: 0, z, vx: 0, vy: 0, vz: 0, yaw: 0, move: 'ground',
     stamina: 1, exhausted: false, rest: 0,
     sprinting: false, sneaking: false, sliding: false, jumpHeld: false,
-    surge: 0, ground: 0, gx: 0, gz: 0, water: VALLEY.wLevel, impact: 0, landings: 0,
+    surge: 0, ground: 0, gx: 0, gz: 0, water: LANDS.sea, flowX: 0, flowZ: 0, impact: 0, landings: 0,
   };
   placeHero(s, x, -Infinity, z, 0, 0, 0, yaw, seed);
   s.jumpHeld = false;
@@ -410,9 +444,10 @@ export function updateHero(s: HeroState, input: HeroInput, dt: number, seed: num
       if (mag > 0) turnToward(s, Math.atan2(wx, wz), HERO.turnRate * 0.6, dt);
       // Buoyancy: a damped spring settles the root at the float depth.
       s.vy += ((s.water - HERO.swimFloat - s.y) * 12 - s.vy * 5) * dt;
-      s.x += s.vx * dt;
+      // (a river's current carries the swimmer downstream)
+      s.x += (s.vx + HERO.currentDrift * s.flowX) * dt;
       s.y += s.vy * dt;
-      s.z += s.vz * dt;
+      s.z += (s.vz + HERO.currentDrift * s.flowZ) * dt;
       sampleGround(s, seed);
       if (s.ground > s.water - HERO.swimDepth + 0.1) {
         // Shallow enough to stand: wade out.

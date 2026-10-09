@@ -180,7 +180,8 @@ export async function runPlaySession(baseUrl: string, opts: PlayOptions): Promis
     await cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: INSTRUMENT(!!opts.fenceOff, !!opts.gpuTiming, !!opts.uncapped) });
     const loaded = new Promise<void>((r) => cdp.on('Page.loadEventFired', () => r()));
     const renderer = opts.renderer ?? 'webgl2';
-    const params = [renderer === 'auto' ? '' : `renderer=${renderer}`, opts.query ?? ''].filter(Boolean).join('&');
+    // (solo: straight into the world, past the multiplayer lobby; revisions without it ignore it)
+    const params = ['solo=1', renderer === 'auto' ? '' : `renderer=${renderer}`, opts.query ?? ''].filter(Boolean).join('&');
     await cdp.send('Page.navigate', { url: `${baseUrl}/game${params ? `?${params}` : ''}` });
     await loaded;
     await Bun.sleep(1500);

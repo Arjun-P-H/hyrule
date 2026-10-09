@@ -3,6 +3,7 @@
  */
 
 import { CHUNK_SIZE } from '../constants';
+import { waterLevel } from '../terrainMath';
 import type { ClipmapSpec } from './clipmap';
 import type { PassTimestamps } from './clipmapCache';
 import type { GrassSpec } from './grass.wgsl';
@@ -15,6 +16,10 @@ export type RealmSpec = {
   stubGround?: boolean;
   /** Bench only: false leaves out the islands beyond REALM_NEAR (skyRealm.ts packRealm), to measure them. */
   far?: boolean;
+  /** False leaves out the Eyries' structures (structures.ts), to measure them. */
+  structures?: boolean;
+  /** Bench only: build every Eyrie in range at once (not a slice a frame), so a still shows them whole. */
+  syncBuild?: boolean;
 };
 
 export type FrameParams = {
@@ -33,6 +38,8 @@ export type FrameParams = {
   time: number;
   /** Third-person hero, rig.ts HERO_UNIFORM layout relative to this camera; null or absent: no hero. */
   hero?: Float32Array | null;
+  /** Other players' heroes (multiplayer), the same layout; at most MAX_REMOTE_HEROES are drawn. */
+  remotes?: readonly Float32Array[] | null;
   /**
    * With TAA, the scene renders at width × renderScale (the output keeps
    * width × height and is upscaled into). Ignored without TAA. Default 1.
@@ -44,6 +51,9 @@ export type FrameParams = {
 
 /** Game time a frame without a clock is drawn at: day 0, 15:30. */
 export const DEFAULT_DAYS = 15.5 / 24;
+
+/** Other players' heroes drawn per frame (a world holds five players: src/lib/hero/characters.ts). */
+export const MAX_REMOTE_HEROES = 4;
 
 type CacheOptions = {
   clip: ClipmapSpec;
@@ -83,7 +93,7 @@ export type TerrainVariant =
       /** Bench only: STUB_* constants switched on for every pipeline (their defaults rewritten), to measure them. */
       stubAll?: Array<'STUB_DISPLAY' | 'STUB_FOGALL' | 'NO_BLADE_CACHE'>;
       /** Bench only: draws left out of the main pass, to measure them. */
-      skip?: Array<'terrain' | 'water' | 'sky' | 'hero' | 'forest' | 'grass' | 'realm' | 'ruins'>;
+      skip?: Array<'terrain' | 'water' | 'sky' | 'hero' | 'forest' | 'grass' | 'realm' | 'ruins' | 'structures' | 'fauna'>;
       /** Bench only: parts of the terrain's shading left out (terrain.wgsl.ts STUB_* constants), to measure them. */
       stub?: Partial<Record<'STUB_BIOME' | 'STUB_GRAD' | 'STUB_SHADOW' | 'STUB_FOG' | 'STUB_SHADE' | 'PER_PIXEL_GROUND' | 'CACHED_GRAD' | 'CANOPY_MODE', number>>;
     } & CacheOptions);
@@ -127,6 +137,7 @@ export function packFrame(fp: FrameParams, f: Float32Array, i: Int32Array, w = f
   f[16] = ox; f[17] = oz; f[18] = w; f[19] = h;
   f[20] = fp.tanHalf; f[21] = (2 * fp.tanHalf) / Math.max(h, 2);
   i[22] = fp.seed; i[23] = fp.marchSteps; i[24] = fp.shadowSteps;
-  f[25] = 0; f[26] = jx; f[27] = jy;
+  // The water's surface under the camera (a lake, a river's pool or the sea): below it the view is underwater.
+  f[25] = waterLevel(fp.x, fp.z, fp.seed); f[26] = jx; f[27] = jy;
 }
 

@@ -43,7 +43,7 @@ import { plantInCell, type PlaceWorld } from '../src/lib/forest/placement';
 import { SPECIES } from '../src/lib/forest/species';
 import { ruinSiteAt } from '../src/lib/ruins';
 import { skyPlantInCell } from '../src/lib/skyworld/flora';
-import { elevation } from '../src/lib/terrainMath';
+import { elevation, surfaceAt } from '../src/lib/terrainMath';
 import { PATH_N, SKY } from '../src/lib/sky/celestial';
 
 const ROOT = path.resolve(import.meta.dir, '..');
@@ -63,6 +63,13 @@ const VARIANTS: Record<string, TerrainVariant> = {
   // (QUALITY_PRESETS resScale; the output stays at --res, as the canvas does).
   'game-med': { ...GAME_VARIANT, sky: 'cycle', renderScale: 0.5 } as TerrainVariant,
   'game-high': { ...GAME_VARIANT, sky: 'cycle', renderScale: 0.75 } as TerrainVariant,
+  // The game at High with every Eyrie in range built before the first frame (stills of the Eyries).
+  'eyrie-high': { ...GAME_VARIANT, sky: 'cycle', renderScale: 0.75, islands: { syncBuild: true } } as TerrainVariant,
+  'eyrie-high-nostruct': { ...GAME_VARIANT, sky: 'cycle', renderScale: 0.75, islands: { structures: false } } as TerrainVariant,
+  // (built, their district maps in place, but the structures not drawn: what drawing them costs)
+  'eyrie-high-skipst': { ...GAME_VARIANT, sky: 'cycle', renderScale: 0.75, islands: { syncBuild: true }, skip: ['structures'] } as TerrainVariant,
+  // (and without the birds and motes either: what all the Eyries' life costs together)
+  'eyrie-high-skipall': { ...GAME_VARIANT, sky: 'cycle', renderScale: 0.75, islands: { syncBuild: true }, skip: ['structures', 'fauna'] } as TerrainVariant,
   // The far forest against the trees it stands for (terrain.wgsl.ts CANOPY_MODE): the trees alone, no
   // canopy painted; the canopy painted at every distance and no trees; the canopy's cover and the
   // distance as raw colours (which pixels to compare).
@@ -698,8 +705,8 @@ async function parity(): Promise<void> {
           if (valid) gpuN++;
           if (p) cpuN++;
           if (!valid && !p) { agree++; continue; }
-          if (valid && !p) { onlyG++; continue; }
-          if (!valid && p) { onlyC++; continue; }
+          if (valid && !p) { onlyG++; if (opt('dump', '') && onlyG <= 4) console.log(`    only GPU: cell ${ix} ${iz} ${SPECIES[slots[i + 3] & 15]}`); continue; }
+          if (!valid && p) { onlyC++; if (opt('dump', '') && onlyC <= 6) console.log(`    only CPU: cell ${ix} ${iz} ${p.species} ${"feature" in p ? p.feature : "sky"} at ${p.x.toFixed(1)} ${p.z.toFixed(1)}`); continue; }
           if (SPECIES[slots[i + 3] & 15] !== p!.species) { other++; continue; }
           agree++;
           if (Math.hypot(tx * 48 + slotF[i] - p!.x, tz * 48 + slotF[i + 1] - p!.z) > 0.05) moved++;
@@ -824,6 +831,39 @@ async function shimmer(): Promise<void> {
   });
 }
 
-const modes: Record<string, () => Promise<void>> = { port, cost, gen, fidelity, hero, aa, stills, parity, horizons, shimmer, taa };
+/**
+ * The lands' elevation on the GPU (PROBE_WGSL: worldgen.wgsl.ts elevation) against the CPU twin at
+ * every camera of a framed config (default: lands), on a 64 × 64 grid round each (--step=4 m).
+ */
+async function landprobe(): Promise<void> {
+  const config = opt('config', 'lands');
+  const framed: CameraFrame[] = JSON.parse(readFileSync(path.join(OUT, '.cache', `framed-${config}.json`), 'utf8'));
+  const step = Number(opt('step', '4')), n = 64;
+  const probes = framed.map((fr) => {
+    const ox = Math.floor(fr.x / CHUNK_SIZE) * CHUNK_SIZE, oz = Math.floor(fr.z / CHUNK_SIZE) * CHUNK_SIZE;
+    return { id: `f${fr.frame}-${fr.scene}`, origin: [ox, oz] as [number, number], local0: [fr.x - ox - (n / 2) * step, fr.z - oz - (n / 2) * step] as [number, number], step, w: n, h: n, dp: 1e-4 };
+  });
+  const gpu = await runWebGPU({ modes: ['probe'], variants: pickVariants('direct'), probes });
+  console.log('  probe                        max |E_gpu − E_cpu|   p99      cells > 0.1 m   max |W_gpu − W_cpu| (wet)');
+  for (const s of probes) {
+    const b = gpu.blobs.find((x) => x.query.kind === 'probe' && x.query.id === s.id);
+    if (!b) continue;
+    const buf = new Float32Array(b.data.buffer, b.data.byteOffset, b.data.byteLength / 4);
+    const d: number[] = [];
+    let dw = 0;
+    const sw: [number, number] = [0, 0];
+    for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) {
+      const k = j * n + i;
+      const x = s.origin[0] + s.local0[0] + i * step, z = s.origin[1] + s.local0[1] + j * step;
+      surfaceAt(x, z, DEFAULT_SEED, sw, 1e-4);
+      d.push(Math.abs(buf[k * 4] - sw[0]));
+      if (sw[1] > sw[0] || buf[k * 4 + 3] > buf[k * 4]) dw = Math.max(dw, Math.abs(buf[k * 4 + 3] - sw[1]));
+    }
+    d.sort((a, b2) => a - b2);
+    console.log(`  ${s.id.padEnd(28)} ${d[d.length - 1].toFixed(3).padStart(10)} m ${d[Math.floor(0.99 * d.length)].toFixed(3).padStart(8)} m ${String(d.filter((x) => x > 0.1).length).padStart(8)} ${dw.toFixed(3).padStart(14)} m`);
+  }
+}
+
+const modes: Record<string, () => Promise<void>> = { port, cost, gen, fidelity, hero, aa, stills, parity, horizons, shimmer, taa, landprobe };
 if (!modes[mode]) throw new Error(`unknown mode ${mode}; one of ${Object.keys(modes).join(', ')}`);
 await modes[mode]();

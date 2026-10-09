@@ -12,7 +12,7 @@ import { ruinSiteAt } from '../ruins';
 import { skyPlantInCell } from '../skyworld/flora';
 import { elevation, hash3 } from '../terrainMath';
 import { trunkColliders, type TrunkCollider } from './models';
-import { plantInCell, type PlaceWorld } from './placement';
+import { plantInCell, SCALE, type PlaceWorld } from './placement';
 import { CELL, SPECIES, VARIANTS, type Species } from './species';
 
 /** A trunk: centre (m) at hip height, the height it stands on, its radius, and how high it reaches above that. */
@@ -39,7 +39,7 @@ function trunkOf(species: Species, px: number, pz: number, y: number, scale: num
   const c = colliders[SPECIES.indexOf(species) * VARIANTS + ((bits & 0xffff) % VARIANTS)];
   if (!c) return null;
   const yaw = ((bits >>> 16) & 255) * ((2 * Math.PI) / 256);
-  const s = 0.55 + (1.05 * Math.min(255, Math.max(0, Math.round(((scale - 0.55) / 1.05) * 255)))) / 255;
+  const s = SCALE.lo + (SCALE.span * Math.min(255, Math.max(0, Math.round(((scale - SCALE.lo) / SCALE.span) * 255)))) / 255;
   const cy = Math.cos(yaw), sy = Math.sin(yaw);
   return { x: px + (cy * c.x + sy * c.z) * s, z: pz + (-sy * c.x + cy * c.z) * s, y, r: c.r * s, top: c.top * s };
 }

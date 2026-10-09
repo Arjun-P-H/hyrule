@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'bun:test';
-import { elevation, slope } from '../src/lib/terrainMath';
-import { DEFAULT_SEED, HERO, HERO_CAMERA, HERO_SHAPE, PLAYER, SPAWN, VALLEY } from '../src/lib/constants';
+import { elevation, slope, waterLevel } from '../src/lib/terrainMath';
+import { DEFAULT_SEED, HERO, HERO_CAMERA, HERO_SHAPE, PLAYER, SPAWN } from '../src/lib/constants';
 import {
   createHeroState, heroAction, placeHero, updateHero, type HeroInput, type HeroState,
 } from '../src/lib/hero/locomotion';
@@ -9,6 +9,8 @@ import { createHeroCamera, updateHeroCamera } from '../src/lib/hero/camera';
 import { TERRAIN_FS, minifyGlsl, withHero } from '../src/components/terrain/demoShader';
 import { HERO_BOX, HERO_BYTES, packHeroWgsl } from '../src/lib/gpu/hero.wgsl';
 import { transformShader } from '../bench/gpu/runner';
+import { plantInCell } from '../src/lib/forest/placement';
+import { CELL } from '../src/lib/forest/species';
 
 /**
  * Third-person hero: locomotion (run / sprint / jump / glide / climb / swim /
@@ -20,7 +22,7 @@ const SEED = DEFAULT_SEED;
 const DT = 1 / 60;
 const BIAS = PLAYER.groundBias;
 
-function findSpot(pred: (x: number, z: number) => boolean, step = 3, radius = 700): [number, number] {
+function findSpot(pred: (x: number, z: number) => boolean, step = 3, radius = 2500): [number, number] {
   for (let r = 0; r <= radius; r += step) {
     for (let a = 0; a < 64; a++) {
       const x = SPAWN.x + r * Math.cos((a / 64) * Math.PI * 2);
@@ -49,14 +51,28 @@ function flattestYaw(x: number, z: number, len = 20): number {
   return best;
 }
 
-const FLAT = findSpot((x, z) => slope(x, z, SEED) < 0.08 && elevation(x, z, SEED, 0) > VALLEY.wLevel + 3, 4);
-const FLAT_YAW = flattestYaw(FLAT[0], FLAT[1]);
-const DEEP = findSpot((x, z) => elevation(x, z, SEED, 0) < VALLEY.wLevel - 3, 2);
+/** No tree (bushes aside) within r metres of (x, z). */
+function clearOfTrees(x: number, z: number, r: number): boolean {
+  for (let iz = Math.floor((z - r) / CELL); iz <= Math.floor((z + r) / CELL); iz++) {
+    for (let ix = Math.floor((x - r) / CELL); ix <= Math.floor((x + r) / CELL); ix++) {
+      const p = plantInCell(ix, iz, SEED);
+      if (p && p.species !== 'bush' && Math.hypot(p.x - x, p.z - z) < r) return false;
+    }
+  }
+  return true;
+}
+// (level open ground for a run: flat at the spot and 12 m round it, dry, no tree within 30 m)
+const FLAT = findSpot((x, z) => slope(x, z, SEED) < 0.06 && elevation(x, z, SEED, 0) > waterLevel(x, z, SEED) + 2.9
+  && [0, 1, 2, 3, 4, 5, 6, 7].every((k) => slope(x + 12 * Math.cos(k * Math.PI / 4), z + 12 * Math.sin(k * Math.PI / 4), SEED) < 0.08)
+  && clearOfTrees(x, z, 30), 4);
+const FLAT_YAW = flattestYaw(FLAT[0], FLAT[1], 60); // (sprinting runs ~45 m)
+const DEEP = findSpot((x, z) => elevation(x, z, SEED, 0) < waterLevel(x, z, SEED) - 3, 2);
 const WALL = findSpot((x, z) => {
   const [gx, gz] = gradAt(x, z);
   const m = Math.hypot(gx, gz);
-  if (m < 1.35) return false;
-  for (let k = 1; k <= 4; k++) if (slope(x + (gx / m) * k, z + (gz / m) * k, SEED) < 1.2) return false;
+  if (m < 1.35 || m > 5) return false; // (a wall, not a sheer step)
+  // (steep from 2 m below the spot to 6 m above it: room to climb, jump and push off)
+  for (let k = -2; k <= 6; k++) if (k !== 0 && slope(x + (gx / m) * k, z + (gz / m) * k, SEED) < 1.2) return false;
   return true;
 }, 2);
 const WALL_UP = (() => { const [gx, gz] = gradAt(WALL[0], WALL[1]); return Math.atan2(gx, gz); })();
@@ -297,7 +313,7 @@ describe('Hero locomotion — swimming', () => {
     const s = createHeroState(DEEP[0], DEEP[1], 0, SEED);
     run(s, 3.0, input());
     expect(s.move).toBe('swim');
-    expect(s.y).toBeCloseTo(VALLEY.wLevel - HERO.swimFloat, 1);
+    expect(s.y).toBeCloseTo(waterLevel(s.x, s.z, SEED) - HERO.swimFloat, 1);
     const yaw = Math.atan2(DEEP[0] - SPAWN.x, DEEP[1] - SPAWN.z); // keep heading into the lake
     run(s, 0.8, input({ forward: 1, camYaw: yaw }));
     if (s.move === 'swim') expect(hspeed(s)).toBeCloseTo(HERO.swimSpeed, 0);
@@ -529,7 +545,7 @@ describe('Hero third-person camera', () => {
         const yaw = k * 0.37, pitch = HERO_CAMERA.pitchMin + ((k * 0.61) % (HERO_CAMERA.pitchMax - HERO_CAMERA.pitchMin));
         updateHeroCamera(c, s, yaw, pitch, DT, SEED);
         expect(c.y).toBeGreaterThanOrEqual(elevation(c.x, c.z, SEED, 0) + HERO_CAMERA.clearance - 1e-9);
-        expect(c.y).toBeGreaterThanOrEqual(VALLEY.wLevel + HERO_CAMERA.clearance - 1e-9);
+        expect(c.y).toBeGreaterThanOrEqual(waterLevel(c.x, c.z, SEED) + HERO_CAMERA.clearance - 1e-9);
         expect(c.boom).toBeGreaterThanOrEqual(HERO_CAMERA.minDistance - 1e-9);
         n++;
       }
@@ -566,13 +582,15 @@ describe('Hero ↔ shader contract (demoShader.ts heroMap)', () => {
     expect(glsl.get(name)).toBe(value);
   });
 
-  it('uniform layout: 18 joints, two mat3 frames, bound and misc vec4s', () => {
+  it('uniform layout: 18 joints, two mat3 frames, bound, misc and dress vec4s', () => {
     expect(TERRAIN_FS).toContain(`uniform vec3  u_hero_j[${HERO_JOINTS}];`);
     expect<number>(HERO_UNIFORM.torso).toBe(3 * HERO_JOINTS);
     expect(HERO_UNIFORM.head - HERO_UNIFORM.torso).toBe(9);
     expect(HERO_UNIFORM.bound - HERO_UNIFORM.head).toBe(9);
     expect(HERO_UNIFORM.misc - HERO_UNIFORM.bound).toBe(4);
-    expect(HERO_UNIFORM.length - HERO_UNIFORM.misc).toBe(4);
+    expect(HERO_UNIFORM.dress - HERO_UNIFORM.misc).toBe(4);
+    expect(HERO_UNIFORM.length - HERO_UNIFORM.dress).toBe(4);
+    expect(TERRAIN_FS).toContain('uniform vec3  u_hero_dress;');
     expect(TERRAIN_FS).toContain(`u_hero_j[${J.glider}]`);
   });
 

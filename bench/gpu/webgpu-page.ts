@@ -13,6 +13,7 @@
  *           while the camera moves at a set speed
  */
 
+import { hydroBufferFor } from '../../src/lib/gpu/hydroBuffer';
 import { createTerrainRenderer, type FrameParams, type PassTimestamps, type TerrainRendererLike, type TerrainVariant } from '../../src/lib/gpu/terrainRenderer';
 import { PROBE_BYTES, PROBE_WGSL } from '../../src/lib/gpu/terrain.wgsl';
 import { setPassStamp } from '../../src/lib/gpu/profile';
@@ -80,6 +81,7 @@ async function main(): Promise<void> {
     api: 'webgpu',
     vendor: info.vendor, architecture: info.architecture, device: info.device, description: info.description,
     features, adapterFeatures: [...adapter.features].sort(), userAgent: navigator.userAgent,
+    limits: { storageTextures: adapter.limits.maxStorageTexturesPerShaderStage, sampledTextures: adapter.limits.maxSampledTexturesPerShaderStage },
   });
 
   const renderers = await Promise.all(cfg.variants.map(async (v) => {
@@ -325,7 +327,9 @@ async function main(): Promise<void> {
         f[0] = pr.origin[0]; f[1] = pr.origin[1]; f[2] = pr.local0[0]; f[3] = pr.local0[1];
         f[4] = pr.step; f[5] = pr.dp; u[6] = pr.w; i[7] = cfg.seed;
         device.queue.writeBuffer(ubuf, 0, data);
-        const bind = device.createBindGroup({ layout: pipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: ubuf } }, { binding: 1, resource: { buffer: sbuf } }] });
+        const hydro = hydroBufferFor(device);
+        hydro.update(pr.origin[0] + pr.local0[0], pr.origin[1] + pr.local0[1], cfg.seed);
+        const bind = device.createBindGroup({ layout: pipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: ubuf } }, { binding: 1, resource: { buffer: sbuf } }, hydro.entry()] });
         const enc = device.createCommandEncoder();
         const pass = enc.beginComputePass();
         pass.setPipeline(pipe);

@@ -38,10 +38,11 @@
 import { LIGHT, SKY_REALM as S } from '../constants';
 import { SKY_BIOMES, SKY_BIOME_INFO, SKY_FLORA_COLOURS } from '../skyworld/biomes';
 import { SKY_PLACE } from '../skyworld/flora';
-import { CHANNEL_REACH, STREAM_DEPTH } from '../skyworld/island';
+import { CHANNEL_REACH, STREAM_DEPTH, UNDERSIDES } from '../skyworld/island';
 import { wgslF32 as f } from './worldgen.wgsl';
+import { DISTRICT_RANGE } from '../skyworld/eyrie/district';
 
-export const REALM_MAX = { clusters: 48, islands: 512, points: 4096, arches: 96, falls: 64, instances: 1024 } as const;
+export const REALM_MAX = { clusters: 48, islands: 768, points: 4096, arches: 96, falls: 64, instances: 1024 } as const;
 /**
  * The realm is drawn out to this distance (m): whole within REALM_NEAR (clusters, arches, floating
  * rocks nearby, streams and lakes), beyond it only the islands and their falls (skyRealm.ts packRealm).
@@ -49,7 +50,7 @@ export const REALM_MAX = { clusters: 48, islands: 512, points: 4096, arches: 96,
 export const REALM_NEAR = 16000;
 export const REALM_FAR = 32000;
 /** Bytes per record in the realm buffer (see the structs below). */
-const ISL_BYTES = 9 * 16, ARCH_BYTES = 5 * 16, FALL_BYTES = 3 * 16, CLUSTER_BYTES = 2 * 16;
+const ISL_BYTES = 14 * 16, ARCH_BYTES = 5 * 16, FALL_BYTES = 3 * 16, CLUSTER_BYTES = 2 * 16;
 /** Offsets (bytes) of each array in the realm buffer, and its size. */
 export const REALM_LAYOUT = (() => {
   const cl = 16;
@@ -81,8 +82,9 @@ export const STREAM_SUB = 4;
 /** Per-frame uniform: shadow maps (sampled, drawn), the rings, the polar instance list. */
 export const REALM_FRAME_BYTES = 16 * (10 + 2 * SKY_RINGS.rings + 2 + REALM_MAX.instances / 4);
 
-/** Island flags (SkyIsl.m.z). */
+/** Island flags (SkyIsl.m.z); bits 8–10 its underside (island.ts UNDERSIDES), 11 a lagoon's tint, 12–14 its lobes, 16–20 its Eyrie's palette. */
 export const RL_FLAGS = { lake: 1, stream: 2, frozen: 4, debris: 8, fall: 16 } as const;
+export const RL_UNDER_SHIFT = 8, RL_TINT_BIT = 11, RL_LOBES_SHIFT = 12, RL_PALETTE_SHIFT = 16;
 
 const v3 = (a: readonly number[]) => `vec3f(${a.map(f).join(', ')})`;
 const arr = (type: string, xs: string[]) => `array<${type}, ${xs.length}>(${xs.join(', ')})`;
@@ -94,12 +96,14 @@ struct SkyIsl {
   c: vec4f,   // centre x, z (chunk-local), outline radius R, top base height y
   o: vec4f,   // outline phases
   r: vec4f,   // outline wobble, hill height, hill wavelength, crags
-  u: vec4f,   // summit, cliff, underside depth, unused
+  u: vec4f,   // summit, cliff, underside depth, district map's layer (−1: none)
   m: vec4u,   // noise seed (i32 bits), biome, flags (RL_FLAGS), stream: first point | count << 16
   l0: vec4f,  // lake: middle x, z (island-local), radius, level
   l1: vec4f,  // lake: aspect, cos, sin (major axis), depth
-  l2: vec4f,  // lake: shore wobble phases; fall index (−1: none); unused
+  l2: vec4f,  // lake: shore wobble phases; fall index (−1: none); 1 / its district map's side (m)
   sb: vec4f,  // stream bounds: middle x, z (island-local), radius (its carve included); unused
+  sh: vec4f,  // the Eyries' shaping: terrace height (m), bowl, tilt x, z
+  lb: array<vec4f, 4>, // extra hanging spikes: centre x, z (island-local), radius, depth
 };
 struct SkyArch {
   a: vec4f,   // start x, z (chunk-local), deck height there, length
@@ -145,6 +149,10 @@ struct RealmU {
   inst: array<vec4u, ${REALM_MAX.instances / 4}>, // polar draws: island | surface << 16 (top 0, underside 1), four to a word
 };
 @group(0) @binding(11) var<uniform> realmU: RealmU;
+// The Eyries' district maps (eyrie/district.ts): per settled island near the camera, the distance to
+// its paving and to its footprints.
+@group(0) @binding(33) var districtTex: texture_2d_array<f32>;
+@group(0) @binding(34) var districtSamp: sampler;
 @group(0) @binding(26) var realmShadow: texture_depth_2d;
 @group(0) @binding(27) var realmShadowSamp: sampler_comparison;
 // Its caster mask (skyRealm.ts shadowMask): a bit for each of 64 × 64 cells, set where a caster lies in reach.
@@ -199,10 +207,18 @@ fn rlRho(k: u32, q: vec2f) -> f32 {
   return length(q) / (realm.isl[k].c.z * rlOutline(k, rlAtan2(q.y, q.x)));
 }
 
+// island.ts terraced(): a height folded into level steps T high, each rising to the next over its last quarter.
+fn rlTerraced(h: f32, T: f32) -> f32 {
+  if (T <= 0.0) { return h; }
+  let k = floor(h / T);
+  return T * (k + smoothstep(0.75, 1.0, h / T - k));
+}
+
 fn rlRelief(k: u32, q: vec2f, rho: f32) -> f32 {
   let r = realm.isl[k].r;
   let wl = r.z;
   let s = rlSeed(k);
+  let sh = realm.isl[k].sh;
   let n = 0.5 + 0.5 * (0.6 * vnoise(q.x / wl, q.y / wl, s) + 0.28 * vnoise(q.x / (0.45 * wl), q.y / (0.45 * wl), s + 1)
     + 0.12 * vnoise(q.x / (0.2 * wl), q.y / (0.2 * wl), s + 2));
   var h = r.y * (0.35 * (1.0 - rho * rho) + 0.65 * n);
@@ -215,7 +231,9 @@ fn rlRelief(k: u32, q: vec2f, rho: f32) -> f32 {
     let pr = rho / 0.32;
     h += r.y * peak * 2.2 * exp(-pr * pr);
   }
-  return realm.isl[k].c.w + h * (1.0 - smoothstep(0.72, 1.0, rho)) - RL_RIM * smoothstep(0.84, 1.0, rho);
+  if (sh.y > 0.0) { h += r.y * sh.y * smoothstep(0.25, 0.85, rho); }
+  h = rlTerraced(h, sh.x);
+  return realm.isl[k].c.w + h * (1.0 - smoothstep(0.72, 1.0, rho)) - RL_RIM * smoothstep(0.84, 1.0, rho) + sh.z * q.x + sh.w * q.y;
 }
 
 fn rlLakeDist(k: u32, q: vec2f) -> f32 {
@@ -313,11 +331,25 @@ fn rlBottom(k: u32, q: vec2f) -> f32 {
   let wall = u4.y * (1.0 - smoothstep(0.86, 1.0, rho));
   let v = max(0.0, 1.0 - rho / 0.86);
   var cone = 0.0;
-  if (v > 0.0) { cone = u4.z * pow(v, 0.75) * (0.8 + 0.35 * (0.5 + 0.5 * vnoise(q.x / (0.22 * R), q.y / (0.22 * R), s + 5))); }
-  let rock = 0.035 * R * (0.5 + 0.5 * vnoise(q.x / (0.09 * R), q.y / (0.09 * R), s + 6)) * (1.0 - smoothstep(0.8, 1.0, rho));
-  let dn = max(0.0, vnoise(q.x / (0.075 * R), q.y / (0.075 * R), s + 7));
-  let drip = 0.11 * R * dn * dn * dn * (1.0 - smoothstep(0.55, 0.9, rho));
+  if (v > 0.0) { cone = u4.z * pow(v, 0.9) * (0.8 + 0.35 * (0.5 + 0.5 * vnoise(q.x / (0.22 * R), q.y / (0.22 * R), s + 5))); }
+  let rock = 0.05 * R * (0.5 + 0.5 * vnoise(q.x / (0.09 * R), q.y / (0.09 * R), s + 6)) * (1.0 - smoothstep(0.8, 1.0, rho));
+  // hanging spires of rock, two sizes, out nearly to the rim
+  let dn = max(0.0, vnoise(q.x / (0.07 * R), q.y / (0.07 * R), s + 7));
+  let dn2 = max(0.0, vnoise(q.x / (0.042 * R), q.y / (0.042 * R), s + 8));
+  let drip = 0.17 * R * dn * dn * dn * (1.0 - smoothstep(0.6, 0.95, rho)) + 0.07 * R * dn2 * dn2 * dn2 * (1.0 - smoothstep(0.4, 0.97, rho));
   var b = c.w - RL_RIM - wall - cone - rock - drip;
+  // The extra spikes (island.ts): inverted cones off the middle.
+  let nl = (realm.isl[k].m.z >> ${RL_LOBES_SHIFT}u) & 7u;
+  let lobeRim = 1.0 - smoothstep(0.85, 1.0, rho);
+  for (var i = 0u; i < nl; i++) {
+    let L = realm.isl[k].lb[i];
+    let t = max(0.0, 1.0 - length(q - L.xy) / L.z);
+    if (t > 0.0) {
+      b = min(b, c.w - RL_RIM - wall - L.w * lobeRim * pow(t, 1.6) * (0.88 + 0.24 * (0.5 + 0.5 * vnoise((q.x - L.x) / (0.3 * L.z), (q.y - L.y) / (0.3 * L.z), s + 9))));
+    }
+  }
+  let sh = realm.isl[k].sh;
+  b += sh.z * q.x + sh.w * q.y;
   if (rho > 0.8 && rlInStream(k, q)) {
     let n = rlStream(k, q);
     if (n.x < RL_CHANNEL * n.z) { b = min(b, rlChannel(n.y, n.z, n.x)); }
@@ -341,6 +373,14 @@ fn rlFind(xz: vec2f, skipDebris: bool) -> i32 {
     }
   }
   return -1;
+}
+
+// Distances (m) from island-local q to island k's paving and to its footprints (DISTRICT_RANGE where it has no map).
+fn rlDistrict(k: u32, q: vec2f) -> vec2f {
+  let layer = realm.isl[k].u.w;
+  if (layer < 0.0) { return vec2f(${f(DISTRICT_RANGE)}); }
+  let v = textureSampleLevel(districtTex, districtSamp, q * realm.isl[k].l2.w + 0.5, i32(layer), 0.0).rg;
+  return (v - 0.5) * ${f(2 * DISTRICT_RANGE)};
 }
 
 // Is island k's top drawn by the sky rings this frame?
@@ -510,6 +550,26 @@ fn rlGround(k: u32, q: vec2f, n: vec3f, y: f32) -> vec3f {
     let snowCol = mix(vec3f(0.66, 0.73, 0.84), vec3f(0.8, 0.84, 0.9), 0.55 * ripple + 0.45 * drift) * (0.95 + 0.08 * fine);
     col = mix(col, snowCol, snow);
   }
+  // An Eyrie's streets and plazas: setts and flagstones, worn, a kerb at their edges; bare earth
+  // round its walls.
+  let dd = rlDistrict(k, q);
+  if (dd.x < 0.6 || dd.y < 0.8) {
+    let pal = (realm.isl[k].m.z >> ${RL_PALETTE_SHIFT}u) & 31u;
+    let g = q * 1.0;
+    let sq = g / vec2f(0.9, 0.6);
+    let row = floor(sq.y);
+    let sx = sq.x + 0.5 * (row - 2.0 * floor(row * 0.5));
+    let cell = vec2f(floor(sx), row);
+    let fq = abs(fract(vec2f(sx, sq.y)) - 0.5);
+    let joint = 1.0 - smoothstep(0.38, 0.47, max(fq.x, fq.y * 1.2));
+    let tint = f32(hash3(i32(cell.x), i32(cell.y), 3201) & 255u) / 255.0;
+    var pave = PL_PAVING[pal] * (0.8 + 0.3 * tint) * (0.62 + 0.38 * joint) * (0.9 + 0.2 * fine);
+    let kerb = smoothstep(-0.45, -0.2, dd.x) * (1.0 - smoothstep(-0.05, 0.1, dd.x));
+    pave = mix(pave, PL_TRIM[pal] * 0.8, kerb);
+    col = mix(col, pave, 1.0 - smoothstep(-0.05, 0.15, dd.x));
+    // trodden earth round the footprints
+    col = mix(col, mix(BI_SOIL[b], PL_PAVING[pal] * 0.6, 0.4), (1.0 - smoothstep(0.0, 0.8, dd.y)) * smoothstep(-0.05, 0.15, dd.x) * 0.85);
+  }
   return col;
 }
 
@@ -519,9 +579,10 @@ fn rlRock(k: u32, q: vec2f, y: f32, rho: f32) -> vec3f {
   let b = realm.isl[k].m.y;
   let s = rlSeed(k);
   let warp = 1.6 * vnoise(q.x / 45.0, q.y / 45.0, s + 31);
-  let band = y / 7.0 + warp;
+  let band = y / 11.0 + warp;
   let tone = 0.5 + 0.5 * vnoise(floor(band) * 3.1, 0.5, s + 33);
-  var col = mix(BI_STRATA0[b], BI_STRATA1[b], tone) * (1.0 - 0.3 * smoothstep(0.88, 1.0, fract(band)));
+  let tone2 = 0.5 + 0.5 * vnoise(floor(band) * 3.1 + 7.3, 0.5, s + 33);
+  var col = mix(BI_STRATA0[b], BI_STRATA1[b], mix(tone, tone2, smoothstep(0.6, 1.0, fract(band)))) * (1.0 - 0.12 * smoothstep(0.9, 1.0, fract(band)));
   // Weathering runs down the rock: fine vertical flutes and dark streaks below the rim.
   let th = rlAtan2(q.y, q.x) * realm.isl[k].c.z;
   let flute = vnoise(th / 3.5, y / 40.0, s + 35);
@@ -538,7 +599,41 @@ fn rlRock(k: u32, q: vec2f, y: f32, rho: f32) -> vec3f {
     let streak = (1.0 - smoothstep(0.6 * F.a.w, 1.6 * F.a.w, side)) * smoothstep(0.75, 0.95, rho);
     col *= 1.0 - 0.45 * streak;
   }
+  // What the underside is made of (island.ts UNDERSIDES).
+  let under = (realm.isl[k].m.z >> ${RL_UNDER_SHIFT}u) & 7u;
+  if (under == ${UNDERSIDES.indexOf('crystal')}u) {
+    col = mix(col, vec3f(0.16, 0.3, 0.48), 0.7 * rlVein(k, q, y));
+  } else if (under == ${UNDERSIDES.indexOf('roots')}u) {
+    // living roots wrapped round the rock, hanging in strands
+    let strand = 0.5 + 0.5 * sin(th * 1.9 + 3.0 * vnoise(th / 5.0, y / 28.0, s + 43));
+    let rootM = smoothstep(0.15, 0.6, rho) * smoothstep(0.35, 0.65, 0.5 + 0.5 * vnoise(th / 9.0, y / 60.0, s + 45));
+    col = mix(col, vec3f(0.085, 0.06, 0.04) * (0.65 + 0.7 * strand), 0.85 * rootM);
+  } else if (under == ${UNDERSIDES.indexOf('basalt')}u) {
+    // columns of black basalt, their joints darker
+    let colJ = 1.0 - smoothstep(0.0, 0.18, abs(fract(th / 2.4) - 0.5) * 2.4 - 0.95);
+    col = mix(col, vec3f(0.045, 0.04, 0.04), 0.75) * (1.0 - 0.35 * colJ);
+  } else if (under == ${UNDERSIDES.indexOf('ice')}u) {
+    let glaze = smoothstep(0.3, 0.8, 0.5 + 0.5 * vnoise(th / 8.0, y / 22.0, s + 47));
+    col = mix(col, vec3f(0.42, 0.55, 0.68), 0.35 + 0.35 * glaze);
+  }
   return col;
+}
+
+// Skystone veins in an underside (crystal), or the cracks lava glows through (basalt): 0 … 1.
+fn rlVein(k: u32, q: vec2f, y: f32) -> f32 {
+  let th = rlAtan2(q.y, q.x) * realm.isl[k].c.z;
+  return smoothstep(0.86, 0.97, 1.0 - abs(vnoise(th / 7.0, y / 11.0, rlSeed(k) + 41)));
+}
+
+// Light an underside gives off: skystone veins glowing faintly blue (brighter by night), lava cracks in basalt.
+fn rlRockEmit(k: u32, q: vec2f, y: f32) -> vec3f {
+  let under = (realm.isl[k].m.z >> ${RL_UNDER_SHIFT}u) & 7u;
+  if (under == ${UNDERSIDES.indexOf('crystal')}u) { return vec3f(0.3, 0.6, 1.0) * rlVein(k, q, y) * (0.08 + 0.9 * lampLevel()); }
+  if (under == ${UNDERSIDES.indexOf('basalt')}u) {
+    let crack = rlVein(k, q, y * 0.7) * smoothstep(0.4, 0.7, 0.5 + 0.5 * vnoise(q.x / 30.0, q.y / 30.0 - y / 40.0, rlSeed(k) + 49));
+    return vec3f(1.0, 0.3, 0.05) * crack * 1.6;
+  }
+  return vec3f(0.0);
 }
 
 // Light on a sky surface: the key light (shadowed by the realm, the trees, the hero), the sky's fill,
@@ -551,7 +646,7 @@ fn rlLight(albedo: vec3f, p: vec3f, n: vec3f, rel: vec3f, open: f32) -> vec3f {
   let down = max(-n.y, 0.0);
   let deck = smoothstep(RL_DECK - 50.0, RL_DECK + 300.0, p.y) * max(L.y, 0.0) * 0.1;
   let amb = skyAmb(n, (0.3 + 0.28 * max(n.y, 0.0)) * open) + (bounceCol(vec3f(0.06, 0.08, 0.04)) + keyCol(RL_DECK) * deck) * down;
-  return albedo * (keyCol(p.y) * 0.62 * ramp * sun + amb);
+  return albedo * (keyCol(p.y) * 0.62 * ramp * sun + amb + lanternLight(p));
 }
 
 // The realm is drawn out to REALM_FAR (islands whose nearest edge lies that close): over its last
@@ -564,6 +659,13 @@ fn rlShade(albedo: vec3f, p: vec3f, n: vec3f, rel: vec3f, open: f32) -> vec4f {
   let dist = length(rel);
   let rd = rel / dist;
   return display(surfaceFogOd(rlLight(albedo, p, n, rel, open), dist, p.y, rd, fogOd(dist, rd) + rlReachOd(rel)));
+}
+
+// … with light of its own (glowing veins, lava).
+fn rlShadeE(albedo: vec3f, emit: vec3f, p: vec3f, n: vec3f, rel: vec3f, open: f32) -> vec4f {
+  let dist = length(rel);
+  let rd = rel / dist;
+  return display(surfaceFogOd(rlLight(albedo, p, n, rel, open) + glow(emit), dist, p.y, rd, fogOd(dist, rd) + rlReachOd(rel)));
 }
 
 // A sky surface at rel behind fog too thick to see through: the fog alone (what rlShade would give,
@@ -651,7 +753,7 @@ fn fsRealm(i: RlIn) -> @location(0) vec4f {
   ${clip ? '' : 'if (i.clipD < 0.0) { discard; }'}
   let dist = length(i.rel);
   let rd = i.rel / dist;
-  if (u.camPos.y < W_LEVEL) { return underwater(rd); }
+  if (u.camPos.y < u.camWater) { return underwater(rd); }
   let fogged = rlFogged(i.rel);
   if (fogged.a >= 0.0) { return fogged; }
   let k = i.kb / 2u;
@@ -662,7 +764,7 @@ fn fsRealm(i: RlIn) -> @location(0) vec4f {
     let cn = rlCanopy(k, q, dist);
     return rlShade(mix(rlGround(k, q, n, p.y), cn.rgb, cn.a), p, n, i.rel, 1.0);
   }
-  return rlShade(rlRock(k, q, p.y, i.rho), p, n, i.rel, 0.85);
+  return rlShadeE(rlRock(k, q, p.y, i.rho), rlRockEmit(k, q, p.y), p, n, i.rel, 0.85);
 }
 
 // ---- sky rings: the tops near the camera, as fine as the land ------------------------------------
@@ -756,7 +858,7 @@ fn fsRealmRing(i: RingIn) -> @location(0) vec4f {
   ${clip ? '' : 'if (i.clipD < 0.0) { discard; }'}
   let dist = length(i.rel);
   let rd = i.rel / dist;
-  if (u.camPos.y < W_LEVEL) { return underwater(rd); }
+  if (u.camPos.y < u.camWater) { return underwater(rd); }
   let fogged = rlFogged(i.rel);
   if (fogged.a >= 0.0) { return fogged; }
   let p = u.camPos + i.rel;
@@ -844,7 +946,7 @@ fn vsArch(@builtin(vertex_index) vi: u32, @builtin(instance_index) a: u32) -> Ar
 fn fsArch(i: ArchOut) -> @location(0) vec4f {
   let dist = length(i.rel);
   let rd = i.rel / dist;
-  if (u.camPos.y < W_LEVEL) { return underwater(rd); }
+  if (u.camPos.y < u.camWater) { return underwater(rd); }
   let A = realm.arch[i.a];
   let b = u32(select(A.e.y, A.e.z, i.t > 0.5));
   let p = u.camPos + i.rel;
@@ -904,7 +1006,9 @@ fn rlWaterNormal(g: vec2f, t: f32, strength: f32) -> vec3f {
 
 // Sky water over a bed depthV m down: the land's lake shading (absorption, ripples, the sky's reflection,
 // a glint, foam where it laps), clearer up here and tinted by the biome. Premultiplied.
-fn rlWaterColour(p: vec3f, rel: vec3f, depthV: f32, flow: vec2f, foamExtra: f32, b: u32) -> vec4f {
+fn rlWaterColour(p: vec3f, rel: vec3f, depthV: f32, flow: vec2f, foamExtra: f32, k: u32) -> vec4f {
+  let b = realm.isl[k].m.y;
+  let lagoon = ((realm.isl[k].m.z >> ${RL_TINT_BIT}u) & 1u) == 1u;
   let tS = length(rel);
   let rd = rel / tS;
   let g = p.xz + u.origin - flow * u.time;
@@ -916,12 +1020,15 @@ fn rlWaterColour(p: vec3f, rel: vec3f, depthV: f32, flow: vec2f, foamExtra: f32,
   let path = depthV / max(-rd.y, 0.06);
   var absorb = vec3f(0.3, 0.07, 0.045);
   if (b == BI_MIST) { absorb = vec3f(0.45, 0.12, 0.09); }
+  // A tended lagoon (the Eyries): clear turquoise over a pale bed.
+  if (lagoon) { absorb = vec3f(0.42, 0.06, 0.07); }
   let T = exp(-absorb * path);
   let Tl = dot(T, vec3f(0.2126, 0.7152, 0.0722));
   let kc = keyCol(p.y);
   let up = vec3f(0.0, 1.0, 0.0);
   var bodyTint = vec3f(0.01, 0.075, 0.12);
   if (b == BI_MIST) { bodyTint = vec3f(0.006, 0.05, 0.05); }
+  if (lagoon) { bodyTint = vec3f(0.01, 0.15, 0.15); }
   let body = bodyTint * (kc * 0.35 * (0.4 + 0.6 * sh) + skyAmb(up, 0.8));
   let refl = reflect(rd, n);
   let F = 0.02 + 0.98 * pow(1.0 - max(dot(-rd, n), 0.0), 5.0);
@@ -948,7 +1055,7 @@ fn rlWaterColour(p: vec3f, rel: vec3f, depthV: f32, flow: vec2f, foamExtra: f32,
 fn fsLake(i: LakeOut) -> @location(0) vec4f {
   let dist = length(i.rel);
   let rd = i.rel / dist;
-  if (u.camPos.y < W_LEVEL) { return underwater(rd); }
+  if (u.camPos.y < u.camWater) { return underwater(rd); }
   let k = i.k;
   let p = u.camPos + i.rel;
   let b = realm.isl[k].m.y;
@@ -963,7 +1070,7 @@ fn fsLake(i: LakeOut) -> @location(0) vec4f {
     ice = mix(ice * (1.0 - 0.35 * crack), vec3f(0.78, 0.82, 0.88), drift);
     return rlShade(ice, p, vec3f(0.0, 1.0, 0.0), i.rel, 1.0);
   }
-  return rlWaterColour(p, i.rel, depthV, vec2f(0.0), 0.0, b);
+  return rlWaterColour(p, i.rel, depthV, vec2f(0.0), 0.0, k);
 }
 
 // ---- streams -----------------------------------------------------------------------------------------
@@ -1019,7 +1126,7 @@ fn vsStream(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) ->
 fn fsStream(i: StreamOut) -> @location(0) vec4f {
   let dist = length(i.rel);
   let rd = i.rel / dist;
-  if (u.camPos.y < W_LEVEL) { return underwater(rd); }
+  if (u.camPos.y < u.camWater) { return underwater(rd); }
   let p = u.camPos + i.rel;
   let speed = 1.6 + 3.0 * i.rapid;
   // Streaks of foam carried down the stream, more of them in the rapids.
@@ -1027,7 +1134,7 @@ fn fsStream(i: StreamOut) -> @location(0) vec4f {
   let streak = smoothstep(0.55, 0.85, 0.5 + 0.5 * vnoise(i.uv.x * 2.5, along / 3.5, 4301 + i32(i.k)));
   let foam = clamp(i.rapid * (0.35 + 0.65 * streak) + 0.25 * streak * (1.0 - smoothstep(0.5, 1.0, abs(i.uv.x))), 0.0, 1.0);
   let depthV = 0.45 * (1.0 - i.uv.x * i.uv.x);
-  let c = rlWaterColour(p, i.rel, depthV, i.flow * speed, foam, realm.isl[i.k].m.y);
+  let c = rlWaterColour(p, i.rel, depthV, i.flow * speed, foam, i.k);
   // the ribbon's edges tuck under the banks
   let edge = 1.0 - smoothstep(0.85, 1.0, abs(i.uv.x));
   return c * edge;

@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useEffectEvent, useRef, useSyncExternalStore } from 'react';
 import Link from 'next/link';
 import dynamic from 'next/dynamic';
 import {
@@ -29,6 +29,9 @@ import { useSeedState } from '@/lib/engine/useSeedState';
 import type { SkyMode } from '@/lib/gpu/engineGpu';
 import type { SpawnAt } from '@/lib/engine/engineCore';
 import { clockText, dayPhase } from '@/lib/sky/clock';
+import { NetSession, useNetView } from '@/lib/net/session';
+import { CHARACTERS } from '@/lib/hero/characters';
+import { Lobby, PlayersPanel } from './Multiplayer';
 import {
   DEFAULT_SEED,
   CAMERA,
@@ -68,6 +71,8 @@ const HudOverlay = React.memo(function HudOverlay({
           {stats.mode} {stats.mode === 'walk' && (stats.grounded ? '(ground)' : '(air)')}
           {stats.mode === 'hero' && stats.action && `· ${stats.action}`}
         </span>
+        <span className="text-stone-400">Land:</span>
+        <span className="text-emerald-300 text-right">{stats.land}</span>
         <span className="text-stone-400">Pos (X,Y,Z):</span>
         <span className="text-stone-200 text-right">
           {stats.x.toFixed(1)}, {stats.y.toFixed(1)}, {stats.z.toFixed(1)}
@@ -159,6 +164,24 @@ function urlHour(): number {
   return Number.isFinite(hour) ? ((hour % 24) + 24) % 24 : 15.5;
 }
 
+// The name and hero last played here.
+function savedName(): string {
+  try {
+    return typeof window === 'undefined' ? '' : localStorage.getItem('hyrule.name') ?? '';
+  } catch {
+    return '';
+  }
+}
+function savedCharacter(): number {
+  try {
+    const c = typeof window === 'undefined' ? 0 : Number(localStorage.getItem('hyrule.character') ?? 0);
+    return Number.isInteger(c) && c >= 0 && c < CHARACTERS.length ? c : 0;
+  } catch {
+    return 0;
+  }
+}
+const noSubscribe = () => () => {};
+
 const MODE_LABEL: Record<CamMode, string> = { hero: 'HERO', walk: 'WALK', fly: 'FLY' };
 
 function ControlsBanner({ mode, isPointerLocked, timeKey }: { mode: CamMode | null; isPointerLocked: boolean; timeKey: boolean }) {
@@ -185,7 +208,7 @@ function ControlsBanner({ mode, isPointerLocked, timeKey }: { mode: CamMode | nu
 }
 
 export default function GamePage() {
-  const { seed, seedText, onSeedChange, randomizeSeed } = useSeedState(DEFAULT_SEED);
+  const { seed, seedText, onSeedChange, randomizeSeed, setSeed, setSeedText } = useSeedState(DEFAULT_SEED);
   const [preset, setPreset] = useState<PresetId>('med');
   const [showSettings, setShowSettings] = useState(false);
   const [showHud, setShowHud] = useState(true);
@@ -201,7 +224,23 @@ export default function GamePage() {
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
-  const { statsStore, error, respawn, toggleMode, toggleView, setHour, setTimePaused, setDayMinutes } = useTerrainEngine({
+  // Multiplayer: the lobby first (a name and one of the five heroes), then the world, shared with
+  // whoever else is on this server (server.mjs). ?solo=1 goes straight in, alone (benchmarks).
+  const [net] = useState(() => new NetSession());
+  const netView = useNetView(net);
+  const mounted = useSyncExternalStore(noSubscribe, () => true, () => false);
+  const [solo] = useState(() => urlParam('solo') === '1');
+  const [entered, setEntered] = useState(false);
+  // (refused on entering, or on entering again after a lost connection: back to the lobby)
+  const phase = !mounted ? 'init' : solo || (entered && !netView.denied) ? 'play' : 'lobby';
+  const [picked, setPicked] = useState(savedCharacter);
+  const [playerName, setPlayerName] = useState(savedName);
+  // The hero picked, unless someone else in the world plays it by now: then the first one free.
+  const isFree = (c: number) => !netView.players.some((p) => p.char === c && p.id !== netView.selfId);
+  const character = isFree(picked) ? picked : (CHARACTERS.find((c) => isFree(c.id))?.id ?? picked);
+  const netSeed = useRef<number | null>(null); // the last seed the world set (not to be sent back)
+
+  const { statsStore, error, respawn, toggleMode, toggleView, setHour, setTimePaused, setDayMinutes, clock } = useTerrainEngine({
     canvasRef,
     seed,
     preset,
@@ -215,11 +254,55 @@ export default function GamePage() {
     sky,
     clockStart,
     spawnAt,
+    inputBlocked: phase !== 'play',
+    character,
+    net,
     onPointerLockChange: setIsPointerLocked,
     onToggleHud: () => setShowHud((v) => !v),
   });
   const mode = useEngineMode(statsStore);
   const api = useEngineApi(statsStore);
+
+  // The session (none with ?solo=1): who is in the world, and the world's seed.
+  useEffect(() => {
+    if (solo) return;
+    const unlisten = net.listenSeed((s) => {
+      netSeed.current = s;
+      setSeed(s);
+      setSeedText(String(s));
+    });
+    net.start();
+    return () => {
+      unlisten();
+      net.stop();
+    };
+  }, [net, solo, setSeed, setSeedText]);
+
+  const enterWorld = () => {
+    const name = playerName.trim() || `${CHARACTERS[character].name} hero`;
+    try {
+      localStorage.setItem('hyrule.name', playerName.trim());
+      localStorage.setItem('hyrule.character', String(character));
+    } catch { /* storage blocked */ }
+    setPicked(character);
+    net.join(name, character, seed, clock());
+    setEntered(true);
+    canvasRef.current?.focus();
+  };
+
+  // In the world: everyone starts at the spawn, side by side in character order — on entering, and
+  // whenever the world's seed changes (whoever changed it: everyone moves to the new world together).
+  const onWorldChange = useEffectEvent(() => respawn());
+  useEffect(() => {
+    if (netView.inWorld) onWorldChange();
+  }, [netView.inWorld, seed]);
+  // A seed changed here goes to everyone.
+  useEffect(() => {
+    if (netView.inWorld && seed !== netSeed.current) {
+      netSeed.current = seed;
+      net.sendSeed(seed);
+    }
+  }, [net, netView.inWorld, seed]);
 
   const toggleFullscreen = () => {
     if (!document.fullscreenElement) {
@@ -266,6 +349,7 @@ export default function GamePage() {
           </div>
 
           <HudOverlay statsStore={statsStore} preset={preset} showHud={showHud} />
+          {phase === 'play' && <PlayersPanel view={netView} api={api} />}
         </div>
 
         <StaminaWheel statsStore={statsStore} />
@@ -410,8 +494,20 @@ export default function GamePage() {
           <ControlsBanner mode={mode} isPointerLocked={isPointerLocked} timeKey={api === 'webgpu' && sky === 'cycle'} />
         </div>
 
+        {phase === 'lobby' && (
+          <Lobby
+            view={netView}
+            name={playerName}
+            setName={setPlayerName}
+            character={character}
+            setCharacter={setPicked}
+            onEnter={enterWorld}
+            api={api}
+          />
+        )}
+
         {/* Pointer lock hint on canvas initial click */}
-        {!isPointerLocked && (
+        {!isPointerLocked && phase === 'play' && (
           <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-10 pointer-events-none opacity-80 transition-opacity">
             <div className="px-5 py-2.5 rounded-xl border border-stone-700 bg-stone-950/90 backdrop-blur-md text-stone-300 font-mono text-xs flex items-center gap-2.5 shadow-2xl animate-pulse">
               <Move className="size-4 text-emerald-400" />

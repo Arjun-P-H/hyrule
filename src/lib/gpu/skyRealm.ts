@@ -29,13 +29,14 @@
 import { LIGHT } from '../constants';
 import type { Archipelago } from '../skyworld/archipelago';
 import { SKY_BIOMES } from '../skyworld/biomes';
-import { CHANNEL_REACH, maxDrop, outlineMax, type SkyIsland } from '../skyworld/island';
+import { CHANNEL_REACH, maxDrop, outlineMax, UNDERSIDES, type SkyIsland } from '../skyworld/island';
 import { buildCell, realmNear, type PendingCell } from '../skyworld/realm';
+import { DISTRICT_N, districtVersion } from '../skyworld/eyrie/district';
 import type { FrameParams, RealmSpec } from './frame';
 import { ringIndices } from './rings';
 import {
   archIndices, LAKE_RINGS, LAKE_SEGS, POLAR_FAR, POLAR_LODS, polarIndices, REALM_FAR, REALM_FRAME_BYTES, REALM_LAYOUT,
-  REALM_MAX, REALM_NEAR, RL_FLAGS, SKY_RINGS, STREAM_SUB,
+  REALM_MAX, REALM_NEAR, RL_FLAGS, RL_LOBES_SHIFT, RL_PALETTE_SHIFT, RL_TINT_BIT, RL_UNDER_SHIFT, SKY_RINGS, STREAM_SUB,
 } from './skyRealm.wgsl';
 import { FALL_SEGMENTS, MIST_PER_FALL } from './waterfalls.wgsl';
 import { stamped } from './profile';
@@ -92,6 +93,9 @@ fn shadowMask(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_id) li
   }
 }
 `;
+
+/** District maps (eyrie/district.ts) kept on the GPU: the settled islands nearest the camera. */
+const DISTRICT_LAYERS = 24;
 
 /** Lakes and streams are drawn within this distance (m). */
 const WATER_RANGE = 6000;
@@ -151,6 +155,15 @@ export class SkyRealm {
   private shadowSampler: GPUSampler;
   // per map, its caster mask (written by shadowMask after the map is drawn, read as a uniform)
   private masks: GPUBuffer[];
+  // the district maps' texture array, their sampler, which island holds which layer, the free layers
+  private districtTex: GPUTexture;
+  private districtView: GPUTextureView;
+  private districtSamp: GPUSampler;
+  private layers = new Map<SkyIsland, number>();
+  private freeLayers: number[] = Array.from({ length: DISTRICT_LAYERS }, (_, i) => DISTRICT_LAYERS - 1 - i);
+  private seenDistricts = -1;
+  /** The district maps' version last put on the GPU (the grass and trees refresh when it changes). */
+  get districts(): number { return this.seenDistricts; }
   private maskPipe!: GPUComputePipeline;
   private maskBinds: GPUBindGroup[] = [];
   /** The map drawn this frame (−1: none), and the one sampled. */
@@ -238,6 +251,9 @@ export class SkyRealm {
     d.queue.submit([enc.finish()]);
     this.shadowSampler = d.createSampler({ compare: 'less-equal', magFilter: 'linear', minFilter: 'linear', addressModeU: 'clamp-to-edge', addressModeV: 'clamp-to-edge' });
     this.masks = [0, 1].map(() => d.createBuffer({ size: (MASK_CELLS * MASK_CELLS) / 8, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST }));
+    this.districtTex = d.createTexture({ size: [DISTRICT_N, DISTRICT_N, DISTRICT_LAYERS], format: 'rg8unorm', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+    this.districtView = this.districtTex.createView({ dimension: '2d-array' });
+    this.districtSamp = d.createSampler({ magFilter: 'linear', minFilter: 'linear', addressModeU: 'clamp-to-edge', addressModeV: 'clamp-to-edge' });
   }
 
   /** Entries the realm adds to group 0: its buffer, its frame uniform, the shadow map and its comparison sampler. */
@@ -249,6 +265,8 @@ export class SkyRealm {
       { binding: 26, visibility: VFC, texture: { sampleType: 'depth' } },
       { binding: 27, visibility: VFC, sampler: { type: 'comparison' } },
       { binding: 29, visibility: VFC, buffer: { type: 'uniform' } },
+      { binding: 33, visibility: VFC, texture: { sampleType: 'float', viewDimension: '2d-array' } },
+      { binding: 34, visibility: VFC, sampler: { type: 'filtering' } },
     ];
   }
 
@@ -260,6 +278,8 @@ export class SkyRealm {
       { binding: 26, resource: this.shadowViews[which] },
       { binding: 27, resource: this.shadowSampler },
       { binding: 29, resource: { buffer: this.masks[which] } },
+      { binding: 33, resource: this.districtView },
+      { binding: 34, resource: this.districtSamp },
     ];
   }
 
@@ -349,10 +369,33 @@ export class SkyRealm {
     });
   }
 
+  /**
+   * The district maps of the settled islands nearest (x, z) onto the GPU, a layer each (as many as
+   * there are layers): layers of islands no longer among them are freed first.
+   */
+  private placeDistricts(x: number, z: number, seed: number): void {
+    const want: SkyIsland[] = [];
+    for (const a of realmNear(x, z, REALM_NEAR, seed).archipelagos) {
+      for (const isl of a.islands) if (isl.district && want.length < DISTRICT_LAYERS) want.push(isl);
+    }
+    const keep = new Set(want);
+    for (const [isl, layer] of this.layers) {
+      if (!keep.has(isl)) { this.layers.delete(isl); this.freeLayers.push(layer); }
+    }
+    for (const isl of want) {
+      if (this.layers.has(isl) || !this.freeLayers.length) continue;
+      const layer = this.freeLayers.pop()!;
+      this.layers.set(isl, layer);
+      this.device.queue.writeTexture({ texture: this.districtTex, origin: [0, 0, layer] }, isl.district!.data, { bytesPerRow: 2 * DISTRICT_N, rowsPerImage: DISTRICT_N }, [DISTRICT_N, DISTRICT_N, 1]);
+    }
+    this.seenDistricts = districtVersion;
+  }
+
   /** Re-pick and pack the realm round (x, z) into the storage buffer, chunk-local to (ox, oz). */
   private upload(x: number, z: number, seed: number, ox: number, oz: number): void {
     this.pending.length = 0;
-    const packed = packRealm(x, z, seed, ox, oz, this.data, this.pending, this.spec.far !== false);
+    this.placeDistricts(x, z, seed);
+    const packed = packRealm(x, z, seed, ox, oz, this.data, this.pending, this.spec.far !== false, (isl) => this.layers.get(isl) ?? -1);
     this.islands = packed.islands;
     this.arches = packed.arches;
     this.falls = packed.falls;
@@ -374,10 +417,17 @@ export class SkyRealm {
       // Far cells that came into range: built a few a frame, nearest first; packed once all are.
       const t0 = performance.now();
       let built = 0;
-      while (built < this.pending.length && (built === 0 || performance.now() - t0 < BUILD_BUDGET_MS)) buildCell(this.pending[built++], fp.seed);
+      while (built < this.pending.length) {
+        const left = BUILD_BUDGET_MS - (performance.now() - t0);
+        if (left <= 0 && built > 0) break;
+        if (!buildCell(this.pending[built], fp.seed, Math.max(left, 0.25))) break;
+        built++;
+      }
       this.pending.splice(0, built);
       if (!this.pending.length) this.upload(at[0], at[1], fp.seed, ox, oz);
     }
+    // An Eyrie near the camera finished building: its islands' maps go up (and the realm with their layers).
+    if (districtVersion !== this.seenDistricts) this.upload(at[0], at[1], fp.seed, ox, oz);
     const F = this.uf, I = this.ui, U = this.uu;
     // ---- the view (as the camera sees it), for culling ----
     const cy = Math.cos(fp.yaw), sy = Math.sin(fp.yaw), cp = Math.cos(fp.pitch), sp = Math.sin(fp.pitch);
@@ -654,6 +704,7 @@ export class SkyRealm {
     for (const b of [this.buf, this.ubuf, ...this.polarIdx, this.farIdx, this.ringFull, ...this.ringHoles, this.archIdx, this.lakeIdx, this.ringCache, ...this.ringJobs]) b.destroy();
     for (const t of this.shadows) t.destroy();
     for (const b of this.masks) b.destroy();
+    this.districtTex.destroy();
   }
 }
 
@@ -676,6 +727,8 @@ type UploadedFall = { x: number; y: number; z: number; reach: number; w: number 
  */
 export function packRealm(
   x: number, z: number, seed: number, ox: number, oz: number, data = new ArrayBuffer(REALM_LAYOUT.bytes), pending?: PendingCell[], withFar = true,
+  /** Each island's district map layer on the GPU (−1: none). */
+  layerOf: (isl: SkyIsland) => number = () => -1,
 ): { data: ArrayBuffer; islands: Uploaded[]; arches: UploadedArch[]; falls: UploadedFall[] } {
   const { archipelagos, isles } = realmNear(x, z, REALM_NEAR, seed);
   type Cluster = { islands: SkyIsland[]; arch: Archipelago | null; cx: number; cz: number; reach: number; d: number };
@@ -693,13 +746,16 @@ export function packRealm(
   u.fill(0);
   let nc = 0, ni = 0, np = 0, na = 0, nf = 0;
   const islands: Uploaded[] = [], arches: UploadedArch[] = [], falls: UploadedFall[] = [];
-  const put = (isl: SkyIsland, streams: boolean) => {
+  const put = (isl: SkyIsland, streams: boolean, palette = 0) => {
     const k = ni++;
     const o = (L.isl + k * L.islStride) / 4;
     f[o] = isl.cx - ox; f[o + 1] = isl.cz - oz; f[o + 2] = isl.R; f[o + 3] = isl.y;
     f.set(isl.a, o + 4);
     f[o + 8] = isl.amp; f[o + 9] = isl.hill; f[o + 10] = isl.wl; f[o + 11] = isl.crag;
-    f[o + 12] = isl.peak; f[o + 13] = isl.cliff; f[o + 14] = isl.depth; f[o + 15] = 0;
+    f[o + 12] = isl.peak; f[o + 13] = isl.cliff; f[o + 14] = isl.depth;
+    const layer = isl.district ? layerOf(isl) : -1;
+    f[o + 15] = layer;
+    f[o + 31] = layer >= 0 ? 1 / (2 * isl.district!.half) : 0;
     i32[o + 16] = isl.seed;
     u[o + 17] = SKY_BIOMES.indexOf(isl.biome);
     let flags = isl.kind === 'debris' ? RL_FLAGS.debris : 0;
@@ -737,17 +793,28 @@ export function packRealm(
       falls.push({ x: F.x, y: F.y, z: F.z, reach: F.reach, w: F.width });
       nf++;
     }
+    // The Eyries' shaping, its underside, its water's tint, its extra spikes.
+    f[o + 36] = isl.terrace; f[o + 37] = isl.bowl; f[o + 38] = isl.tiltX; f[o + 39] = isl.tiltZ;
+    const nl = Math.min(isl.lobes.length, 4);
+    for (let j = 0; j < nl; j++) {
+      const L = isl.lobes[j];
+      f[o + 40 + 4 * j] = L.x; f[o + 41 + 4 * j] = L.z; f[o + 42 + 4 * j] = L.r; f[o + 43 + 4 * j] = L.d;
+    }
+    flags |= (UNDERSIDES.indexOf(isl.under) << RL_UNDER_SHIFT) | ((isl.tint & 1) << RL_TINT_BIT) | (nl << RL_LOBES_SHIFT) | ((palette & 31) << RL_PALETTE_SHIFT);
     u[o + 18] = flags;
-    islands.push({ isl, x: isl.cx, z: isl.cz, reach: isl.R * outlineMax(isl), top: isl.y + 3 * isl.hill + 5, tip: isl.y - maxDrop(isl), stream: withStream });
+    const tilt = (Math.abs(isl.tiltX) + Math.abs(isl.tiltZ)) * isl.R * 1.2;
+    islands.push({ isl, x: isl.cx, z: isl.cz, reach: isl.R * outlineMax(isl), top: isl.y + 3 * isl.hill + 5 + tilt, tip: isl.y - maxDrop(isl), stream: withStream });
   };
   for (const c of clusters) {
     if (nc >= REALM_MAX.clusters) break;
     const list = c.islands.filter((isl) => isl.kind !== 'debris' || c.d < DEBRIS_RANGE);
-    const archs = c.arch ? c.arch.arches.length : 0;
+    // (the realm draws natural arches; built bridges are the Eyries' structures)
+    const natural = c.arch ? c.arch.arches.filter((A) => A.kind === 'arch') : [];
+    const archs = natural.length;
     if (ni + list.length > REALM_MAX.islands || na + archs > REALM_MAX.arches) continue;
     const firstIsl = ni, firstArch = na;
-    for (const isl of list) put(isl, true);
-    for (const A of c.arch ? c.arch.arches : []) {
+    for (const isl of list) put(isl, true, c.arch ? c.arch.palette : 0);
+    for (const A of natural) {
       const k = na++;
       const o = (L.arch + k * L.archStride) / 4;
       f[o] = A.ax - ox; f[o + 1] = A.az - oz; f[o + 2] = A.ay; f[o + 3] = A.len;

@@ -4,6 +4,7 @@ import { useEffect, useRef, useState, type RefObject } from 'react';
 import { createStatsStore, type CamMode } from './statsStore';
 import type { ClockStart, EngineHandle, SpawnAt } from './engineCore';
 import type { SkyMode } from '@/lib/gpu/engineGpu';
+import type { NetLink } from '@/lib/net/link';
 import { DEFAULT_SEED, CAMERA, type PresetId } from '@/lib/constants';
 
 export type { PresetId };
@@ -60,6 +61,12 @@ export type TerrainEngineOptions = {
   clockStart?: ClockStart;
   /** Where the hero starts: on the land (default) or up on the nearest sky archipelago (read at start). */
   spawnAt?: SpawnAt;
+  /** The keys do nothing while true (an overlay such as the multiplayer lobby is open). */
+  inputBlocked?: boolean;
+  /** The hero's character (src/lib/hero/characters.ts): its dress. */
+  character?: number;
+  /** Multiplayer session (src/lib/net/session.ts), when there is one. */
+  net?: NetLink | null;
   onPointerLockChange?: (locked: boolean) => void;
 };
 
@@ -83,6 +90,9 @@ export function useTerrainEngine({
   sky = 'cycle',
   clockStart,
   spawnAt,
+  inputBlocked = false,
+  character = 0,
+  net = null,
   onPointerLockChange,
   onToggleHud,
 }: TerrainEngineOptions & { onToggleHud?: () => void }) {
@@ -100,6 +110,9 @@ export function useTerrainEngine({
   const skyRef = useRef(sky);
   const clockStartRef = useRef(clockStart);
   const spawnAtRef = useRef(spawnAt);
+  const inputBlockedRef = useRef(inputBlocked);
+  const characterRef = useRef(character);
+  const netRef = useRef(net);
   const handleRef = useRef<EngineHandle | null>(null);
 
   seedRef.current = seed;
@@ -111,6 +124,9 @@ export function useTerrainEngine({
   hudToggleRef.current = onToggleHud;
   onPointerLockChangeRef.current = onPointerLockChange;
   skyRef.current = sky;
+  inputBlockedRef.current = inputBlocked;
+  characterRef.current = character;
+  netRef.current = net;
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -138,6 +154,9 @@ export function useTerrainEngine({
           onToggleHud: hudToggleRef,
           onPointerLockChange: onPointerLockChangeRef,
           sky: skyRef,
+          inputBlocked: inputBlockedRef,
+          character: characterRef,
+          net: netRef,
         }, enablePointerLock, initialMode, backend, clockStartRef.current, spawnAtRef.current);
       })
       .catch((e: unknown) => {
@@ -159,5 +178,6 @@ export function useTerrainEngine({
     setHour: (hour: number) => handleRef.current?.setHour(hour),
     setTimePaused: (paused: boolean) => handleRef.current?.setTimePaused(paused),
     setDayMinutes: (minutes: number) => handleRef.current?.setDayMinutes(minutes),
+    clock: () => handleRef.current?.clock() ?? null,
   };
 }

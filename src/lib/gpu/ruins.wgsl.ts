@@ -81,7 +81,7 @@ fn ruinHash(c: vec2f, salt: u32) -> f32 {
 fn fsRuin(i: ROut) -> @location(0) vec4f {
   let dist = length(i.rel);
   let rd = i.rel / dist;
-  if (u.camPos.y < W_LEVEL) { return underwater(rd); }
+  if (u.camPos.y < u.camWater) { return underwater(rd); }
   let n = normalize(i.n);
   let p = u.camPos + i.rel;
   let g = p.xz + u.origin;

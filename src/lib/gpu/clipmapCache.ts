@@ -2,7 +2,8 @@
  * The GPU side of the clipmap: the height texture array, the generator
  * pipeline and the sampling uniforms (see clipmap.ts for the scheduling).
  * ---------------------------------------------------------------------------
- * One r32float layer per level; lattice point (i, j) of level l is stored at
+ * One rgba32float layer per level (the ground's height, and the water's surface
+ * there: the sea, a lake or a river's pool); lattice point (i, j) of level l is stored at
  * texel (i mod n, j mod n) of layer l. The renderers bind `view`, `sampler`
  * and `clipBuf` (heightAt() in terrain.wgsl.ts) and call setCamera() /
  * encodeGenerate() once per frame. With `sun`, a second layer array holds the
@@ -11,16 +12,18 @@
  * visibility of the fixed sun (sunShader); for the day–night sky its horizons
  * along the sun's path (horizonShader), which serve a sun or moon anywhere on
  * the path without being marched again; in its last two channels, the
- * ground's gradient (the shading's normal). The same pass fills a third
- * array, `matView`: the noise fields under the ground's colour (moisture,
- * vegetation clumps, the grass's patches), which the shading would otherwise
- * evaluate per pixel every frame; and a fourth, `canopyView` (rgba8): the far
- * forest the ground is painted with beyond the trees' reach (forest.wgsl.ts
- * canopyAt).
+ * ground's gradient (the shading's normal). The same pass fills `canopyView`
+ * (rgba8): the far forest the ground is painted with beyond the trees' reach
+ * (forest.wgsl.ts canopyAt). A third pass bakes the ground's biome look
+ * (terrain.wgsl.ts biomeShader) into `matView` (rgba16f: the snow line,
+ * wetness or lava, the meadow patches, flowers) and `bioViews` (rgba8: soil and
+ * grass cover; grass and blade height; rock and strata), which the shading
+ * would otherwise blend from the biome regions per pixel every frame.
  */
 
+import { HydroBuffer, hydroBufferFor } from './hydroBuffer';
 import { ClipmapScheduler, levelSpacing, rectTexels, usableRadius, wrap, type ClipmapSpec, type UpdateRect } from './clipmap';
-import { GEN_BYTES, clipBytes, genShader, horizonShader, sunShader } from './terrain.wgsl';
+import { GEN_BYTES, biomeShader, clipBytes, genShader, horizonShader, sunShader } from './terrain.wgsl';
 import { stamped } from './profile';
 
 export type PassTimestamps = { querySet: GPUQuerySet; begin: number; end: number };
@@ -57,8 +60,13 @@ export class ClipmapCache {
   matView: GPUTextureView | null = null;
   canopyTexture: GPUTexture | null = null;
   canopyView: GPUTextureView | null = null;
+  /** The biome layers: soil + cover, grass + blade height, rock + strata (rgba8). */
+  bioTextures: GPUTexture[] = [];
+  bioViews: GPUTextureView[] = [];
   private sunPipe: GPUComputePipeline | null = null;
   private sunBind: GPUBindGroup | null = null;
+  private bioPipe: GPUComputePipeline | null = null;
+  private bioBind: GPUBindGroup | null = null;
 
   constructor(device: GPUDevice, spec: ClipmapSpec, genDpScale: number, sun: SunLayer | null = null) {
     this.device = device;
@@ -76,7 +84,8 @@ export class ClipmapCache {
     const layout = d.createBindGroupLayout({
       entries: [
         { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform', hasDynamicOffset: true, minBindingSize: GEN_BYTES } },
-        { binding: 1, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'write-only', format: 'r32float', viewDimension: '2d-array' } },
+        { binding: 1, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'write-only', format: 'rgba32float', viewDimension: '2d-array' } },
+        HydroBuffer.layoutEntry(GPUShaderStage.COMPUTE),
       ],
     });
     const layerFormat: GPUTextureFormat = 'rgba16float';
@@ -87,11 +96,20 @@ export class ClipmapCache {
         { binding: 2, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'float', viewDimension: '2d-array' } },
         { binding: 3, visibility: GPUShaderStage.COMPUTE, sampler: { type: 'filtering' } },
         { binding: 4, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'write-only', format: layerFormat, viewDimension: '2d-array' } },
-        { binding: 5, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'write-only', format: layerFormat, viewDimension: '2d-array' } },
         { binding: 6, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'write-only', format: 'rgba8unorm', viewDimension: '2d-array' } },
       ],
     }) : null;
-    const [genPipe, sunPipe] = await Promise.all([
+    const bioLayout = this.sunOpts ? d.createBindGroupLayout({
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform', hasDynamicOffset: true, minBindingSize: GEN_BYTES } },
+        { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+        { binding: 2, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'float', viewDimension: '2d-array' } },
+        { binding: 3, visibility: GPUShaderStage.COMPUTE, sampler: { type: 'filtering' } },
+        { binding: 4, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'write-only', format: layerFormat, viewDimension: '2d-array' } },
+        ...[5, 6, 7].map((binding) => ({ binding, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'write-only' as const, format: 'rgba8unorm' as const, viewDimension: '2d-array' as const } })),
+      ],
+    }) : null;
+    const [genPipe, sunPipe, bioPipe] = await Promise.all([
       d.createComputePipelineAsync({
         layout: d.createPipelineLayout({ bindGroupLayouts: [layout] }),
         compute: { module: d.createShaderModule({ code: genShader(spec.n) }), entryPoint: 'main' },
@@ -103,13 +121,18 @@ export class ClipmapCache {
           entryPoint: 'main',
         },
       }) : Promise.resolve(null),
+      bioLayout && this.sunOpts ? d.createComputePipelineAsync({
+        layout: d.createPipelineLayout({ bindGroupLayouts: [bioLayout] }),
+        compute: { module: d.createShaderModule({ code: biomeShader({ n: spec.n, levels: spec.levels, blend: this.sunOpts.blend }) }), entryPoint: 'main' },
+      }) : Promise.resolve(null),
     ]);
     this.genPipe = genPipe;
     this.sunPipe = sunPipe;
+    this.bioPipe = bioPipe;
     this.compileMs = performance.now() - t0;
     this.texture = d.createTexture({
       size: [spec.n, spec.n, spec.levels],
-      format: 'r32float',
+      format: 'rgba32float',
       usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING,
     });
     this.view = this.texture.createView({ dimension: '2d-array' });
@@ -121,6 +144,7 @@ export class ClipmapCache {
       entries: [
         { binding: 0, resource: { buffer: this.genBuf, size: GEN_BYTES } },
         { binding: 1, resource: this.view },
+        hydroBufferFor(d).entry(),
       ],
     });
     if (sunLayout) {
@@ -143,8 +167,20 @@ export class ClipmapCache {
           { binding: 2, resource: this.view },
           { binding: 3, resource: this.sampler },
           { binding: 4, resource: this.sunView },
-          { binding: 5, resource: this.matView },
           { binding: 6, resource: this.canopyView },
+        ],
+      });
+      this.bioTextures = [0, 1, 2].map(() => layer('rgba8unorm'));
+      this.bioViews = this.bioTextures.map((t) => t.createView({ dimension: '2d-array' }));
+      this.bioBind = d.createBindGroup({
+        layout: bioLayout!,
+        entries: [
+          { binding: 0, resource: { buffer: this.genBuf, size: GEN_BYTES } },
+          { binding: 1, resource: { buffer: this.clipBuf } },
+          { binding: 2, resource: this.view },
+          { binding: 3, resource: this.sampler },
+          { binding: 4, resource: this.matView },
+          ...this.bioViews.map((v, i) => ({ binding: 5 + i, resource: v })),
         ],
       });
     }
@@ -170,6 +206,8 @@ export class ClipmapCache {
       this.pending.length = 0;
       this.seed = seed;
     }
+    // the rivers' node table round the camera (shared by the forest's placement)
+    hydroBufferFor(this.device).update(x, z, seed);
     this.origin = [ox, oz];
     this.pending.push(...this.scheduler.update(x, z));
     const spec = this.spec;
@@ -226,6 +264,16 @@ export class ClipmapCache {
       });
       sp.end();
     }
+    // The biome layers at the same lattice points.
+    if (this.bioPipe && this.bioBind) {
+      const bp = enc.beginComputePass(stamped('gen.biome'));
+      bp.setPipeline(this.bioPipe);
+      rects.forEach((r, k) => {
+        bp.setBindGroup(0, this.bioBind!, [k * GEN_SLOT]);
+        bp.dispatchWorkgroups(Math.ceil(r.w / 8), Math.ceil(r.h / 8));
+      });
+      bp.end();
+    }
     return rectTexels(rects);
   }
 
@@ -264,6 +312,7 @@ export class ClipmapCache {
     this.sunTexture?.destroy();
     this.matTexture?.destroy();
     this.canopyTexture?.destroy();
+    for (const t of this.bioTextures) t.destroy();
     this.clipBuf?.destroy();
     this.genBuf?.destroy();
   }

@@ -87,7 +87,6 @@ const FileBrowser = dynamic(() => import('@/components/FileBrowser'), {
   ),
 });
 import {
-  BIOME_ANCHORS,
   CHUNK_SIZE,
   DEFAULT_SEED,
   PARAM_TABLE,
@@ -99,8 +98,9 @@ import {
 import { useSeedState } from '@/lib/engine/useSeedState';
 import {
   THIN_SCROLL,
-  oklabToHex,
+  linearToHex,
 } from '@/lib/utils';
+import { AIR, BIOMES, BIOME_LABEL, LANDFORM, LOOK } from '@/lib/biomes';
 
 /* -- small local helpers --------------------------------------------------- */
 
@@ -710,11 +710,11 @@ export default function Home() {
             <CardHeader className="gap-1 px-0">
               <CardTitle className="flex items-center gap-2 text-sm font-medium tracking-tight text-stone-200">
                 <TreePine className="size-4 text-emerald-400" />
-                Biome RBF anchors — OKLab space
+                The lands — fifteen biome regions
               </CardTitle>
               <CardDescription className="font-mono text-[11px] text-stone-500">
-                wₖ = exp(−Σ((xⱼ−cⱼₖ)/σⱼₖ)²) over (T, M, E, slope) — centres
-                below; colours blend in OKLab
+                regions over the geography (src/lib/hydro.ts: ranges, tablelands, basins, rivers) by climate
+                (src/lib/biomes.ts); each shapes, colours, plants and hazes its land — soil · grass · rock below
               </CardDescription>
             </CardHeader>
             <CardContent className="min-w-0 px-0">
@@ -723,45 +723,34 @@ export default function Home() {
                   <thead>
                     <tr className="border-b border-stone-800 text-left text-stone-500">
                       <th className="px-3 py-2 font-normal">biome</th>
-                      <th className="px-3 py-2 text-right font-normal">L</th>
-                      <th className="px-3 py-2 text-right font-normal">a</th>
-                      <th className="px-3 py-2 text-right font-normal">b</th>
-                      <th className="px-3 py-2 text-right font-normal">T (°C)</th>
-                      <th className="px-3 py-2 text-right font-normal">M</th>
-                      <th className="px-3 py-2 text-right font-normal">E (m)</th>
-                      <th className="px-3 py-2 text-right font-normal">slope</th>
+                      <th className="px-3 py-2 text-right font-normal">hills (m)</th>
+                      <th className="px-3 py-2 text-right font-normal">ridges (m)</th>
+                      <th className="px-3 py-2 text-right font-normal">gullies</th>
+                      <th className="px-3 py-2 text-right font-normal">cover</th>
+                      <th className="px-3 py-2 text-right font-normal">haze</th>
                     </tr>
                   </thead>
                   <tbody className="text-stone-300">
-                    {BIOME_ANCHORS.map((b) => (
-                      <tr key={b.name} className="border-b border-stone-800/60">
+                    {BIOMES.map((b) => (
+                      <tr key={b} className="border-b border-stone-800/60">
                         <td className="px-3 py-2">
                           <span className="flex items-center gap-2">
-                            <span
-                              aria-hidden
-                              className="inline-block size-3 shrink-0 rounded-sm border border-stone-700"
-                              style={{ backgroundColor: oklabToHex(...b.oklab) }}
-                            />
-                            {b.name}
+                            {[LOOK[b].soil, LOOK[b].grass, LOOK[b].rock].map((c, i) => (
+                              <span
+                                key={i}
+                                aria-hidden
+                                className="inline-block size-3 shrink-0 rounded-sm border border-stone-700"
+                                style={{ backgroundColor: linearToHex(c) }}
+                              />
+                            ))}
+                            {BIOME_LABEL[b]}
                           </span>
                         </td>
-                        <td className="px-3 py-2 text-right text-stone-400">
-                          {b.oklab[0].toFixed(2)}
-                        </td>
-                        <td className="px-3 py-2 text-right text-stone-400">
-                          {b.oklab[1].toFixed(3)}
-                        </td>
-                        <td className="px-3 py-2 text-right text-stone-400">
-                          {b.oklab[2].toFixed(3)}
-                        </td>
-                        <td className="px-3 py-2 text-right text-amber-300">{b.t}</td>
-                        <td className="px-3 py-2 text-right text-amber-300">
-                          {b.m.toFixed(2)}
-                        </td>
-                        <td className="px-3 py-2 text-right text-amber-300">{b.e}</td>
-                        <td className="px-3 py-2 text-right text-amber-300">
-                          {b.slope.toFixed(2)}
-                        </td>
+                        <td className="px-3 py-2 text-right text-amber-300">{LANDFORM[b].hills}</td>
+                        <td className="px-3 py-2 text-right text-amber-300">{LANDFORM[b].ridge}</td>
+                        <td className="px-3 py-2 text-right text-amber-300">{LANDFORM[b].erosion.toFixed(2)}</td>
+                        <td className="px-3 py-2 text-right text-stone-400">{LOOK[b].cover.toFixed(2)}</td>
+                        <td className="px-3 py-2 text-right text-stone-400">{AIR[b].haze.toFixed(2)}</td>
                       </tr>
                     ))}
                   </tbody>

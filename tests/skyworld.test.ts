@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { FLY_CEILING, HERO, MAX_WORLD_H, PLAYER, SKY_REALM as S, VALLEY } from '../src/lib/constants';
 import { createHeroState, placeHero, updateHero, type HeroInput } from '../src/lib/hero/locomotion';
 import { archGround, archY, type Arch } from '../src/lib/skyworld/arches';
-import { archipelagoInCell, isleInCell, type Archipelago } from '../src/lib/skyworld/archipelago';
+import { archipelagoInCell, BRIDGE_SLOPE, isleInCell, type Archipelago } from '../src/lib/skyworld/archipelago';
 import { SKY_BIOMES, skyClimate, SKY_BIOME_INFO } from '../src/lib/skyworld/biomes';
 import { skyPlantInCell } from '../src/lib/skyworld/flora';
 import { bottomAt, CHANNEL_REACH, insideBy, islandRho, lakeDist, maxDrop, outline, outlineMax, streamNear, topAt, type SkyIsland } from '../src/lib/skyworld/island';
@@ -47,19 +47,21 @@ describe('the sky realm: layout', () => {
     }
   });
 
-  test('every archipelago has a hub with satellites, and some arches between them', () => {
-    expect(ARCHS.every((a) => a.islands.filter((i) => i.kind === 'satellite').length >= 1)).toBe(true);
-    expect(ARCHS.filter((a) => a.arches.length > 0).length).toBeGreaterThan(ARCHS.length * 0.7);
-    const hub = ARCHS.map((a) => a.islands[0].R);
-    expect(Math.min(...hub)).toBeGreaterThanOrEqual(S.hubRadius[0]);
-    expect(Math.max(...hub)).toBeLessThanOrEqual(S.hubRadius[1]);
+  test('every Eyrie has its main island first, others round it, and (but the Fallen) bridges or arches between them', () => {
+    for (const a of ARCHS) {
+      expect(a.islands[0].kind).toBe('hub');
+      expect(a.islands.filter((i) => i.kind !== 'debris').length).toBeGreaterThanOrEqual(3);
+      expect(a.roles.length).toBe(a.islands.length);
+      if (a.cls !== 'fallen') expect(a.arches.length).toBeGreaterThan(0);
+      else expect(a.arches.length).toBe(0);
+    }
   });
 
   test('islands never overlap: open sky between every two outlines', () => {
     for (const a of ARCHS) {
       for (let i = 0; i < a.islands.length; i++) for (let j = i + 1; j < a.islands.length; j++) {
         const p = a.islands[i], q = a.islands[j];
-        const gap = p.kind === 'debris' || q.kind === 'debris' ? 25 : 120;
+        const gap = p.kind === 'debris' || q.kind === 'debris' ? 25 : 30;
         expect(Math.hypot(p.cx - q.cx, p.cz - q.cz)).toBeGreaterThan(p.R * outlineMax(p) + q.R * outlineMax(q) + gap - 1e-6);
       }
     }
@@ -215,7 +217,8 @@ describe('the sky realm: arches', () => {
   test('decks are walkable and root on the islands they join', () => {
     expect(arches.length).toBeGreaterThan(5);
     for (const { A, a } of arches) {
-      expect(Math.abs(A.by - A.ay)).toBeLessThanOrEqual(S.linkSlope * A.len + 1e-6);
+      // (natural arches as before; the Aelari's bridges climb steeper, by their steps)
+      expect(Math.abs(A.by - A.ay)).toBeLessThanOrEqual((A.kind === 'arch' ? S.linkSlope : BRIDGE_SLOPE) * A.len + 1e-6);
       for (let k = 0; k < 64; k++) {
         const t0 = k / 64, t1 = (k + 1) / 64;
         expect(Math.abs(archY(A, t1) - archY(A, t0)) / (A.len / 64)).toBeLessThan(0.5);
@@ -223,13 +226,15 @@ describe('the sky realm: arches', () => {
       const from = a.islands[A.from], to = a.islands[A.to];
       expect(islandRho(from, A.ax, A.az)).toBeLessThan(1);
       expect(islandRho(to, A.bx, A.bz)).toBeLessThan(1);
-      expect(Math.abs(topAt(from, A.ax, A.az) - (A.ay + 0.3))).toBeLessThan(1e-9);
-      expect(Math.abs(topAt(to, A.bx, A.bz) - (A.by + 0.3))).toBeLessThan(1e-9);
+      // (an arch's deck roots 0.3 m into the ground; a bridge's abutment stands 0.15 m on it)
+      const off = A.kind === 'arch' ? 0.3 : -0.15;
+      expect(Math.abs(topAt(from, A.ax, A.az) - (A.ay + off))).toBeLessThan(1e-9);
+      expect(Math.abs(topAt(to, A.bx, A.bz) - (A.by + off))).toBeLessThan(1e-9);
     }
   });
 
   test('the deck is found from above and nowhere off it', () => {
-    const { A } = arches[0];
+    const { A } = arches.find((x) => x.A.kind === 'arch')!;
     const mx = (A.ax + A.bx) / 2 - A.dirZ * A.bow, mz = (A.az + A.bz) / 2 + A.dirX * A.bow;
     const y = archGround(A, mx, mz);
     expect(y).toBeCloseTo(archY(A, 0.5) + 0.3, 6);

@@ -11,7 +11,7 @@
 
 import { SKY_REALM as S } from '../constants';
 import { archGround, type Arch } from './arches';
-import { archipelagoInCell, cellBuilt, isleInCell, type Archipelago } from './archipelago';
+import { archipelagoInCell, archipelagoStep, cellBuilt, isleInCell, type Archipelago } from './archipelago';
 import { islandRho, lakeDist, nearWater, outline, outlineMax, topAt, waterAt, type SkyIsland } from './island';
 
 /** Something to stand on up here. */
@@ -32,7 +32,7 @@ export function islandAt(x: number, z: number, seed: number): SkyIsland | null {
 
 /** The floor's height at world (x, z): an island's top (a frozen lake as ice) or an arch's deck; NaN off it. */
 export function floorHeight(f: SkyFloor, x: number, z: number): number {
-  if (f.kind === 'arch') return archGround(f, x, z);
+  if ('ax' in f) return archGround(f, x, z); // an arch's or a bridge's deck
   if (islandRho(f, x, z) > 1) return NaN;
   const t = topAt(f, x, z);
   const L = f.lake;
@@ -55,6 +55,8 @@ export function skyFloorUnder(x: number, y: number, z: number, seed: number, rea
   const arch = archipelagoInCell(Math.floor(x / S.archCell), Math.floor(z / S.archCell), seed);
   if (arch) {
     for (const A of arch.arches) {
+      // (a built bridge is walked on its spans and steps: the Eyrie's colliders, hero/locomotion.ts)
+      if (A.kind === 'bridge') continue;
       const t = archGround(A, x, z);
       if (t === t && y >= t - reach && t > bestY) { best = A; bestY = t; }
     }
@@ -136,10 +138,17 @@ export function realmNear(x: number, z: number, range: number, seed: number, pen
   return { archipelagos: archs.map((p) => p.a), isles: isles.map((p) => p.i) };
 }
 
-/** Build a pending cell (realmNear's `pending`): an archipelago takes ~5 ms, a lone isle ~1 ms. */
-export function buildCell(c: PendingCell, seed: number): void {
-  if (c.kind === 'arch') archipelagoInCell(c.ix, c.iz, seed);
-  else isleInCell(c.ix, c.iz, seed);
+/**
+ * Build a pending cell (realmNear's `pending`) for at most about `budgetMs` (at least a slice):
+ * true once it is built. An archipelago is laid out a slice at a time (a few ms in all); a lone
+ * isle at once (~1 ms), after the archipelago cell it lies in (it keeps clear of that Eyrie).
+ */
+export function buildCell(c: PendingCell, seed: number, budgetMs: number): boolean {
+  if (c.kind === 'arch') return archipelagoStep(c.ix, c.iz, seed, budgetMs);
+  const k = S.archCell / S.isleCell;
+  if (!archipelagoStep(Math.floor(c.ix / k), Math.floor(c.iz / k), seed, budgetMs)) return false;
+  isleInCell(c.ix, c.iz, seed);
+  return true;
 }
 
 /**

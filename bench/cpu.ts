@@ -121,8 +121,8 @@ const WORKLOADS: Workload[] = [
     run: (m) => {
       const foot = (2 * Math.tan((CAMERA.fov * Math.PI) / 360)) / WORKED_EXAMPLE.resY;
       const ro: [number, number, number] = [SPAWN.x, m.elevation(SPAWN.x, SPAWN.z, DEFAULT_SEED, 0) + WORKED_EXAMPLE.camHeight, SPAWN.z];
-      const cp = Math.cos(SPAWN.pitch), sp = Math.sin(SPAWN.pitch);
-      const rd: [number, number, number] = [Math.sin(SPAWN.yaw) * cp, sp, Math.cos(SPAWN.yaw) * cp];
+      const cp = Math.cos(WORKED_EXAMPLE.pitch), sp = Math.sin(WORKED_EXAMPLE.pitch);
+      const rd: [number, number, number] = [Math.sin(WORKED_EXAMPLE.yaw) * cp, sp, Math.cos(WORKED_EXAMPLE.yaw) * cp];
       let s = 0;
       for (let i = 0; i < 50; i++) s += m.marchRay(ro, rd, DEFAULT_SEED, { steps: 96, footprint: foot }).t;
       return s;

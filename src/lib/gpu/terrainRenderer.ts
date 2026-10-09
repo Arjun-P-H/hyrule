@@ -14,6 +14,7 @@
  * CHUNK_SIZE) so every value the GPU sees is chunk-local fp32.
  */
 
+import { hydroBufferFor } from './hydroBuffer';
 import { ClipmapCache, type PassTimestamps } from './clipmapCache';
 import { floatingOrigin, packFrame, type FrameParams, type TerrainRendererLike, type TerrainVariant } from './frame';
 import { FRAME_BYTES, terrainShader } from './terrain.wgsl';
@@ -78,6 +79,8 @@ class TerrainRenderer implements TerrainRendererLike {
         { binding: 3, resource: this.cache.sampler },
       );
     }
+    // the direct height source evaluates the land per pixel: it reads the rivers' node table
+    if (v.height === 'direct') entries.push(hydroBufferFor(d).entry());
     this.renderBind = d.createBindGroup({ layout: this.renderPipe.getBindGroupLayout(0), entries });
   }
 
@@ -95,6 +98,8 @@ class TerrainRenderer implements TerrainRendererLike {
     if (this.cache) {
       const { ox, oz, lx, lz } = floatingOrigin(fp.x, fp.z);
       this.cache.setCamera(fp.x, fp.z, lx, lz, ox, oz, fp.seed);
+    } else {
+      hydroBufferFor(this.device).update(fp.x, fp.z, fp.seed);
     }
   }
 

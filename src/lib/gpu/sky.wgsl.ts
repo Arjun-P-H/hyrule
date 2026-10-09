@@ -73,10 +73,10 @@ struct SkyU {
   star0: vec4f,     // world → celestial rows; star0.w: star visibility
   star1: vec4f,     //   star1.w: time (s), for twinkling
   star2: vec4f,     //   star2.w: night (0 day … 1 night)
-  grade: vec4f,     // exposure bias, saturation, night vision (blue shift), unused
+  grade: vec4f,     // exposure bias, saturation, night vision (blue shift), the haze's tint (blue)
   fog: vec4f,       // haze (× the classic density), mist density (1/m), mist scale height (m), camera altitude (m)
   clouds: vec4f,    // coverage threshold shift, light (dim at night), Milky Way visibility, twilight (0–1)
-  keyAz: vec4f,     // the key light's azimuth: its horizontal direction x, z (unit); unused
+  keyAz: vec4f,     // the key light's azimuth: its horizontal direction x, z (unit); the haze's tint (red, green)
   camKey: vec4f,    // the key light's colour at the camera's altitude (the haze's forward glow)
   keyCols: array<vec4f, ${KEY_ALTS}>, // key light colour at altitudes (k / ${KEY_ALTS - 1})² · ${KEY_TOP} m
 };
@@ -431,6 +431,8 @@ fn skyAmb(n: vec3f, w: f32) -> vec3f { return SKY_TINT * w; }
 fn bounceCol(c: vec3f) -> vec3f { return c; }
 fn skyHorCol() -> vec3f { return SKY_HOR; }
 fn glow(c: vec3f) -> vec3f { return c; }
+// Sunstone lanterns and lit windows (the Eyries): dark under the classic sky's fixed sun.
+fn lampLevel() -> f32 { return 0.0; }
 const UNDERWATER: vec3f = vec3f(0.012, 0.055, 0.075);
 fn underwaterCol() -> vec3f { return UNDERWATER; }
 const CURVATURE: f32 = 0.0;
@@ -477,6 +479,9 @@ fn bounceCol(c: vec3f) -> vec3f { return c * skyLight.bounce.rgb; }
 fn skyHorCol() -> vec3f { return skyLight.hor.rgb; }
 // Emissive light (the shrines' glyphs): its day brightness, up to three times that on the display at night.
 fn glow(c: vec3f) -> vec3f { return c * min(1.0, 3.15 * skyLight.grade.y); }
+// Sunstone lanterns and lit windows (the Eyries): they wake as the sun sinks toward the horizon
+// and sleep once it has risen a few degrees (0 by day … 1 by night).
+fn lampLevel() -> f32 { return 1.0 - smoothstep(-0.035, 0.09, sky.sun.y); }
 const UNDERWATER: vec3f = vec3f(0.012, 0.055, 0.075);
 fn underwaterCol() -> vec3f { return UNDERWATER * min(skyLight.ambUp.w / ${f(FILL_REF)}, 1.0); }
 
@@ -505,7 +510,8 @@ fn fogInscatter(rd: vec3f) -> vec3f {
   // Looking up (at a sky island) the haze takes the colour of the sky behind it, not the horizon's
   // (the dome looked up only where it shows: not along the ground, where nearly every pixel looks).
   let up = smoothstep(0.06, 0.45, rd.y);
-  var haze = air * hf(sqrt(skyLight.grade.w));
+  // (tinted by the lands' air round the camera: sky/air.ts)
+  var haze = air * hf(sqrt(skyLight.grade.w)) * hv3(vec3f(sky.keyAz.z, sky.keyAz.w, sky.grade.w));
   if (up > 0.0) { haze = mix(haze, hv3(skyLut(vec3f(rd.x, max(rd.y, 0.0), rd.z))), hf(up)); }
   return softClip(vec3f(haze + hv3(sky.camKey.rgb) * (hg * hf(FOG_MIE))), skyLight.grade.x);
 }
@@ -562,7 +568,7 @@ const FOG_OPAQUE: f32 = 5.82;
 fn fogOd(t: f32, rd: vec3f) -> f32 {
   let y0 = max(u.camPos.y, 0.0);
   var od = SIGMA_FOG * sky.fog.x * fogDepth(y0, t, rd.y, FOG_H);
-  if (sky.fog.y > 0.0) { od += sky.fog.y * fogDepth(max(y0 - W_LEVEL, 0.0), t, rd.y, sky.fog.z); }
+  if (sky.fog.y > 0.0) { od += sky.fog.y * fogDepth(max(y0 - u.camWater, 0.0), t, rd.y, sky.fog.z); }
   return od;
 }
 fn surfaceFog(col: vec3f, t: f32, h: f32, rd: vec3f) -> vec3f { return surfaceFogOd(col, t, h, rd, fogOd(t, rd)); }

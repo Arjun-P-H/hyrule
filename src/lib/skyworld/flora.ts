@@ -13,7 +13,8 @@
  *   bushes   the biome's share of the rest, in its bush palette;
  * which tree: the biome's kinds by weight, picked by a 45 m stand field
  * (stands of one kind, mixed at their edges). Nothing grows near the rim,
- * in or beside the water, on steep ground, or on the floating rocks.
+ * in or beside the water, on steep ground, on the floating rocks, or in an
+ * Eyrie's streets and buildings (its district map).
  * Trees are the ground's shapes (species.ts) in the sky's colours
  * (SKY_FLORA): the palette rides along in the plant record.
  */
@@ -23,6 +24,9 @@ import { hash3, vnoise } from '../terrainMath';
 import { SKY_BIOME_INFO, SKY_FLORA } from './biomes';
 import { islandRho, lakeDist, streamNear, topAt } from './island';
 import { islandAt } from './realm';
+import { districtAt } from './eyrie/district';
+
+const dd: [number, number] = [0, 0];
 
 type SkyPlant = {
   species: Species;
@@ -42,6 +46,8 @@ export const SKY_PLACE = {
   slope: 0.6,     // nor on ground steeper than this
   lake: 1.15,     // nor within this many lake radii of its middle
   stream: 1.6,    // nor within this many half-widths (+ 1 m) of a stream
+  paved: 2.5,     // nor within this many metres of an Eyrie's paving (eyrie/district.ts)
+  built: 3.5,     // nor of its footprints
 } as const;
 
 const u16 = (h: number, shift: number) => ((h >>> shift) & 0xffff) / 65535;
@@ -70,6 +76,10 @@ export function skyPlantInCell(ix: number, iz: number, seed: number): SkyPlant |
   // Where nothing grows.
   if (islandRho(isl, x, z) > SKY_PLACE.rim) return null;
   const qx = x - isl.cx, qz = z - isl.cz;
+  if (isl.district) {
+    districtAt(isl, x, z, dd);
+    if (dd[0] < SKY_PLACE.paved || dd[1] < SKY_PLACE.built) return null;
+  }
   if (isl.lake && lakeDist(isl.lake, qx, qz) < SKY_PLACE.lake) return null;
   if (isl.stream) {
     const n = streamNear(isl.stream, qx, qz);

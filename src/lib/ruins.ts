@@ -12,8 +12,8 @@
  * Every box of a site shares its yaw.
  */
 
-import { RUINS, VALLEY } from './constants';
-import { elevation, hash01 } from './terrainMath';
+import { RUINS } from './constants';
+import { elevation, hash01, waterLevel } from './terrainMath';
 import { islandAt } from './skyworld/realm';
 import { islandRho, nearWater, topAt } from './skyworld/island';
 
@@ -60,7 +60,8 @@ function buildSite(ix: number, iz: number, seed: number): RuinSite | null {
   const corners = [at(-w / 2, -d / 2), at(w / 2, -d / 2), at(-w / 2, d / 2), at(w / 2, d / 2), at(0, 0)];
   const hs = corners.map(([px, pz]) => ground(px, pz));
   const gMin = Math.min(...hs), gMax = Math.max(...hs);
-  if (gMax - gMin > RUINS.maxRelief || (!onIsland && gMin < VALLEY.wLevel + 1)) return null;
+  // (on the land, clear of its water: the sea, a lake, a river at its own level)
+  if (gMax - gMin > RUINS.maxRelief || (!onIsland && corners.some(([px, pz]) => ground(px, pz) < waterLevel(px, pz, seed) + 1))) return null;
 
   const boxes: RuinBox[] = [];
   const box = (u: number, v: number, y: number, hx: number, hy: number, hz: number, material: RuinMaterial) => {

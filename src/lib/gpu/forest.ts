@@ -18,13 +18,13 @@
  *   drawCardColour(pass)  their colour where that depth is equal: once per pixel
  */
 
-import { LIGHT, VALLEY } from '../constants';
+import { LIGHT } from '../constants';
 import { buildLeafAtlas, LEAF_MIPS, LEAF_SIZE, LEAF_STYLES } from '../forest/leafAtlas';
 import { buildTreeModels, VERTEX_BYTES, type TreeModels } from '../forest/models';
 import { CELL, LODS } from '../forest/species';
 import { TILE_CELLS, TileWindow } from '../forest/tiles';
 import { skyGround } from '../skyworld/realm';
-import { elevation } from '../terrainMath';
+import { surfaceAt } from '../terrainMath';
 import type { FrameParams } from './frame';
 import { ARGS_BYTES, BUCKETS, CAP, CARD_GROUPS, FOREST_BYTES, GROUPS, GROUP_LEVEL, INSTANCES, INSTANCE_BYTES, KINDS, REGION, SLOT_BYTES, type ForestSpec } from './forest.wgsl';
 import { stamped } from './profile';
@@ -83,12 +83,16 @@ export class Forest {
   private cullBind!: GPUBindGroup;
   private drawBinds: GPUBindGroup[] = [];
   private shadowBind!: GPUBindGroup;
+  /** Group 0 of the shadow pass (the frame and the forest's uniform): other casters' pipelines share it (init). */
+  shadowLayout: GPUBindGroupLayout | null = null;
   private jobCount = 0;
   private frame = 0;
   /** Each bucket's dynamic offset into the instance buffer (index group · KINDS + kind): no allocation per draw. */
   private offsets = new Uint32Array(BUCKETS);
   private lastCentre = new Float64Array(3);
   private hasLast = false;
+  /** Scratch: the ground and the water under the shadow box's centre. */
+  private gw: [number, number] = [0, 0];
   // Light axes of the map rendered this frame, and of the one sampled (drawn last frame).
   private lf: V3 = [0, -1, 0];
   private lr: V3 = [1, 0, 0];
@@ -189,6 +193,7 @@ export class Forest {
     const cullLayout = d.createBindGroupLayout({ entries: [storage(21), storage(22), storage(23), storage(24)] });
     const drawLayout = d.createBindGroupLayout({ entries: [{ binding: 20, visibility: V, buffer: { type: 'read-only-storage', hasDynamicOffset: true } }] });
     const shadowLayout = d.createBindGroupLayout({ entries: [0, 8].map((binding) => ({ binding, visibility: V, buffer: { type: 'uniform' as const } })) });
+    this.shadowLayout = shadowLayout;
     const vertex: GPUVertexBufferLayout = {
       arrayStride: VERTEX_BYTES,
       attributes: [
@@ -273,7 +278,7 @@ export class Forest {
     const R = this.spec.shadowRange;
     const cx = fp.x + Math.sin(fp.yaw) * 0.35 * R, cz = fp.z + Math.cos(fp.yaw) * 0.35 * R;
     const isl = skyGround(fp.x, fp.y, fp.z, fp.seed);
-    const cy = Number.isFinite(isl) ? isl : Math.max(elevation(cx, cz, fp.seed, 8), VALLEY.wLevel);
+    const cy = Number.isFinite(isl) ? isl : Math.max(...surfaceAt(cx, cz, fp.seed, this.gw, 8));
     const texel = (2 * R) / Math.max(this.spec.shadowRes, 1);
     const lx = cx * LR[0] + cy * LR[1] + cz * LR[2], ly = cx * LU[0] + cy * LU[1] + cz * LU[2];
     const sx = Math.round(lx / texel) * texel - lx, sy = Math.round(ly / texel) * texel - ly;
@@ -298,8 +303,11 @@ export class Forest {
     this.frame++;
   }
 
-  /** Placement for the tiles that entered the window, culling into the buckets, then the shadow map. */
-  encode(enc: GPUCommandEncoder, group0: GPUBindGroup): void {
+  /**
+   * Placement for the tiles that entered the window, culling into the buckets, then the shadow map —
+   * with `casters` drawing other things into it (the Eyries' structures), group 0 set for them.
+   */
+  encode(enc: GPUCommandEncoder, group0: GPUBindGroup, casters?: (pass: GPURenderPassEncoder) => void): void {
     const cp = enc.beginComputePass(stamped('forest.cull'));
     cp.setBindGroup(0, group0);
     if (this.jobCount) {
@@ -326,6 +334,7 @@ export class Forest {
     sp.setIndexBuffer(this.ibuf, 'uint32');
     this.drawGroup(sp, 3);
     this.drawGroup(sp, 7);
+    casters?.(sp);
     sp.end();
   }
 

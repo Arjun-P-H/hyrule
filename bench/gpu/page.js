@@ -42,7 +42,27 @@ async function main() {
   }
   const UNIFORMS = ['u_res', 'u_time', 'u_cam_pos', 'u_chunk_origin', 'u_basis', 'u_tan_half', 'u_seed',
     'u_march_steps', 'u_shadow_steps', 'u_footprint', 'u_probe_local', 'u_probe_step', 'u_probe_dp',
-    'u_bench_dp', 'u_bench_base', 'u_hero_bound', 'u_hero_j', 'u_hero_torso', 'u_hero_head', 'u_hero_misc'];
+    'u_bench_dp', 'u_bench_base', 'u_hero_bound', 'u_hero_j', 'u_hero_torso', 'u_hero_head', 'u_hero_misc', 'u_hero_dress',
+    'u_hydro', 'u_hydro_head'];
+  // The rivers' node table (src/lib/hydro.ts hydroTable; runner.ts attaches it): six RGBA32F texels a node.
+  let hydroHead = [0, 0, 0, 2048];
+  if (cfg.hydro) {
+    const bytes = Uint8Array.from(atob(cfg.hydro.data), (ch) => ch.charCodeAt(0));
+    const n = cfg.hydro.head[2];
+    const tex = gl.createTexture();
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA32F, n * 6, n);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, n * 6, n, gl.RGBA, gl.FLOAT, new Float32Array(bytes.buffer));
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.activeTexture(gl.TEXTURE0);
+    hydroHead = cfg.hydro.head;
+  }
+  const bindHydro = (L) => {
+    if (L.u_hydro) gl.uniform1i(L.u_hydro, 1);
+    if (L.u_hydro_head) gl.uniform4fv(L.u_hydro_head, hydroHead);
+  };
   const programs = cfg.variants.map((v) => {
     const t0 = performance.now();
     const p = gl.createProgram();
@@ -78,6 +98,7 @@ async function main() {
     gl.uniformMatrix3fv(L.u_basis, false, basis);
     gl.uniform1f(L.u_tan_half, tanHalf);
     gl.uniform1i(L.u_seed, cfg.seed);
+    bindHydro(L);
     const b = (P.budgets && P.budgets[preset.id]) || preset;
     gl.uniform1i(L.u_march_steps, b.marchSteps);
     gl.uniform1i(L.u_shadow_steps, preset.shadowOff ? 0 : b.shadowSteps);
@@ -92,6 +113,8 @@ async function main() {
       gl.uniformMatrix3fv(L.u_hero_head, false, hb.subarray(63, 72));
       gl.uniform4fv(L.u_hero_bound, hb.subarray(72, 76));
       gl.uniform4fv(L.u_hero_misc, hb.subarray(76, 80));
+      // the tunic (src/lib/hero/characters.ts); frames packed before it existed wear the classic green
+      if (L.u_hero_dress) gl.uniform3fv(L.u_hero_dress, hb.length >= 83 ? hb.subarray(80, 83) : [0.028, 0.115, 0.022]);
     } else if (L.u_hero_bound) {
       gl.uniform4f(L.u_hero_bound, 0, 0, 0, 0);
     }
@@ -308,6 +331,7 @@ async function main() {
           gl.uniform2f(L.u_probe_step, pr.step, pr.step);
           gl.uniform1f(L.u_probe_dp, pr.dp);
           gl.uniform1i(L.u_seed, cfg.seed);
+          bindHydro(L);
           drawTri();
           gl.readPixels(0, 0, pr.w, pr.h, gl.RGBA, gl.FLOAT, buf);
           await post(`/blob?kind=probe&variant=${encodeURIComponent(P.name)}&id=${encodeURIComponent(pr.id)}`, buf);

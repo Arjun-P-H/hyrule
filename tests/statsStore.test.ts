@@ -4,7 +4,7 @@ import { createStatsStore, selectMode, selectStamina, type EngineStats } from '.
 const snap = (mode: EngineStats['mode'], fps: number, stamina = 1, exhausted = false): EngineStats => ({
   fps, x: 1, y: 2, z: 3, mode, grounded: mode !== 'fly', originX: 0, originZ: 0, resPct: 50,
   action: mode === 'hero' ? 'run' : null, stamina, exhausted, api: 'webgl2',
-  sky: null, skyWanted: 'cycle', hour: 15.5, paused: false, dayMinutes: 24,
+  sky: null, skyWanted: 'cycle', hour: 15.5, paused: false, dayMinutes: 24, land: 'Grassland plains',
 });
 
 describe('§30 HUD telemetry store', () => {

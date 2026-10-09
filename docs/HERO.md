@@ -28,7 +28,7 @@ Nothing here is a mesh or a texture: the zero-mesh / zero-texture invariant hold
   grounded the root sits at `E + GROUND_BIAS`, exactly like the first-person eye minus its height, so
   switching views keeps one collision contract. States: ground (run / sprint / sneak / slide down
   ground steeper than 45°), air, glide, climb (push into ground steeper than `HERO.walkSlope`; hang,
-  climb, climb-jump, let go), swim (water deeper than 1.3 m below `W_LEVEL`). Constants: `HERO` in
+  climb, climb-jump, let go), swim (water deeper than 1.3 m: the sea, a lake, a river's pool, from `surfaceAt`; frozen water is walked on, see [`LANDS.md`](LANDS.md)). Constants: `HERO` in
   `constants.ts`.
 - **Animation** — `src/lib/hero/rig.ts`. An 18-joint skeleton posed every frame: a gait cycle whose
   stance feet move backwards at exactly the ground speed (so they stay planted), placed on the

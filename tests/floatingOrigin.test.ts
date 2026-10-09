@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'bun:test';
 import { elevation, MACRO_FREQ, RIDGE_FREQ, WARP_FREQ } from '../src/lib/terrainMath';
-import { ANOMALY, CHUNK_SIZE, DEFAULT_SEED, F, PLAYER, REGION } from '../src/lib/constants';
+import { CHUNK_SIZE, DEFAULT_SEED, F, GEO, HYDRO, LANDS, PLAYER } from '../src/lib/constants';
 import { readFileSync } from 'node:fs';
 import { TERRAIN_FS } from '../src/components/terrain/demoShader';
 
@@ -45,13 +45,21 @@ const REGISTRY: FreqEntry[] = [
     dyadic: i === 0,
     why: i === 0 ? undefined : 'lacunarity 2.17 (spec §6) predates the dyadic rule; changing it would change the world',
   })),
-  { name: 'anomaly cell 1/2048', value: 1 / ANOMALY.cell, dyadic: true },
-  { name: 'region cell 1/8192', value: 1 / REGION.cell, dyadic: true },
+  { name: 'volcano cell', value: 1 / LANDS.volcano.cell, dyadic: true },
+  { name: 'sacred grove cell', value: 1 / LANDS.sacred.cell, dyadic: true },
+  { name: 'lake basin cell', value: 1 / GEO.basinCell, dyadic: true },
+  { name: 'drainage node lattice', value: 1 / HYDRO.node, dyadic: true },
+  { name: 'range crests along / across a chain', value: F.rangeu * Math.cos(GEO.rangeDir[0]), dyadic: false, why: 'an elongated noise in a rotated frame: a shape, its lattice not aligned to the chunks (the heights it feeds are smooth)' },
+  { name: 'gully erosion cells (1 / (0.42·0.7·1200 m), ×2 per octave)', value: 1 / (0.42 * 0.7 * 1200), dyadic: false, why: 'erosion.ts units; cells hashed on integer lattice coords, evaluated in fp32 globals like the rest' },
   { name: 'vegetation 1/14 m (shading only)', value: 1 / F.veg, dyadic: false, why: 'albedo modulation, not geometry' },
   { name: 'water ripple 1/5.5 m', value: 1 / 5.5, dyadic: false, why: 'animated shading normal, not geometry' },
   { name: 'water ripple 1/9.7 m', value: 1 / 9.7, dyadic: false, why: 'animated shading normal, not geometry' },
   { name: 'shore foam 1/3.1 m', value: 1 / 3.1, dyadic: false, why: 'shading only' },
-  { name: 'dune phase F.dune·2π', value: F.dune * 2 * Math.PI, dyadic: false, why: 'sin() phase; periodic, evaluated on the global coordinate' },
+  { name: 'dune phase F.dune along a turning wind', value: F.dune * Math.cos(0.6), dyadic: false, why: 'fract() phase of the rotated global coordinate; periodic, a shape, not a lattice' },
+  { name: 'volcano gullies 7 per radian', value: 7 / 1000, dyadic: false, why: 'noise round the cone on the unit circle of directions, local to its centre' },
+  { name: 'snow drifts 1/23 m, 1/7 m (shading only)', value: 1 / 23, dyadic: false, why: 'albedo, not geometry' },
+  { name: 'strata warp 1/90 m (shading only)', value: 1 / 90, dyadic: false, why: 'albedo, not geometry' },
+  { name: 'ice cracks 1/9 m (shading only)', value: 1 / 9, dyadic: false, why: 'albedo, not geometry' },
 ];
 
 describe('§25 dyadic frequency registry', () => {

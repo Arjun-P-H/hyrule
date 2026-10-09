@@ -34,7 +34,7 @@
  *               the ground is painted with beyond the trees' drawing range.
  *
  * Needs, from the raster shader: u (Frame), WORLD_WGSL (hash3, vnoise,
- * elevation, temperature, moisture, W_LEVEL), the light API (keyDir, keyCol,
+ * landSurface, landRegions, domainWarp), the light API (keyDir, keyCol,
  * skyAmb, bounceCol: sky.wgsl.ts),
  * heightAt, sunAt, inRuinSite, project, skyShadowAt and (with the sky realm)
  * its lookups (rlFind, rlTop, …),
@@ -43,7 +43,8 @@
 
 import { LEAF_SIZE, LEAF_STYLES } from '../forest/leafAtlas';
 import { SURFACE_SPAN } from '../forest/models';
-import { CANOPY_AVG, PLACE, RULES, ZONES } from '../forest/placement';
+import { CANOPY_AVG, KEEP_COOL, PLACE, RULES, SCALE, ZONES } from '../forest/placement';
+import { BI, BIOMES, BIOME_COUNT as BIOMES_N, LOOK } from '../biomes';
 import { CELL, SPECIES, SPECIES_INFO, VARIANTS, type Species } from '../forest/species';
 import { SKY_BIOMES, SKY_BIOME_INFO, SKY_FLORA, SKY_FLORA_COLOURS } from '../skyworld/biomes';
 import { SKY_PLACE } from '../skyworld/flora';
@@ -110,43 +111,90 @@ const v3 = (a: readonly number[]) => `vec3f(${a.map(f).join(', ')})`;
 const ZONE_RULES = ZONES.map((z) => RULES[z]);
 const spIndex = (x: Species) => SPECIES.indexOf(x);
 const spPair = (p: readonly [Species, Species, number]) => `vec3f(${spIndex(p[0])}.0, ${spIndex(p[1])}.0, ${f(p[2])})`;
+const palIndex = (p: string | null) => (p ? SKY_FLORA.indexOf(p as (typeof SKY_FLORA)[number]) : -1);
+const ZI = (z: (typeof ZONES)[number]) => ZONES.indexOf(z);
 
 /**
- * forest/placement.ts's tables, its climate zones and its forest-body field (for a given seed), as
- * WGSL: shared by the placement (placementWGSL) and the far forest's canopy (canopyWGSL).
+ * forest/placement.ts's tables, its flora zones and its forest-body field (for a given seed), as
+ * WGSL: shared by the placement (placementWGSL) and the far forest's canopy (canopyWGSL). Needs
+ * WORLD_WGSL (landRegions' Regions).
  */
 function forestFieldsWGSL(): string {
   const Z = ZONE_RULES;
   const pair = spPair, sp = spIndex;
+  const nz = Z.length;
+  const keep = ZONES.map((z) => (KEEP_COOL.includes(z) ? '1u' : '0u'));
   return /* wgsl */ `
-const Z_A: array<vec4f, ${Z.length}> = ${arr('vec4f', Z.map((r) => `vec4f(${f(r.forest)}, ${f(r.fill)}, ${f(r.shore)}, ${f(r.shrub)})`))};
-const Z_G: array<vec4f, ${Z.length}> = ${arr('vec4f', Z.map((r) => `vec4f(${f(r.groveGrid)}, ${f(r.groveP)}, ${f(r.groveR[0])}, ${f(r.groveR[1])})`))};
-const Z_GF: array<f32, ${Z.length}> = ${arr('f32', Z.map((r) => f(r.groveFill)))};
-const Z_L: array<vec2f, ${Z.length}> = ${arr('vec2f', Z.map((r) => `vec2f(${f(r.loneGrid)}, ${f(r.loneP)})`))};
-const Z_FSP: array<vec3f, ${Z.length}> = ${arr('vec3f', Z.map((r) => pair(r.forestSp)))};
-const Z_GSP: array<vec3f, ${Z.length}> = ${arr('vec3f', Z.map((r) => pair(r.groveSp)))};
-const Z_LSP: array<vec3f, ${Z.length}> = ${arr('vec3f', Z.map((r) => pair(r.loneSp)))};
-const Z_SSP: array<u32, ${Z.length}> = ${arr('u32', Z.map((r) => `${sp(r.shoreSp)}u`))};
-const PL_DESERT: i32 = ${ZONES.indexOf('desert')};
+const Z_A: array<vec4f, ${nz}> = ${arr('vec4f', Z.map((r) => `vec4f(${f(r.forest)}, ${f(r.fill)}, ${f(r.shore)}, ${f(r.shrub)})`))};
+// The regions' frost (biomes.ts LOOK.frost, °C): trees carry snow by the ground's own snow line (placement.ts frostHere).
+const PL_FROST: array<f32, ${BIOMES_N}> = ${arr('f32', BIOMES.map((b) => f(LOOK[b].frost)))};
+fn plFrost(w: array<f32, ${BIOMES_N}>) -> f32 {
+  var s = 0.0;
+  for (var k = 0; k < ${BIOMES_N}; k++) { s += w[k] * PL_FROST[k]; }
+  return s;
+}
+const Z_G: array<vec4f, ${nz}> = ${arr('vec4f', Z.map((r) => `vec4f(${f(r.groveGrid)}, ${f(r.groveP)}, ${f(r.groveR[0])}, ${f(r.groveR[1])})`))};
+const Z_GF: array<f32, ${nz}> = ${arr('f32', Z.map((r) => f(r.groveFill)))};
+const Z_L: array<vec2f, ${nz}> = ${arr('vec2f', Z.map((r) => `vec2f(${f(r.loneGrid)}, ${f(r.loneP)})`))};
+const Z_FSP: array<vec3f, ${nz}> = ${arr('vec3f', Z.map((r) => pair(r.forestSp)))};
+const Z_GSP: array<vec3f, ${nz}> = ${arr('vec3f', Z.map((r) => pair(r.groveSp)))};
+const Z_LSP: array<vec3f, ${nz}> = ${arr('vec3f', Z.map((r) => pair(r.loneSp)))};
+const Z_SSP: array<u32, ${nz}> = ${arr('u32', Z.map((r) => `${sp(r.shoreSp)}u`))};
+// Old giants (share, scale) and the stand's sky palettes by thirds (−1: the species' own colours).
+const Z_GIANT: array<vec2f, ${nz}> = ${arr('vec2f', Z.map((r) => `vec2f(${f(r.giant[0])}, ${f(r.giant[1])})`))};
+const Z_PAL: array<vec3i, ${nz}> = ${arr('vec3i', Z.map((r) => `vec3i(${r.pal.map((p) => palIndex(p)).join(', ')})`))};
+// Zones that keep their trees as the air cools (not turned to montane pines).
+const Z_KEEP: array<u32, ${nz}> = ${arr('u32', keep)};
+const PL_DESERT: i32 = ${ZI('desert')};
 const PL_BUSH: u32 = ${sp('bush')}u;
 
 fn plU16(h: u32, shift: u32) -> f32 { return f32((h >> shift) & 0xffffu) / 65535.0; }
 fn plFdiv(a: i32, b: i32) -> i32 { return i32(floor(f32(a) / f32(b))); }
 fn plPair(p: vec3f, v: f32) -> u32 { return select(u32(p.y), u32(p.x), v < 1.0 - p.z); }
+fn plPal(z: i32, stand: f32) -> i32 {
+  let P = Z_PAL[z];
+  if (stand < 1.0 / 3.0) { return P.x; }
+  if (stand < 2.0 / 3.0) { return P.y; }
+  return P.z;
+}
 
-fn zoneWeights(T: f32, M: f32, region: f32) -> array<f32, ${Z.length}> {
-  let cold = 1.0 - smoothstep(1.5, 5.5, T);
-  let alpine = 1.0 - smoothstep(-1.0, 1.0, T);
-  let treeline = smoothstep(-3.5, -1.5, T);
-  let warm = smoothstep(12.2, 13.2, T);
-  let desert = 1.0 - smoothstep(0.14, 0.26, M);
-  let dry = 1.0 - smoothstep(0.34, 0.5, M);
-  let wet = smoothstep(0.85, 1.05, M);
+// The flora zones from the biome regions' weights w, the air's temperature T and the autumn field.
+fn zoneWeights(T: f32, w: array<f32, ${BIOMES_N}>, region: f32) -> array<f32, ${nz}> {
+  var o: array<f32, ${nz}>;
+  for (var k = 0; k < ${nz}; k++) { o[k] = 0.0; }
   let autumn = smoothstep(${f(PLACE.region.lo)}, ${f(PLACE.region.hi)}, region);
-  let mild = (1.0 - cold) * (1.0 - warm) * (1.0 - dry);
-  return array<f32, ${Z.length}>(
-    mild * (1.0 - autumn), mild * autumn, warm * (1.0 - wet) * (1.0 - dry) * (1.0 - cold), warm * wet * (1.0 - dry),
-    dry * (1.0 - desert) * (1.0 - cold), desert * (1.0 - cold), cold * (1.0 - alpine), alpine * treeline);
+  let warmFoot = smoothstep(${f(PLACE.warmFoot[0])}, ${f(PLACE.warmFoot[1])}, T);
+  o[${ZI('temperate')}] = w[${BI.forest}] * (1.0 - autumn) + w[${BI.mountains}] * warmFoot;
+  o[${ZI('autumn')}] = w[${BI.forest}] * autumn;
+  o[${ZI('plains')}] = w[${BI.plains}];
+  o[${ZI('savanna')}] = w[${BI.savanna}];
+  o[${ZI('rainforest')}] = w[${BI.rainforest}];
+  o[${ZI('jungle')}] = w[${BI.jungle}];
+  o[${ZI('wetland')}] = w[${BI.wetland}];
+  o[${ZI('desert')}] = w[${BI.desert}];
+  o[${ZI('badlands')}] = w[${BI.badlands}];
+  o[${ZI('volcanic')}] = w[${BI.volcanic}];
+  o[${ZI('mountain')}] = w[${BI.mountains}] * (1.0 - warmFoot);
+  o[${ZI('tundra')}] = w[${BI.tundra}];
+  o[${ZI('taiga')}] = w[${BI.taiga}];
+  o[${ZI('highland')}] = w[${BI.highland}];
+  o[${ZI('sacred')}] = w[${BI.sacred}];
+  o[${ZI('lakes')}] = w[${BI.lakes}];
+  let mont = 1.0 - smoothstep(${f(PLACE.montane[0])}, ${f(PLACE.montane[1])}, T);
+  let alp = 1.0 - smoothstep(${f(PLACE.alpine[0])}, ${f(PLACE.alpine[1])}, T);
+  let tree = smoothstep(${f(PLACE.treeline[0])}, ${f(PLACE.treeline[1])}, T);
+  for (var k = 0; k < ${nz}; k++) {
+    if (k == ${ZI('alpine')} || k == ${ZI('mountain')} || Z_KEEP[k] == 1u) { continue; }
+    o[${ZI('mountain')}] += o[k] * mont;
+    o[k] *= 1.0 - mont;
+  }
+  for (var k = 0; k < ${nz}; k++) {
+    if (k == ${ZI('alpine')} || k == ${ZI('tundra')} || k == ${ZI('volcanic')}) { continue; }
+    o[${ZI('alpine')}] += o[k] * alp;
+    o[k] *= 1.0 - alp;
+  }
+  for (var k = 0; k < ${nz}; k++) { o[k] *= tree; }
+  return o;
 }
 
 fn forestFieldAt(x: f32, z: f32, seed: i32) -> f32 {
@@ -167,7 +215,7 @@ fn plNoise(x: f32, z: f32, wl: f32, off: i32) -> f32 { return 0.5 + 0.5 * vnoise
 fn forestField(x: f32, z: f32) -> f32 { return forestFieldAt(x, z, u.seed); }
 
 struct PlSite {
-  ok: bool, e: f32, slope: f32, hollow: f32, knoll: f32, T: f32,
+  ok: bool, e: f32, wt: f32, shore: f32, slope: f32, hollow: f32, knoll: f32, T: f32, Ts: f32,
   zone: i32, dom: i32, level: f32, fill: f32, mask: f32, open: f32,
 };
 
@@ -175,29 +223,36 @@ fn plSite(x: f32, z: f32, region: f32, zoneR: f32) -> PlSite {
   var o: PlSite;
   o.ok = false;
   let g = vec2f(x, z);
-  o.e = elevation(g, 1.0, u.seed);
-  if (o.e < W_LEVEL + 0.4) { return o; }
+  // the ground and the water's level (the sea, a lake, a river at its own level)
+  let sf = landSurface(g, 1.0, u.seed);
+  o.e = sf.e;
+  o.wt = sf.w;
+  o.shore = sf.shore;
+  if (o.e < o.wt + 0.4) { return o; }
   o.slope = length(vec2f(elevation(g + vec2f(1.5, 0.0), 1.0, u.seed) - o.e, elevation(g + vec2f(0.0, 1.5), 1.0, u.seed) - o.e)) / 1.5;
   let L = ${f(PLACE.relief.step)};
   let dp = ${f(PLACE.relief.dp)};
-  let e0 = elevation(g, dp, u.seed);
-  let relief = (elevation(g + vec2f(L, 0.0), dp, u.seed) + elevation(g - vec2f(L, 0.0), dp, u.seed)
-    + elevation(g + vec2f(0.0, L), dp, u.seed) + elevation(g - vec2f(0.0, L), dp, u.seed) - 4.0 * e0) / L;
+  let e0 = landCoarse(g, dp, u.seed);
+  let relief = (landCoarse(g + vec2f(L, 0.0), dp, u.seed) + landCoarse(g - vec2f(L, 0.0), dp, u.seed)
+    + landCoarse(g + vec2f(0.0, L), dp, u.seed) + landCoarse(g - vec2f(0.0, L), dp, u.seed) - 4.0 * e0) / L;
   // Forest bodies follow the hills (84 m), not every hummock.
   let H = ${f(PLACE.hills.step)};
   let hp = ${f(PLACE.hills.dp)};
-  let h0 = elevation(g, hp, u.seed);
-  let hE = elevation(g + vec2f(H, 0.0), hp, u.seed);
-  let hW = elevation(g - vec2f(H, 0.0), hp, u.seed);
-  let hN = elevation(g + vec2f(0.0, H), hp, u.seed);
-  let hS = elevation(g - vec2f(0.0, H), hp, u.seed);
+  let h0 = landCoarse(g, hp, u.seed);
+  let hE = landCoarse(g + vec2f(H, 0.0), hp, u.seed);
+  let hW = landCoarse(g - vec2f(H, 0.0), hp, u.seed);
+  let hN = landCoarse(g + vec2f(0.0, H), hp, u.seed);
+  let hS = landCoarse(g - vec2f(0.0, H), hp, u.seed);
   let hills = (hE + hW + hN + hS - 4.0 * h0) / H;
   let hillSlope = length(vec2f(hE - hW, hN - hS)) / (2.0 * H);
   o.hollow = smoothstep(0.03, 0.15, relief);
   o.knoll = smoothstep(0.03, 0.15, -relief);
-  o.T = temperature(g, o.e);
-  let M = moisture(g, u.seed);
-  var zw = zoneWeights(o.T, M, region);
+  // the biome regions and the air here
+  let rg = landRegions(g, domainWarp(g.x, g.y, u.seed, 0.0), u.seed);
+  o.T = rg.T0 - L_ALT * max(o.e, 0.0);
+  o.Ts = o.T - plFrost(rg.w);
+  let M = rg.M;
+  var zw = zoneWeights(o.T, rg.w, region);
   var total = 0.0;
   for (var k = 0; k < ${Z.length}; k++) { total += zw[k]; }
   if (total < 1e-4) { return o; }
@@ -223,11 +278,15 @@ fn plSite(x: f32, z: f32, region: f32, zoneR: f32) -> PlSite {
   return o;
 }
 
-// A plant record: offset in the tile (x, z), island height, and packed info (0 = no plant).
-fn plRecord(sp: u32, off: vec2f, y: f32, scale: f32, snow: bool, flags: u32, bits: u32) -> vec4u {
-  let sb = u32(clamp(round((scale - 0.55) / 1.05 * 255.0), 0.0, 255.0));
-  let info = sp | (((bits & 0xffffu) % F_VARIANTS) << 4u) | (((bits >> 16u) & 255u) << 6u) | (sb << 14u) | (((bits >> 8u) & 63u) << 22u)
-    | select(0u, F_SNOW, snow) | flags | F_VALID;
+// A plant record: offset in the tile (x, z), island height, and packed info (0 = no plant). With a sky
+// palette (pal ≥ 0) a land tree is flagged F_PAL and carries it in bits 25–27 (a 3-bit tint in 22–24).
+fn plRecord(sp: u32, off: vec2f, y: f32, scale: f32, snow: bool, flags: u32, bits: u32, pal: i32) -> vec4u {
+  let sb = u32(clamp(round((scale - SCALE_LO) / SCALE_SPAN * 255.0), 0.0, 255.0));
+  var tint = (((bits >> 8u) & 63u) << 22u);
+  var pf = 0u;
+  if (pal >= 0) { tint = (((bits >> 8u) & 7u) << 22u) | ((u32(pal) & 7u) << 25u); pf = F_PAL; }
+  let info = sp | (((bits & 0xffffu) % F_VARIANTS) << 4u) | (((bits >> 16u) & 255u) << 6u) | (sb << 14u) | tint
+    | select(0u, F_SNOW, snow) | flags | pf | F_VALID;
   return vec4u(bitcast<u32>(off.x), bitcast<u32>(off.y), bitcast<u32>(y), info);
 }
 
@@ -265,13 +324,19 @@ fn plantAt(ix: i32, iz: i32, lid: vec2f, xz: vec2f, bits: u32) -> vec4u {
   let fz = (0.15 + 0.7 * plU16(lh, 16u)) * f32(kl);
   if (ix == lx * kl + i32(floor(fx)) && iz == lz * kl + i32(floor(fz))) {
     var desert = 0.0;
-    if (st.dom == PL_DESERT) { desert = 0.4 * smoothstep(0.55, 0.75, ${noise(PLACE.cactus.wavelength, PLACE.cactus.seed)}); }
+    if (st.dom == PL_DESERT) { desert = ${f(PLACE.cactus.patch)} * smoothstep(0.55, 0.75, ${noise(PLACE.cactus.wavelength, PLACE.cactus.seed)}); }
     let park = ${f(PLACE.parkland.lo)} + ${f(PLACE.parkland.span)} * smoothstep(0.3, 0.7, ${noise(PLACE.parkland.wavelength, PLACE.parkland.seed)});
     let p = (Z_L[st.dom].y + desert) * park * (${f(PLACE.lone.flat)} + ${f(PLACE.lone.knoll)} * st.knoll) * (1.0 - smoothstep(0.35, 0.6, st.slope)) * st.open;
     if (plU16(lp, 0u) < p * forest.camOff.z) {
-      off = (lid + vec2f(fract(fx), fract(fz))) * F_CELL;
-      let sp = plPair(Z_LSP[st.dom], plU16(lp, 16u));
-      return plRecord(sp, off, 0.0, 1.15 + 0.2 * pick, plSnow(st.T, sp), 0u, bits);
+      // (its own spot, a few metres off: dry and not on a cliff's edge there too)
+      let g2 = (vec2f(f32(ix), f32(iz)) + vec2f(fract(fx), fract(fz))) * F_CELL;
+      let s2 = landSurface(g2, 1.0, u.seed);
+      let sl2 = length(vec2f(elevation(g2 + vec2f(1.5, 0.0), 1.0, u.seed) - s2.e, elevation(g2 + vec2f(0.0, 1.5), 1.0, u.seed) - s2.e)) / 1.5;
+      if (s2.e >= s2.w + 0.4 && sl2 < 0.6) {
+        off = (lid + vec2f(fract(fx), fract(fz))) * F_CELL;
+        let sp = plPair(Z_LSP[st.dom], plU16(lp, 16u));
+        return plRecord(sp, off, 0.0, 1.15 + 0.2 * pick, plSnow(st.Ts, sp), 0u, bits, -1);
+      }
     }
   }
 
@@ -295,27 +360,30 @@ fn plantAt(ix: i32, iz: i32, lid: vec2f, xz: vec2f, bits: u32) -> vec4u {
 
   // Shore: a broken line just above the water.
   let gaps = smoothstep(0.35, 0.55, ${noise(PLACE.gaps.wavelength, PLACE.gaps.seed)});
-  let sD = Z_A[st.dom].z * smoothstep(W_LEVEL + 0.4, W_LEVEL + 1.2, st.e) * (1.0 - smoothstep(W_LEVEL + 3.0, W_LEVEL + 6.5, st.e)) * (1.0 - steep) * gaps * st.open;
+  var sD = 0.0;
+  if (st.shore > -1e8) { sD = Z_A[st.dom].z * smoothstep(st.shore + 0.4, st.shore + 1.2, st.e) * (1.0 - smoothstep(st.shore + 3.0, st.shore + 6.5, st.e)) * (1.0 - steep) * gaps * st.open; }
 
   let stand = ${noise(PLACE.stand.wavelength, PLACE.stand.seed)};
   if (keep < fD) {
-    let giant = select(1.0, 1.3, pick < ${f(PLACE.giant)});
+    // old giants: their share of the zone's forest trees, a little larger or smaller by the pick
+    let GI = Z_GIANT[st.zone];
+    let giant = select(1.0, GI.y * (0.85 + 0.3 * (pick / max(GI.x, 1e-6))), pick < GI.x);
     let sp = plPair(Z_FSP[st.zone], stand);
-    return plRecord(sp, off, 0.0, (0.95 + 0.2 * pick) * (0.78 + 0.22 * st.mask) * giant, plSnow(st.T, sp), 0u, bits);
+    return plRecord(sp, off, 0.0, (0.95 + 0.2 * pick) * (0.78 + 0.22 * st.mask) * giant, plSnow(st.Ts, sp), 0u, bits, plPal(st.zone, stand));
   }
   if (keep < fD + gD) {
     let sp = plPair(Z_GSP[st.dom], plU16(gh, 8u));
-    return plRecord(sp, off, 0.0, (0.92 + 0.2 * pick) * (1.08 - 0.16 * gd / gr), plSnow(st.T, sp), 0u, bits);
+    return plRecord(sp, off, 0.0, (0.92 + 0.2 * pick) * (1.08 - 0.16 * gd / gr), plSnow(st.Ts, sp), 0u, bits, plPal(st.dom, stand));
   }
   if (keep < fD + gD + sD) {
     let sp = Z_SSP[st.dom];
-    return plRecord(sp, off, 0.0, 0.85 + 0.2 * pick, plSnow(st.T, sp), 0u, bits);
+    return plRecord(sp, off, 0.0, 0.85 + 0.2 * pick, plSnow(st.Ts, sp), 0u, bits, -1);
   }
 
   // Bushes: sparse in the open, lining forest edges, a few under the trees.
   let edge = 4.0 * st.mask * (1.0 - st.mask);
   let bushP = (Z_A[st.zone].w * st.open + 0.12 * edge * select(0.0, 1.0, st.level < 1.0) + 0.03 * st.mask) * (1.0 - steep);
-  if (bush < bushP) { return plRecord(PL_BUSH, off, 0.0, 0.8 + 0.4 * pick, plSnow(st.T, PL_BUSH), 0u, bits); }
+  if (bush < bushP) { return plRecord(PL_BUSH, off, 0.0, 0.8 + 0.4 * pick, plSnow(st.Ts, PL_BUSH), 0u, bits, -1); }
   return vec4u(0u);
 }
 
@@ -326,7 +394,7 @@ ${islands ? skyPlacementWGSL() : 'fn skyPlantAt(ix: i32, iz: i32, lid: vec2f, co
 /**
  * The forest's sky layer (skyworld/flora.ts as WGSL; keep the two in step): the plant of
  * lattice cell (ix, iz) up on a sky island, if any — its record as plRecord's, flagged
- * F_ISLAND with the island's height, its sky palette in bits 25–27 and a 3-bit tint in 22–24.
+ * F_ISLAND with the island's height, its sky palette in bits 25–27 and 31 (its fourth bit) and a 3-bit tint in 22–24.
  */
 function skyPlacementWGSL(): string {
   const sp = (x: Species) => `${SPECIES.indexOf(x)}u`;
@@ -344,9 +412,9 @@ const SKY_KIND_HI: array<vec3f, ${T.length}> = ${arr('vec3f', kinds.map((ks) => 
 const SKY_KIND_SNOW: array<vec3u, ${T.length}> = ${arr('vec3u', kinds.map((ks) => `vec3u(${ks.map((x) => (x.snow ? '1u' : '0u')).join(', ')})`))};
 
 fn skyRecord(sp: u32, pal: u32, off: vec2f, y: f32, scale: f32, snow: bool, bits: u32) -> vec4u {
-  let sb = u32(clamp(round((scale - 0.55) / 1.05 * 255.0), 0.0, 255.0));
+  let sb = u32(clamp(round((scale - SCALE_LO) / SCALE_SPAN * 255.0), 0.0, 255.0));
   let info = sp | (((bits & 0xffffu) % F_VARIANTS) << 4u) | (((bits >> 16u) & 255u) << 6u) | (sb << 14u)
-    | (((bits >> 8u) & 7u) << 22u) | ((pal & 7u) << 25u) | select(0u, F_SNOW, snow) | F_ISLAND | F_VALID;
+    | (((bits >> 8u) & 7u) << 22u) | ((pal & 7u) << 25u) | ((pal & 8u) << 28u) | select(0u, F_SNOW, snow) | F_ISLAND | F_VALID;
   return vec4u(bitcast<u32>(off.x), bitcast<u32>(off.y), bitcast<u32>(y), info);
 }
 
@@ -378,6 +446,8 @@ fn skyPlantAt(ix: i32, iz: i32, lid: vec2f, corner: vec2f, bits: u32) -> vec4u {
   // Where nothing grows: near the rim, in or by the water, on the steep.
   let q = xz - realm.isl[ku].c.xy;
   if (rlRho(ku, q) > ${f(SKY_PLACE.rim)}) { return vec4u(0u); }
+  let dd = rlDistrict(ku, q);
+  if (dd.x < ${f(SKY_PLACE.paved)} || dd.y < ${f(SKY_PLACE.built)}) { return vec4u(0u); }
   if ((realm.isl[ku].m.z & RL_LAKE) != 0u && rlLakeDist(ku, q) < ${f(SKY_PLACE.lake)}) { return vec4u(0u); }
   if (rlInStream(ku, q)) {
     let n = rlStream(ku, q);
@@ -415,7 +485,7 @@ const CANOPY_LOOK = { dark: 0.6, shade: 0.8, fill: 0.7, snow: [0.62, 0.66, 0.72]
 /**
  * The far forest (placement.ts canopyFrom, mirrored): where the renderer no longer draws trees it
  * paints the canopy they would make onto the ground. Run once per clipmap lattice point, after its
- * height (terrain.wgsl.ts horizonShader / sunShader); needs WORLD_WGSL (vnoise, temperature, W_LEVEL).
+ * height (terrain.wgsl.ts horizonShader / sunShader); needs WORLD_WGSL (vnoise, landRegions, domainWarp).
  */
 export function canopyWGSL(): string {
   const S = SPECIES.map((s) => SPECIES_INFO[s]);
@@ -425,14 +495,16 @@ export function canopyWGSL(): string {
 const CN_COL: array<vec3f, ${S.length}> = ${arr('vec3f', S.map((s) => v3([0, 1, 2].map((c) => L.shade * (L.dark * s.leaf[0][c] + (1 - L.dark) * s.leaf[1][c])))))};
 const CN_AREA: array<f32, ${S.length}> = ${arr('f32', S.map((s) => f((L.fill * Math.PI * s.radius * s.radius) / (CELL * CELL))))};
 
-// The far forest at world g, from the ground the clipmap holds there (height e, slope, the relief
-// over the hills' step and its slope, moisture M): its canopy's albedo, premultiplied by its cover
-// and stored as square roots (8 bits keep the dark greens), and its cover, 1 − e^(−trees per cell ×
-// cells under one crown).
-fn canopyAt(g: vec2f, e: f32, slope: f32, hills: f32, hillSlope: f32, M: f32, seed: i32) -> vec4f {
-  if (e < W_LEVEL + 0.4) { return vec4f(0.0); }
-  let T = temperature(g, e);
-  var zw = zoneWeights(T, M, ${noise(PLACE.region.wavelength, PLACE.region.seed)});
+// The far forest at world g, from the ground the clipmap holds there (height e, the water's level wt,
+// slope, the relief over the hills' step and its slope) and the biome regions there: its canopy's
+// albedo, premultiplied by its cover and stored as square roots (8 bits keep the dark greens), and
+// its cover, 1 − e^(−trees per cell × cells under one crown).
+fn canopyAt(g: vec2f, e: f32, wt: f32, slope: f32, hills: f32, hillSlope: f32, seed: i32) -> vec4f {
+  if (e < wt + 0.4) { return vec4f(0.0); }
+  let rg = landRegions(g, domainWarp(g.x, g.y, seed, 0.0), seed);
+  let T = rg.T0 - L_ALT * max(e, 0.0);
+  let M = rg.M;
+  var zw = zoneWeights(T, rg.w, ${noise(PLACE.region.wavelength, PLACE.region.seed)});
   var total = 0.0;
   var level = 0.0;
   var fill = 0.0;
@@ -460,7 +532,7 @@ fn canopyAt(g: vec2f, e: f32, slope: f32, hills: f32, hillSlope: f32, M: f32, se
   let sp = plPair(Z_FSP[dom], ${noise(PLACE.stand.wavelength, PLACE.stand.seed)});
   let cover = 1.0 - exp(-(forest + grove + lone) * CN_AREA[sp]);
   var col = CN_COL[sp];
-  if (T < 0.5 && (sp == ${spIndex('pine')}u || sp == ${spIndex('dead')}u || sp == ${spIndex('bush')}u || sp == ${spIndex('birch')}u)) {
+  if (T - plFrost(rg.w) < 0.5 && (sp == ${spIndex('pine')}u || sp == ${spIndex('dead')}u || sp == ${spIndex('bush')}u || sp == ${spIndex('birch')}u)) {
     col = mix(col, ${v3(L.snow)}, ${f(L.snowCover)});
   }
   return vec4f(sqrt(col) * cover, cover);
@@ -485,6 +557,11 @@ const F_SHADOW_RES: f32 = ${f(Math.max(spec.shadowRes, 1))};
 const F_VALID: u32 = 0x40000000u;
 const F_ISLAND: u32 = 0x20000000u;
 const F_SNOW: u32 = 0x10000000u;
+// A land tree in a sky palette (bits 25–27; an island tree's palette has its fourth bit here instead).
+const F_PAL: u32 = 0x80000000u;
+// The plants' 8-bit scale covers SCALE_LO … SCALE_LO + SCALE_SPAN (forest/placement.ts SCALE).
+const SCALE_LO: f32 = ${f(SCALE.lo)};
+const SCALE_SPAN: f32 = ${f(SCALE.span)};
 const SP_OAK: u32 = ${sp('oak')};
 const SP_BIRCH: u32 = ${sp('birch')};
 const SP_MAPLE: u32 = ${sp('maple')};
@@ -613,7 +690,7 @@ fn forestCull(@builtin(global_invocation_id) id: vec3u) {
   let far = smoothstep(F_FAR_THIN, maxD, d);
   let cell = tile * F_TILE_CELLS + vec2i(i32(i % 8u), i32((i / 8u) % 8u));
   if (f32(hash3(cell.x, cell.y, 919) & 1023u) / 1023.0 > 1.0 - 0.45 * far) { return; }
-  var s = (0.55 + 1.05 * f32((info >> 14u) & 255u) / 255.0) * (1.0 + 0.3 * far);
+  var s = (SCALE_LO + SCALE_SPAN * f32((info >> 14u) & 255u) / 255.0) * (1.0 + 0.3 * far);
   s *= smoothstep(maxD, maxD * 0.9, d); // grow in at the edge of the range
   let xz = u.camPos.xz + relXZ;
   var y = bitcast<f32>(rec.z);
@@ -749,24 +826,30 @@ fn mapleLeaf(tint: f32) -> array<vec3f, 2> {
   return array<vec3f, 2>(SP_LEAF0[SP_OAK], SP_LEAF1[SP_OAK]);
 }
 
-// Up on a sky island (F_ISLAND) a tree takes its sky palette (bits 25–27) and a coarser tint (bits 22–24).
+// Up on a sky island (F_ISLAND) a tree takes its sky palette (bits 25–27, and 31) and a coarser tint (bits 22–24).
 const SKY_LEAF0: array<vec3f, ${SKY_FLORA.length}> = ${arr('vec3f', SKY_FLORA.map((p) => v3(SKY_FLORA_COLOURS[p].leaf[0])))};
 const SKY_LEAF1: array<vec3f, ${SKY_FLORA.length}> = ${arr('vec3f', SKY_FLORA.map((p) => v3(SKY_FLORA_COLOURS[p].leaf[1])))};
 const SKY_BARK: array<vec3f, ${SKY_FLORA.length}> = ${arr('vec3f', SKY_FLORA.map((p) => v3(SKY_FLORA_COLOURS[p].bark)))};
+// (a land tree flagged F_PAL takes a sky palette too: the sacred groves' moss, gold and blossom)
+fn hasPal(info: u32) -> bool { return (info & F_ISLAND) != 0u || ((info & F_PAL) != 0u && (info & F_ISLAND) == 0u); }
+fn palOf(info: u32) -> u32 {
+  if ((info & F_ISLAND) != 0u) { return ((info >> 25u) & 7u) | ((info >> 28u) & 8u); }
+  return (info >> 25u) & 7u;
+}
 fn infoTint(info: u32) -> f32 {
-  if ((info & F_ISLAND) != 0u) { return f32((info >> 22u) & 7u) / 7.0; }
+  if (hasPal(info)) { return f32((info >> 22u) & 7u) / 7.0; }
   return f32((info >> 22u) & 63u) / 63.0;
 }
 fn leafPal(info: u32, sp: u32, tint: f32) -> array<vec3f, 2> {
-  if ((info & F_ISLAND) != 0u) {
-    let k = (info >> 25u) & 7u;
+  if (hasPal(info)) {
+    let k = palOf(info);
     return array<vec3f, 2>(SKY_LEAF0[k], SKY_LEAF1[k]);
   }
   if (sp == SP_MAPLE) { return mapleLeaf(tint); }
   return array<vec3f, 2>(SP_LEAF0[sp], SP_LEAF1[sp]);
 }
 fn barkCol(info: u32, sp: u32) -> vec3f {
-  if ((info & F_ISLAND) != 0u) { return SKY_BARK[(info >> 25u) & 7u]; }
+  if (hasPal(info)) { return SKY_BARK[palOf(info)]; }
   return SP_BARK[sp];
 }
 
@@ -1157,7 +1240,7 @@ fn fsTree(i: TreeOut, @builtin(front_facing) front: bool) -> @location(0) vec4f 
   }
   let dist = length(i.rel);
   let rd = i.rel / dist;
-  if (u.camPos.y < W_LEVEL) { return underwater(rd); }
+  if (u.camPos.y < u.camWater) { return underwater(rd); }
   let part = u32(i.attr.x * 255.0 + 0.5);
   var n = normalize(i.n);
   if (!front && part == 2u) { n = -n; } // fronds are one-sided sheets seen from both sides
@@ -1373,7 +1456,7 @@ fn fsCard(i: CardOut) -> @location(0) vec4f {
   let tex = textureSample(leafTex, leafSamp, i.uv, i32(i.turn.w));
   let dist = length(i.rel);
   let rd = i.rel / dist;
-  if (u.camPos.y < W_LEVEL) { return underwater(rd); }
+  if (u.camPos.y < u.camWater) { return underwater(rd); }
   let cov = max(tex.r, 1e-3);
   let tone = tex.g / cov;
   let tilt = tex.ba / cov * 2.0 - 1.0;

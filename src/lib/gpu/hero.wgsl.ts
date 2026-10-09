@@ -14,10 +14,19 @@ import { HERO_SHAPE } from '../constants';
 import { HERO_JOINTS, HERO_UNIFORM, J } from '../hero/rig';
 import { wgslF32 as f } from './worldgen.wgsl';
 
-/** WGSL Hero block: 18 joints as vec4, torso and head mat3x3f, bound, misc, the box's corners. */
-export const HERO_BYTES = 18 * 16 + 48 + 48 + 16 + 16 + 32;
+/** Other players whose shadows the world's shading casts (with the player's own hero's). */
+const OTHERS = 4;
+/**
+ * WGSL Hero block: 18 joints as vec4, torso and head mat3x3f, bound, misc, the box's corners, the dress,
+ * and the other players' bodies (three points each) for their shadows.
+ */
+export const HERO_BYTES = 18 * 16 + 48 + 48 + 16 + 16 + 32 + 16 + OTHERS * 3 * 16;
 /** Where the box's min and max corners sit in the packed block (floats). */
 export const HERO_BOX = 104;
+/** Where the dress (characters.ts: the tunic's linear rgb) sits in the packed block (floats). */
+const HERO_DRESS = 112;
+/** Where the other players' bodies start (floats). */
+const HERO_OTHERS = 116;
 
 /** How far a part reaches from joint j (the rig's bounding-sphere pads: HERO_SHAPE.*Reach / limbPad). */
 const jointReach = (j: number, glide: number) =>
@@ -61,6 +70,31 @@ export function packHeroWgsl(src: Float32Array, out: Float32Array): void {
   }
   out[HERO_BOX + 3] = 0;
   out[HERO_BOX + 7] = 0;
+  for (let k = 0; k < 3; k++) out[HERO_DRESS + k] = src[HERO_UNIFORM.dress + k];
+  out[HERO_DRESS + 3] = 0;
+}
+
+/**
+ * The other players' bodies into the player's own block (rig.ts HERO_UNIFORM packings, camera-relative):
+ * for each, its pelvis (w 1), head and the point between its ankles — two capsules the world's
+ * shading darkens the ground with. The list ends at the first w of 0.
+ */
+export function packHeroOthers(others: readonly Float32Array[] | null | undefined, out: Float32Array): void {
+  let n = 0;
+  for (const src of others ?? []) {
+    if (n === OTHERS) break;
+    if (!(src[HERO_UNIFORM.bound + 3] > 0)) continue;
+    const o = HERO_OTHERS + 12 * n++;
+    for (let c = 0; c < 3; c++) {
+      out[o + c] = src[3 * J.pelvis + c];
+      out[o + 4 + c] = src[3 * J.head + c];
+      out[o + 8 + c] = 0.5 * (src[3 * J.ankleL + c] + src[3 * J.ankleR + c]);
+    }
+    out[o + 3] = 1;
+    out[o + 7] = 0;
+    out[o + 11] = 0;
+  }
+  if (n < OTHERS) out[HERO_OTHERS + 12 * n + 3] = 0;
 }
 
 /** Needs FRAME_WGSL (u), the light API (keyDir, keyCol, skyAmb, bounceCol, skyHorCol: sky.wgsl.ts) and surfaceFog. */
@@ -73,6 +107,8 @@ struct Hero {
   misc: vec4f,         // x glider open 0..1, y ground under the hero (camera-relative), zw sin/cos facing
   lo: vec4f,           // box round every part (camera-relative): min corner
   hi: vec4f,           //   and max corner
+  dress: vec4f,        // rgb the tunic's albedo (characters.ts); the cap is a shade darker
+  others: array<vec4f, ${OTHERS * 3}>, // other players: pelvis (w 1; 0 ends the list), head, between the ankles
 };
 @group(0) @binding(5) var<uniform> hero: Hero;
 
@@ -90,8 +126,6 @@ const HERO_HEAD_REACH: f32 = ${f(HERO_SHAPE.headReach)};
 const HERO_GLIDER_REACH: f32 = ${f(HERO_SHAPE.gliderReach)};
 const HERO_STEPS: i32 = 64;
 const HC_SKIN: vec3f = vec3f(0.38, 0.23, 0.15);
-const HC_TUNIC: vec3f = vec3f(0.028, 0.115, 0.022);
-const HC_CAP: vec3f = vec3f(0.024, 0.10, 0.019);
 const HC_HAIR: vec3f = vec3f(0.40, 0.25, 0.055);
 const HC_LEATHER: vec3f = vec3f(0.095, 0.045, 0.018);
 const HC_CREAM: vec3f = vec3f(0.33, 0.30, 0.23);
@@ -286,8 +320,8 @@ fn heroAlbedo(id: i32, pr: vec3f) -> vec4f {
     if (h.z > 0.07 && dot(e, e) < 0.017 * 0.017) { return vec4f(HC_EYE, 0.5); }
     return vec4f(HC_SKIN, 0.0);
   }
-  if (id == 1) { return vec4f(HC_TUNIC, 0.0); }
-  if (id == 2) { return vec4f(HC_CAP, 0.0); }
+  if (id == 1) { return vec4f(hero.dress.rgb, 0.0); }
+  if (id == 2) { return vec4f(hero.dress.rgb * 0.87, 0.0); }
   if (id == 3) { return vec4f(HC_HAIR, 0.0); }
   if (id == 4) { return vec4f(HC_LEATHER, 0.0); }
   if (id == 5) { return vec4f(HC_CREAM, 0.0); }
@@ -359,9 +393,42 @@ fn heroShade(rd: vec3f, tH: f32, id: f32, n: vec3f, sh: f32) -> vec3f {
   return surfaceFog(col, tH, u.camPos.y + pr.y, rd);
 }
 
+// Soft shadow of capsule a–b (radius r) on p toward L, its penumbra like heroShadow's: the ray's
+// closest approach to the segment, analytically.
+fn capsuleShadow(p: vec3f, L: vec3f, a: vec3f, b: vec3f, r: f32) -> f32 {
+  let ba = b - a;
+  let w = p - a;
+  let B = dot(L, ba);
+  let D = dot(L, w);
+  let h = clamp((dot(ba, w) - B * D) / max(dot(ba, ba) - B * B, 1e-4), 0.0, 1.0);
+  let s = B * h - D; // along the ray to the closest approach
+  if (s <= 0.0) { return 1.0; }
+  let d = length(w + L * s - ba * h) - r;
+  return clamp(8.0 * d / s, 0.0, 1.0);
+}
+
+// The other players' shadows on a camera-relative point: torso and head, and legs, as two capsules each.
+fn othersShadow(rel: vec3f) -> f32 {
+  let L = keyDir();
+  var res = 1.0;
+  for (var k = 0; k < ${OTHERS}; k++) {
+    let pel = hero.others[3 * k];
+    if (pel.w <= 0.0) { break; }
+    let oc = rel - pel.xyz;
+    let b = dot(oc, L);
+    let c = dot(oc, oc) - 2.56; // (every part lies within 1.6 m of the pelvis)
+    if (b * b - c < 0.0 || (b > 0.0 && c > 0.0)) { continue; }
+    res = min(res, min(capsuleShadow(rel, L, pel.xyz, hero.others[3 * k + 1].xyz, 0.2),
+                       capsuleShadow(rel, L, pel.xyz, hero.others[3 * k + 2].xyz, 0.15)));
+  }
+  return res;
+}
+
 fn heroShadowAt(rel: vec3f) -> f32 {
-  if (hero.bound.w <= 0.0) { return 1.0; }
-  return heroShadow(rel);
+  var s = 1.0;
+  if (hero.bound.w > 0.0) { s = heroShadow(rel); }
+  if (hero.others[0].w > 0.0) { s = min(s, othersShadow(rel)); }
+  return s;
 }
 fn heroAOAt(rel: vec3f) -> f32 {
   if (hero.bound.w <= 0.0) { return 1.0; }

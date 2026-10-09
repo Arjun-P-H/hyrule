@@ -10,7 +10,7 @@
  *
  * `grassScatter` (compute, one invocation per candidate) drops candidates
  * outside the view frustum, under water, on steep rock, or where the biome
- * grows little (biomeColor().veg, clumped), and appends the rest to a blade
+ * grows little (its baked cover, in meadow patches), and appends the rest to a blade
  * buffer; the instance count of an indirect draw is the append counter.
  * `vsGrass` bends each blade (lean, travelling wind gusts, pushed aside
  * around the hero) as a strip of three segments, two out past
@@ -60,41 +60,10 @@ export const BLADE_SEGS = [3, 2] as const;
 /** Vertices per blade (triangle strip) for a set's segments. */
 export const bladeVerts = (segs: number) => 2 * segs + 1;
 
-/**
- * The grass's palette and density, and the tint they give the ground under
- * and beyond the blades (a field reads as one surface where they thin out
- * with distance). Each takes its patch field either evaluated here (the
- * scatter) or as a value (the *From forms: the ground's shading reads the
- * fields from the clipmap's material layer, terrain.wgsl.ts).
- */
+/** How densely grass grows (0..1): the biome's cover, broken into meadows by a 22 m patch field, none on the steep. */
 const GROUND_TINT_WGSL = /* wgsl */ `
-// Grass palette (linear): the biome's ground colour pulled toward a vivid
-// yellow-green, varied between warmer and cooler greens by a 30 m patch field
-// (patchHue, 0..1: patchHueAt).
-fn grassColorFrom(bioCol: vec3f, patchHue: f32, v: f32) -> vec3f {
-  let warm = vec3f(0.135, 0.205, 0.035);
-  let cool = vec3f(0.06, 0.16, 0.05);
-  let vivid = mix(cool, warm, clamp(patchHue * 1.2 - 0.1 + (v - 0.5) * 0.35, 0.0, 1.0));
-  return mix(bioCol, vivid, 0.62);
-}
-fn patchHueAt(g: vec2f, seed: i32) -> f32 { return 0.5 + 0.5 * vnoise(g.x * 0.033, g.y * 0.033, seed + 7707); }
-fn grassColor(bioCol: vec3f, g: vec2f, v: f32, seed: i32) -> vec3f { return grassColorFrom(bioCol, patchHueAt(g, seed), v); }
-
-// How densely grass grows here (0..1): the biome's vegetation weight, broken
-// into meadows by a 22 m patch field (patchN, 0..1: patchDensityAt), and none on steep ground.
 fn grassDensityFrom(veg: f32, slope: f32, patchN: f32) -> f32 {
   return veg * smoothstep(0.15, 0.55, patchN + 0.25 * veg) * (1.0 - smoothstep(0.7, 1.1, slope));
-}
-fn patchDensityAt(g: vec2f, seed: i32) -> f32 { return 0.5 + 0.5 * vnoise(g.x * 0.045, g.y * 0.045, seed + 7777); }
-fn grassDensity(veg: f32, slope: f32, g: vec2f, seed: i32) -> f32 { return grassDensityFrom(veg, slope, patchDensityAt(g, seed)); }
-
-// Ground under and beyond the blades takes the grass's average colour.
-fn groundTintFrom(col: vec3f, veg: f32, slope: f32, patchN: f32, patchHue: f32) -> vec3f {
-  let cover = grassDensityFrom(veg, slope, patchN);
-  return mix(col, grassColorFrom(col, patchHue, 0.5) * 0.78, clamp(cover * 1.2, 0.0, 0.85));
-}
-fn groundTint(col: vec3f, veg: f32, slope: f32, g: vec2f, seed: i32) -> vec3f {
-  return groundTintFrom(col, veg, slope, patchDensityAt(g, seed), patchHueAt(g, seed));
 }
 `;
 
@@ -105,7 +74,7 @@ ${GROUND_TINT_WGSL}
 struct GrassU {
   ringF: array<vec4f, ${R}>,  // per ring: camera position in cells mod 1 (x, z), spacing, radius
   ringI: array<vec4i, ${R}>,  // per ring: absolute lattice index of the first cell (x, z)
-  params: vec4f,              // blend fraction, density, time, unused
+  params: vec4f,              // blend fraction, density, time, the Eyries' district maps' version (sky blades are made again when it changes)
   wind: vec4f,                // direction x, z; strength; gust scale
 };
 @group(0) @binding(6) var<uniform> grass: GrassU;
@@ -193,7 +162,8 @@ override NO_BLADE_CACHE: bool = false;
 fn skyBlade(id: vec3u, ix: i32, iz: i32, xz: vec2f, hs: vec4f) -> vec4u {
   if (NO_BLADE_CACHE) { return skyBladeRecord(xz, hs, id.z); }
   let slot = (id.z * GRASS_N + u32(iz) % GRASS_N) * GRASS_N + u32(ix) % GRASS_N;
-  let tag = hash3(ix, iz, u.seed * 8 + i32(id.z)) | 1u;
+  // (the districts' version in the tag: when an Eyrie's map arrives its blades are made again)
+  let tag = hash3(ix, iz, u.seed * 8 + i32(id.z) + i32(grass.params.w) * 977) | 1u;
   var rec = bladeCache[slot];
   if (rec.x != tag) {
     rec = skyBladeRecord(xz, hs, id.z);
@@ -233,7 +203,14 @@ fn grassScatter(@builtin(global_invocation_id) id: vec3u) {
   if (skyAloft()) { rec = skyBlade(id, ix, iz, xz, hs); }
   let onIsland = skyGrassNear(bitcast<f32>(rec.y), land);
   let e = select(land, bitcast<f32>(rec.y), onIsland);
-  if (!onIsland && e < W_LEVEL + 0.05) { return; }
+  // The ground's biome layers at the root (terrain.wgsl.ts groundCacheAt): its water, cover, grass,
+  // blade height and flowers. Reeds (tall blades) stand in the shallows; other grass stays on land.
+  var gc: GroundCache;
+  if (!onIsland) {
+    gc = groundCacheAt(xz);
+    let reeds = gc.bioB.a * BLADE_SCALE > 1.6;
+    if (e < gc.wt - select(-0.05, 0.6, reeds)) { return; }
+  }
   let hMax = GRASS_H1 * (1.0 + 0.35 * f32(r));
   let rel = vec3f(relXZ.x, e - u.camPos.y, relXZ.y);
   if (!inFrustum(rel + vec3f(0.0, 0.5 * hMax, 0.0), hMax)) { return; }
@@ -248,21 +225,24 @@ fn grassScatter(@builtin(global_invocation_id) id: vec3u) {
     packedCol = unpack4x8unorm(rec.z);
     flower = packedCol.a > 0.5;
   } else {
-    // Biome: the terrain shading's vegetation weight, clumped at the 14 m scale.
+    // The biome's grass: its cover broken into meadows, none on steep rock, under snow or on lava.
     let g = xz + u.origin;
     let slope = length(gradientAt(xz, max(RF.z, 0.25), RF.z));
     if (slope > 1.1) { return; }
-    let T = temperature(g, e);
-    let M = moisture(g, u.seed);
-    let vegNoise = vnoise(g.x / VEG_WL, g.y / VEG_WL, u.seed + 171);
-    let bio = biomeColor(T, M, e, slope, vegNoise);
-    let dens = grassDensity(bio.veg, slope, g, u.seed) * grass.params.y;
+    let p = vec3f(xz.x, e, xz.y);
+    let dens = grassDensityFrom(gc.bioA.a, slope, gc.mat.z) * (1.0 - snowAt(gc, p, slope)) * (1.0 - beachAt(gc, p, slope)) * select(1.0, 0.0, gc.mat.y < -0.05) * grass.params.y;
     if (hs.z > dens) { return; }
-    height = mix(GRASS_H0, hMax, hs.w) * (0.55 + 0.45 * smoothstep(0.2, 0.9, dens)) * w;
-    // Blade colour: the grass palette at this spot, varied per blade.
+    let blade = gc.bioB.a * BLADE_SCALE;
+    height = mix(GRASS_H0, hMax, hs.w) * blade * (0.55 + 0.45 * smoothstep(0.2, 0.9, dens)) * w;
+    // Blade colour: the biome's grass here, varied per blade; a share flowering where the biome blooms.
     let vary = fract(hs.x * 7.13 + hs.y * 3.7);
-    let col = clamp(grassColor(bio.col, g, vary, u.seed) * (0.85 + 0.3 * fract(hs.y * 5.3)), vec3f(0.0), vec3f(1.0));
-    packedCol = vec4f(sqrt(col), 0.0);
+    var col = clamp(gc.bioB.rgb * gc.bioB.rgb * (0.8 + 0.4 * vary) * (0.85 + 0.3 * fract(hs.y * 5.3)), vec3f(0.0), vec3f(1.0));
+    flower = fract(hs.x * 91.7 + hs.w * 13.3) < gc.mat.w;
+    if (flower) {
+      let fv = fract(hs.y * 41.3 + hs.z * 7.7);
+      col = select(select(vec3f(0.85, 0.75, 0.15), vec3f(0.55, 0.3, 0.75), fv > 0.45), vec3f(0.9, 0.88, 0.85), fv > 0.8);
+    }
+    packedCol = vec4f(sqrt(col), select(0.0, 1.0, flower));
   }
 
   let a = hs.w * 37.0 + hs.z * 11.0;
@@ -339,7 +319,7 @@ fn vsGrass(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> 
 fn fsGrass(i: GOut) -> @location(0) vec4f {
   let dist = length(i.rel);
   let rd = i.rel / dist;
-  if (u.camPos.y < W_LEVEL) { return underwater(rd); }
+  if (u.camPos.y < u.camWater) { return underwater(rd); }
   var n = normalize(i.n);
   if (dot(n, rd) > 0.0) { n = -n; }
   let c = unpack4x8unorm(i.packed);
@@ -390,6 +370,9 @@ fn skyGrassTop(xz: vec2f) -> vec4f {
   let q = xz - realm.isl[ku].c.xy;
   let rho = rlRho(ku, q);
   if (rho > 0.97) { return none; }
+  // Nothing in an Eyrie's streets, nor against its walls.
+  let dd = rlDistrict(ku, q);
+  if (dd.x < 0.25 || dd.y < 1.0) { return none; }
   // (one walk along the stream serves the water, the top and the damp here)
   let sq = rlStreamAt(ku, q);
   if (rlWaterS(ku, q, sq) > -1e8) { return none; }
