@@ -6,6 +6,7 @@ import dynamic from 'next/dynamic';
 import {
   Compass,
   Eye,
+  Map as MapIcon,
   Maximize2,
   Minimize2,
   Moon,
@@ -16,6 +17,7 @@ import {
   Sunrise,
   Sunset,
   ArrowLeft,
+  Backpack,
   Move,
   PersonStanding,
   RotateCcw,
@@ -26,12 +28,16 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/comp
 import { useTerrainEngine, type PresetId } from '@/lib/engine/useTerrainEngine';
 import { useEngineApi, useEngineMode, useEngineStats, useHeroStamina, useSkyState, type CamMode, type StatsStore } from '@/lib/engine/statsStore';
 import { useSeedState } from '@/lib/engine/useSeedState';
+import { useKeybinds } from '@/lib/engine/keybindStore';
+import { keyHint, keyNote, lookKeys, moveKeys, type ActionId, type Bindings } from '@/lib/engine/keybinds';
 import type { SkyMode } from '@/lib/gpu/engineGpu';
 import type { SpawnAt } from '@/lib/engine/engineCore';
-import { clockText, dayPhase } from '@/lib/sky/clock';
+import { clockText5, dayPhase } from '@/lib/sky/clock';
 import { NetSession, useNetView } from '@/lib/net/session';
 import { CHARACTERS } from '@/lib/hero/characters';
 import { Lobby, PlayersPanel } from './Multiplayer';
+import { CombatHud, Hearts } from './CombatHud';
+import { MapHud } from './MapHud';
 import {
   DEFAULT_SEED,
   CAMERA,
@@ -39,6 +45,16 @@ import {
 } from '@/lib/constants';
 
 const SettingsModal = dynamic(() => import('./SettingsModal'), {
+  ssr: false,
+});
+
+// The inventory screen is fetched the first time it is opened.
+const InventoryScreen = dynamic(() => import('./InventoryScreen'), {
+  ssr: false,
+});
+
+// So is the full map.
+const MapScreen = dynamic(() => import('./MapScreen'), {
   ssr: false,
 });
 
@@ -90,15 +106,16 @@ const HudOverlay = React.memo(function HudOverlay({
   );
 });
 
-// The stamina wheel beside the hero (third person only): hidden while full,
-// red while exhausted. Updated at the 5 Hz telemetry rate; the CSS transition
-// fills the gaps between samples.
-const STAMINA_R = 15;
+// The stamina wheel beside the hero (third person only): hidden while full, a bright green ring that
+// turns amber as it runs low and red while exhausted. Updated at the 5 Hz telemetry rate; the CSS
+// transition fills the gaps between samples.
+const STAMINA_R = 14;
 const STAMINA_C = 2 * Math.PI * STAMINA_R;
 const StaminaWheel = React.memo(function StaminaWheel({ statsStore }: { statsStore: StatsStore }) {
   const { percent, exhausted } = useHeroStamina(statsStore);
   if (percent === null) return null;
   const hidden = percent >= 100 && !exhausted;
+  const colour = exhausted ? '#ff4a3d' : percent < 30 ? '#ffc53d' : '#2ee66b';
   // Beside the hero's head: the orbit camera frames the chest at the screen
   // centre with ~6.4 m of height in view, so the offsets scale with the viewport.
   return (
@@ -107,20 +124,22 @@ const StaminaWheel = React.memo(function StaminaWheel({ statsStore }: { statsSto
       className={`pointer-events-none absolute left-[calc(50%+5vh)] top-[calc(50%-12vh)] z-10 transition-opacity duration-500 ${hidden ? 'opacity-0' : 'opacity-100'}`}
     >
       <svg width="40" height="40" viewBox="0 0 40 40">
-        <circle cx="20" cy="20" r={STAMINA_R} fill="rgba(12,10,9,0.45)" stroke="rgba(255,255,255,0.14)" strokeWidth="5" />
+        <circle cx="20" cy="20" r="17" fill="rgba(8,14,12,0.42)" />
+        <circle cx="20" cy="20" r={STAMINA_R} fill="none" stroke="rgba(255,255,255,0.14)" strokeWidth="4.5" />
         <circle
           cx="20"
           cy="20"
           r={STAMINA_R}
           fill="none"
-          stroke={exhausted ? '#ef4444' : '#4ade80'}
-          strokeWidth="5"
+          stroke={colour}
+          strokeWidth="4.5"
           strokeLinecap="round"
           strokeDasharray={STAMINA_C}
           strokeDashoffset={STAMINA_C * (1 - percent / 100)}
           transform="rotate(-90 20 20)"
           style={{ transition: 'stroke-dashoffset 200ms linear, stroke 200ms' }}
         />
+        <circle cx="20" cy="20" r="3.2" fill="rgba(255,255,255,0.55)" />
       </svg>
     </div>
   );
@@ -138,7 +157,7 @@ const SkyClock = React.memo(function SkyClock({ statsStore }: { statsStore: Stat
   return (
     <span className="hidden sm:flex h-8 items-center gap-1.5 px-2.5 rounded-md bg-stone-950/80 backdrop-blur border border-stone-800 font-mono text-xs text-stone-200">
       <Icon className="size-3.5 text-amber-300" />
-      <span className="tabular-nums">{clockText(hour)}</span>
+      <span className="tabular-nums">{clockText5(hour)}</span>
       <span className="text-stone-500">{phase}</span>
       {s.paused && <Pause className="size-3 text-stone-500" aria-label="Time stopped" />}
     </span>
@@ -155,6 +174,14 @@ function urlSky(): SkyMode {
 // ?spawn=sky starts the hero up on the nearest sky archipelago's hub.
 function urlSpawn(): SpawnAt {
   return urlParam('spawn') === 'sky' ? 'sky' : 'land';
+}
+// ?foes=0: a peaceful world (no Bokoblin camps).
+function urlFoes(): boolean {
+  return urlParam('foes') !== '0';
+}
+// ?kit=1: start with a full pouch (one of every weapon, shield and bow, and some of every food).
+function urlKit(): boolean {
+  return urlParam('kit') === '1';
 }
 function urlHour(): number {
   const v = urlParam('time');
@@ -184,19 +211,22 @@ const noSubscribe = () => () => {};
 
 const MODE_LABEL: Record<CamMode, string> = { hero: 'HERO', walk: 'WALK', fly: 'FLY' };
 
-function ControlsBanner({ mode, isPointerLocked, timeKey }: { mode: CamMode | null; isPointerLocked: boolean; timeKey: boolean }) {
+function ControlsBanner({ mode, isPointerLocked, timeKey, bindings }: { mode: CamMode | null; isPointerLocked: boolean; timeKey: boolean; bindings: Bindings }) {
+  const k = (id: ActionId) => keyHint(bindings, id);
   const keys: Array<[string, string]> =
     mode === 'fly'
-      ? [['WASD', 'Move'], ['Shift', 'Boost'], ['Space', 'Up'], ['C', 'Down'], ['F', 'Land'], ['V', 'Hero'], ['R', 'Respawn']]
+      ? [[moveKeys(bindings), 'Move'], [lookKeys(bindings), 'Look'], [k('sprint'), 'Boost'], [k('jump'), 'Up'], [k('crouch'), 'Down'], [k('toggleMode'), 'Land'], [k('toggleView'), 'Hero'], [k('map'), 'Map'], [k('respawn'), 'Respawn']]
       : mode === 'walk'
-        ? [['WASD', 'Move'], ['Shift', 'Sprint'], ['Space', 'Jump'], ['V', 'Third person'], ['F', 'Fly'], ['R', 'Respawn']]
-        : [['WASD', 'Move'], ['Shift', 'Sprint'], ['Space', 'Jump · Glide'], ['C', 'Sneak'], ['Wheel', 'Zoom'], ['V', 'First person'], ['F', 'Fly'], ['R', 'Respawn']];
-  if (timeKey) keys.push(['T', 'Time ≫']);
+        ? [[moveKeys(bindings), 'Move'], [lookKeys(bindings), 'Look'], [k('sprint'), 'Sprint'], [k('jump'), 'Jump'], [k('toggleView'), 'Third person'], [k('toggleMode'), 'Fly'], [k('map'), 'Map'], [k('respawn'), 'Respawn']]
+        : [[moveKeys(bindings), 'Move'], [lookKeys(bindings), 'Look'], [k('sprint'), 'Sprint'], [k('jump'), 'Jump · Glide'], [k('crouch'), 'Sneak'], ['LMB', 'Attack (hold: spin)'], ['RMB', 'Shield · Lock on'],
+          [k('aim'), 'Bow'], [k('throw'), 'Throw'], [k('interact'), 'Action · Surf'], [k('swap'), 'Swap'], [k('inventory'), 'Inventory'], [k('map'), 'Map'], [k('toggleView'), 'First person'], [k('toggleMode'), 'Fly'], [k('respawn'), 'Respawn']];
+  if (timeKey) keys.push([k('fastTime'), 'Time ≫']);
   return (
     <div className="flex flex-wrap items-center justify-center gap-x-3 gap-y-1 px-4 py-2 rounded-full border border-stone-800/80 bg-stone-950/80 backdrop-blur-md font-mono text-[11px] text-stone-300 shadow-xl">
-      {keys.map(([k, what]) => (
-        <React.Fragment key={k}>
-          <span><strong className="text-emerald-400">{k}</strong> {what}</span>
+      {/* (a control with no key has nothing to press) */}
+      {keys.filter(([key]) => key).map(([key, what]) => (
+        <React.Fragment key={what}>
+          <span><strong className="text-emerald-400">{key}</strong> {what}</span>
           <span className="text-stone-700">•</span>
         </React.Fragment>
       ))}
@@ -211,7 +241,14 @@ export default function GamePage() {
   const { seed, seedText, onSeedChange, randomizeSeed, setSeed, setSeedText } = useSeedState(DEFAULT_SEED);
   const [preset, setPreset] = useState<PresetId>('med');
   const [showSettings, setShowSettings] = useState(false);
+  const [showInventory, setShowInventory] = useState(false);
+  const [showMap, setShowMap] = useState(false);
   const [showHud, setShowHud] = useState(true);
+  // The HUD in three steps (the + and − keys): 2 everything, 1 the essentials (the hearts, the minimap with its
+  // temperature and sound gauges, the clock), which is where it starts, 0 nothing.
+  const [hudLevel, setHudLevel] = useState<0 | 1 | 2>(1);
+  const hudFull = hudLevel === 2;
+  const hudOn = hudLevel >= 1;
   const [isPointerLocked, setIsPointerLocked] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
 
@@ -221,6 +258,10 @@ export default function GamePage() {
   const [sky, setSky] = useState<SkyMode>(urlSky);
   const [clockStart] = useState(() => ({ hour: urlHour(), dayMinutes: 24 }));
   const [spawnAt] = useState(urlSpawn);
+  const [foes] = useState(urlFoes);
+  const [kit] = useState(urlKit);
+  // Which key does what (changed in Engine Settings → Controls, saved in the browser).
+  const [{ bindings, keymap }, setBindings] = useKeybinds();
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
@@ -240,7 +281,12 @@ export default function GamePage() {
   const character = isFree(picked) ? picked : (CHARACTERS.find((c) => isFree(c.id))?.id ?? picked);
   const netSeed = useRef<number | null>(null); // the last seed the world set (not to be sent back)
 
-  const { statsStore, error, respawn, toggleMode, toggleView, setHour, setTimePaused, setDayMinutes, clock } = useTerrainEngine({
+  // The inventory screen (the inventory key, or its button) and the map (the map key, or the minimap): behind the lobby there are none,
+  // and one is open at a time.
+  const inventoryOpen = showInventory && phase === 'play' && !showMap;
+  const mapOpen = showMap && phase === 'play' && !showInventory;
+
+  const { statsStore, combatHud, pouch, pouchCommand, mapHud, error, respawn, travel, toggleMode, toggleView, setHour, setTimePaused, setDayMinutes, clock } = useTerrainEngine({
     canvasRef,
     seed,
     preset,
@@ -257,9 +303,24 @@ export default function GamePage() {
     inputBlocked: phase !== 'play',
     character,
     net,
+    foes,
+    kit,
+    keymap,
+    menuOpen: inventoryOpen || mapOpen,
     onPointerLockChange: setIsPointerLocked,
     onToggleHud: () => setShowHud((v) => !v),
+    onHudStep: (d) => setHudLevel((l) => Math.max(0, Math.min(2, l + d)) as 0 | 1 | 2),
+    onToggleInventory: () => { if (!showMap) setShowInventory((v) => !v); },
+    onToggleMap: () => { if (!showInventory) setShowMap((v) => !v); },
   });
+  const closeInventory = () => {
+    setShowInventory(false);
+    canvasRef.current?.focus();
+  };
+  const closeMap = () => {
+    setShowMap(false);
+    canvasRef.current?.focus();
+  };
   const mode = useEngineMode(statsStore);
   const api = useEngineApi(statsStore);
 
@@ -331,8 +392,9 @@ export default function GamePage() {
         />
 
         {/* Top Left Navigation & HUD */}
-        <div className="absolute top-4 left-4 z-20 flex flex-col gap-2 pointer-events-auto max-w-[calc(100vw-32px)]">
-          <div className="flex items-center gap-2">
+        <div className={`absolute top-4 left-4 z-20 flex flex-col gap-2 pointer-events-auto max-w-[calc(100vw-32px)] ${inventoryOpen ? 'invisible' : ''}`}>
+          {mode === 'hero' && phase === 'play' && hudOn && <Hearts store={combatHud} />}
+          <div className={`flex items-center gap-2 ${hudFull ? '' : 'hidden'}`}>
             <Link href="/" passHref>
               <Button
                 variant="outline"
@@ -348,14 +410,16 @@ export default function GamePage() {
             <SkyClock statsStore={statsStore} />
           </div>
 
-          <HudOverlay statsStore={statsStore} preset={preset} showHud={showHud} />
-          {phase === 'play' && <PlayersPanel view={netView} api={api} />}
+          <HudOverlay statsStore={statsStore} preset={preset} showHud={showHud && hudFull} />
+          {phase === 'play' && hudFull && <PlayersPanel view={netView} api={api} />}
         </div>
 
-        <StaminaWheel statsStore={statsStore} />
+        {hudOn && <StaminaWheel statsStore={statsStore} />}
+        {phase === 'play' && hudOn && !inventoryOpen && !mapOpen && <MapHud statsStore={statsStore} mapHud={mapHud} onOpen={() => setShowMap(true)} />}
+        <CombatHud store={combatHud} show={mode === 'hero' && phase === 'play' && !inventoryOpen && hudOn} full={hudFull} />
 
         {/* Top Right Quick Controls */}
-        <div className="absolute top-4 right-4 z-20 flex items-center gap-1.5 sm:gap-2 pointer-events-auto">
+        <div className={`absolute top-4 right-4 z-20 flex items-center gap-1.5 sm:gap-2 pointer-events-auto ${inventoryOpen ? 'invisible' : ''} ${hudFull ? '' : 'hidden'}`}>
           {/* Preset Buttons */}
           <div className="flex bg-stone-950/80 backdrop-blur-md border border-stone-800 rounded-md p-0.5">
             {QUALITY_PRESETS.map((p) => {
@@ -396,7 +460,7 @@ export default function GamePage() {
               </Button>
             </TooltipTrigger>
             <TooltipContent className="bg-stone-900 border-stone-700 font-mono text-xs">
-              {mode === 'fly' ? 'Land (F)' : 'Take off: Flight Mode (F)'}
+              {mode === 'fly' ? 'Land' : 'Take off: Flight Mode'}{keyNote(bindings, 'toggleMode')}
             </TooltipContent>
           </Tooltip>
 
@@ -413,7 +477,7 @@ export default function GamePage() {
               </Button>
             </TooltipTrigger>
             <TooltipContent className="bg-stone-900 border-stone-700 font-mono text-xs">
-              {mode === 'hero' ? 'First Person (V)' : 'Third Person Hero (V)'}
+              {mode === 'hero' ? 'First Person' : 'Third Person Hero'}{keyNote(bindings, 'toggleView')}
             </TooltipContent>
           </Tooltip>
 
@@ -429,7 +493,45 @@ export default function GamePage() {
               </Button>
             </TooltipTrigger>
             <TooltipContent className="bg-stone-900 border-stone-700 font-mono text-xs">
-              Respawn at Spawn Point (R)
+              Respawn at Spawn Point{keyNote(bindings, 'respawn')}
+            </TooltipContent>
+          </Tooltip>
+
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="outline"
+                size="icon"
+                aria-label="Open Map"
+                data-action="map"
+                disabled={phase !== 'play'}
+                onClick={() => setShowMap(true)}
+                className="h-8 w-8 border-stone-800 bg-stone-950/80 backdrop-blur text-stone-300 hover:bg-stone-900 hover:text-emerald-400"
+              >
+                <MapIcon className="size-4" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent className="bg-stone-900 border-stone-700 font-mono text-xs">
+              Map{keyNote(bindings, 'map')}
+            </TooltipContent>
+          </Tooltip>
+
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="outline"
+                size="icon"
+                aria-label="Open Inventory"
+                data-action="inventory"
+                disabled={mode !== 'hero' || phase !== 'play'}
+                onClick={() => setShowInventory(true)}
+                className="h-8 w-8 border-stone-800 bg-stone-950/80 backdrop-blur text-stone-300 hover:bg-stone-900 hover:text-amber-300"
+              >
+                <Backpack className="size-4" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent className="bg-stone-900 border-stone-700 font-mono text-xs">
+              Inventory{keyNote(bindings, 'inventory')}
             </TooltipContent>
           </Tooltip>
 
@@ -467,7 +569,7 @@ export default function GamePage() {
         </div>
 
         {/* Settings Modal Popover */}
-        {showSettings && (
+        {showSettings && hudFull && (
           <SettingsModal
             showSettings={showSettings}
             onClose={() => setShowSettings(false)}
@@ -485,14 +587,19 @@ export default function GamePage() {
             toggleView={toggleView}
             showHud={showHud}
             setShowHud={setShowHud}
-            skyControls={{ statsStore, api, sky, setSky, setHour, setTimePaused, setDayMinutes }}
+            skyControls={{ statsStore, api, sky, setSky, setHour, setTimePaused, setDayMinutes, travel }}
+            bindings={bindings}
+            setBindings={setBindings}
           />
         )}
 
         {/* Bottom Center Controls Banner */}
-        <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-20 pointer-events-none w-max max-w-[calc(100vw-32px)]">
-          <ControlsBanner mode={mode} isPointerLocked={isPointerLocked} timeKey={api === 'webgpu' && sky === 'cycle'} />
+        <div className={`absolute bottom-4 left-1/2 -translate-x-1/2 z-20 pointer-events-none w-max max-w-[calc(100vw-32px)] md:max-w-[calc(100vw-600px)] ${inventoryOpen ? 'invisible' : ''} ${hudFull ? '' : 'hidden'}`}>
+          <ControlsBanner mode={mode} isPointerLocked={isPointerLocked} timeKey={api === 'webgpu' && sky === 'cycle'} bindings={bindings} />
         </div>
+
+        {inventoryOpen && <InventoryScreen store={pouch} command={pouchCommand} onClose={closeInventory} bindings={bindings} />}
+        {mapOpen && <MapScreen mapHud={mapHud} selfName={playerName.trim() || `${CHARACTERS[character].name} hero`} selfChar={character} onClose={closeMap} bindings={bindings} />}
 
         {phase === 'lobby' && (
           <Lobby
@@ -507,7 +614,7 @@ export default function GamePage() {
         )}
 
         {/* Pointer lock hint on canvas initial click */}
-        {!isPointerLocked && phase === 'play' && (
+        {!isPointerLocked && phase === 'play' && !inventoryOpen && hudFull && (
           <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-10 pointer-events-none opacity-80 transition-opacity">
             <div className="px-5 py-2.5 rounded-xl border border-stone-700 bg-stone-950/90 backdrop-blur-md text-stone-300 font-mono text-xs flex items-center gap-2.5 shadow-2xl animate-pulse">
               <Move className="size-4 text-emerald-400" />

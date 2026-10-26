@@ -117,6 +117,7 @@ struct SkyFall {
   b: vec4f,   // direction x, z (unit), speed over the lip, reach (m fallen when it has all become mist)
   c: vec4f,   // seed, island, biome, unused
 };
+fn fallAt(k: u32) -> SkyFall { return realm.fall[k]; }
 struct SkyCluster {
   c: vec4f,   // centre x, z (chunk-local), radius holding all of it, unused
   r: vec4u,   // first island, islands, first arch, arches

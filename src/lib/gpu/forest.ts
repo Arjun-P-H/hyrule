@@ -13,15 +13,15 @@
  *   encode(enc, group0)   placement for new tiles, culling, the bucket clamp,
  *                         then the shadow pass
  *   draw(pass)            one indexed indirect draw per bucket, in the main pass
- *   drawCardDepth(pass)   the near trees' leaf cards' depth, cut out (discard): first
- *                         in the pass, so what lies behind leaves is never shaded
+ *   drawCardDepth(pass)   the near trees' leaf cards' depth (and the conifers' boughs'), cut out
+ *                         (discard): first in the pass, so what lies behind leaves is never shaded
  *   drawCardColour(pass)  their colour where that depth is equal: once per pixel
  */
 
 import { LIGHT } from '../constants';
 import { buildLeafAtlas, LEAF_MIPS, LEAF_SIZE, LEAF_STYLES } from '../forest/leafAtlas';
 import { buildTreeModels, VERTEX_BYTES, type TreeModels } from '../forest/models';
-import { CELL, LODS } from '../forest/species';
+import { CELL, LODS, SPECIES, VARIANTS } from '../forest/species';
 import { TILE_CELLS, TileWindow } from '../forest/tiles';
 import { skyGround } from '../skyworld/realm';
 import { surfaceAt } from '../terrainMath';
@@ -34,6 +34,10 @@ const TILE = CELL * TILE_CELLS;
 const SHADOW_DEPTH = 400;
 
 type V3 = [number, number, number];
+
+const ALL_KINDS = Array.from({ length: KINDS }, (_, k) => k);
+/** The buckets of the conifers, whose boughs are cut out of cards (models.ts). */
+const CONIFER_KINDS = Array.from({ length: VARIANTS }, (_, v) => SPECIES.indexOf('pine') * VARIANTS + v);
 
 /** The classic sky's fixed sun. */
 const CLASSIC_SUN: V3 = [LIGHT.sunDir[0], LIGHT.sunDir[1], LIGHT.sunDir[2]];
@@ -334,13 +338,15 @@ export class Forest {
     sp.setIndexBuffer(this.ibuf, 'uint32');
     this.drawGroup(sp, 3);
     this.drawGroup(sp, 7);
+    // The conifers' boughs (their cards) cast their whole sheets: leaves cut out would be a pass of their own.
+    this.drawGroup(sp, 3, true, CONIFER_KINDS);
     casters?.(sp);
     sp.end();
   }
 
-  /** One indexed indirect draw per bucket of group g (pipeline, group 0 and buffers already set); `cards`: the buckets' leaf cards. */
-  private drawGroup(pass: GPURenderPassEncoder, g: number, cards = false): void {
-    for (let k = 0; k < KINDS; k++) {
+  /** One indexed indirect draw per bucket of group g (pipeline, group 0 and buffers already set); `cards`: the buckets' leaf cards; `kinds`: only these buckets. */
+  private drawGroup(pass: GPURenderPassEncoder, g: number, cards = false, kinds?: readonly number[]): void {
+    for (const k of kinds ?? ALL_KINDS) {
       pass.setBindGroup(1, this.drawBinds[g], this.offsets, g * KINDS + k, 1);
       pass.drawIndexedIndirect(this.args, ((cards ? BUCKETS : 0) + g * KINDS + k) * ARGS_BYTES);
     }

@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { FLY_CEILING, HERO, MAX_WORLD_H, PLAYER, SKY_REALM as S, VALLEY } from '../src/lib/constants';
+import { FLY_CEILING, HERO, PLAYER, SKY_REALM as S, VALLEY } from '../src/lib/constants';
 import { createHeroState, placeHero, updateHero, type HeroInput } from '../src/lib/hero/locomotion';
 import { archGround, archY, type Arch } from '../src/lib/skyworld/arches';
 import { archipelagoInCell, BRIDGE_SLOPE, isleInCell, type Archipelago } from '../src/lib/skyworld/archipelago';
@@ -98,16 +98,15 @@ describe('the sky realm: layout', () => {
 });
 
 describe('the sky realm: island shapes', () => {
-  test('every underside clears the highest peak; the top stays above it; they meet at the rim', () => {
-    expect(S.floor).toBeGreaterThan(MAX_WORLD_H);
+  test('every underside clears the ground under it; the top stays above it; they meet at the rim', () => {
     for (const isl of ISLANDS) {
-      expect(isl.y - maxDrop(isl)).toBeGreaterThanOrEqual(S.floor - 1e-6);
+      expect(isl.y - maxDrop(isl)).toBeGreaterThanOrEqual(elevation(isl.cx, isl.cz, SEED, 0) + S.clearance - 1e-6);
       for (let k = 0; k < 48; k++) {
         const th = (k / 48) * Math.PI * 2;
         for (const rho of [0, 0.25, 0.5, 0.75, 0.9, 0.97, 1]) {
           const [x, z] = at(isl, rho, th);
           const top = topAt(isl, x, z), bot = bottomAt(isl, x, z);
-          expect(bot).toBeGreaterThanOrEqual(S.floor);
+          expect(bot).toBeGreaterThan(elevation(x, z, SEED, 0));
           if (rho === 1) expect(Math.abs(top - bot)).toBeLessThan(1e-6);
           else expect(top).toBeGreaterThanOrEqual(bot);
         }
@@ -199,7 +198,7 @@ describe('the sky realm: water with a source', () => {
       const F = isl.fall!;
       const land = Math.max(elevation(F.x + F.dirX * 25, F.z + F.dirZ * 25, SEED, 0), VALLEY.wLevel);
       expect(F.reach).toBeLessThanOrEqual(0.5 * (F.y - land) + 1e-6);
-      expect(F.y - F.reach).toBeGreaterThan(MAX_WORLD_H);
+      expect(F.y - F.reach).toBeGreaterThan(land);
       expect(Math.hypot(F.dirX, F.dirZ)).toBeCloseTo(1, 6);
       // It leaves outward, over the rim.
       expect((F.x - isl.cx) * F.dirX + (F.z - isl.cz) * F.dirZ).toBeGreaterThan(0);
@@ -288,7 +287,8 @@ describe('the hero in the sky realm', () => {
     expect(FLY_CEILING.webgpu).toBeGreaterThan(S.topMax + 400);
   });
 
-  const idle: HeroInput = { forward: 0, strafe: 0, sprint: false, jump: false, sneak: false, camYaw: 0 };
+  // (straight runs across the islands, past their trees: without climbing one that is in the way)
+  const idle: HeroInput = { forward: 0, strafe: 0, sprint: false, jump: false, sneak: false, camYaw: 0, noClimb: true };
 
   test('lands on a hub, runs to its lake and swims in it', () => {
     const isl = ISLANDS.find((i) => i.kind === 'hub' && i.lake && !i.lake.frozen)!;

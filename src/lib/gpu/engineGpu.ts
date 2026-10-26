@@ -6,6 +6,7 @@
  */
 
 import { createTerrainRenderer, type FrameParams, type TerrainRendererLike, type TerrainVariant } from './terrainRenderer';
+import type { World } from '../world';
 
 /** The sky the game draws: the day–night cycle, or the classic fixed sky. */
 export type SkyMode = 'cycle' | 'classic';
@@ -18,8 +19,9 @@ export type SkyMode = 'cycle' | 'classic';
  * candidates, 0.125 m cells near the camera), the forest (ten species; forest
  * bodies, groves and lone trees placed by climate zone and terrain on a 6 m
  * lattice cached out to ~1.1 km; a sun shadow map), E7's sky islands,
- * waterfalls, ruins and shrines, and E6's
- * temporal anti-aliasing, upscaling the internal resolution to the canvas.
+ * waterfalls, ruins and shrines, the land's model isles (skymodels.ts), and E6's
+ * temporal anti-aliasing, upscaling the internal resolution to the canvas,
+ * and combat (the foes, arrows, sparks: combat.wgsl.ts).
  * The sky (the day–night cycle or the classic sky) is chosen per backend.
  */
 export const GAME_VARIANT: TerrainVariant = {
@@ -30,6 +32,9 @@ export const GAME_VARIANT: TerrainVariant = {
   islands: true,
   ruins: true,
   diag: true,
+  combat: true,
+  rocks: true,
+  modelIsles: true,
 };
 
 export type GpuBackend = {
@@ -49,12 +54,25 @@ export type GpuBackend = {
    * meanwhile is served after it).
    */
   setSky(mode: SkyMode): void;
+  /** The world being drawn. */
+  world(): World;
+  /** Switch worlds (the portal: portal.ts), the same way as setSky. */
+  setWorld(world: World): void;
   dispose(): void;
 };
 
-const variantFor = (sky: SkyMode): TerrainVariant => ({ ...GAME_VARIANT, sky } as TerrainVariant);
+/**
+ * The game's renderer for a sky and a world: the land as ever (its sky realm overhead); the cloud world
+ * (inactive: reached only by the settings' switch, for inspection) the realm over its cloud ground, with
+ * none of the land's grass, trees and rocks.
+ */
+export function gameVariant(sky: SkyMode, world: World): TerrainVariant {
+  return (world === 'clouds'
+    ? { ...GAME_VARIANT, sky, world, grass: null, forest: null, rocks: false, puffs: true, modelIsles: false }
+    : { ...GAME_VARIANT, sky, world }) as TerrainVariant;
+}
 
-export async function createGpuBackend(canvas: HTMLCanvasElement, initialSky: SkyMode = 'cycle'): Promise<GpuBackend> {
+export async function createGpuBackend(canvas: HTMLCanvasElement, initialSky: SkyMode = 'cycle', initialWorld: World = 'land'): Promise<GpuBackend> {
   if (typeof navigator === 'undefined' || !navigator.gpu) throw new Error('WebGPU is unavailable in this browser');
   const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
   if (!adapter) throw new Error('No WebGPU adapter');
@@ -73,8 +91,8 @@ export async function createGpuBackend(canvas: HTMLCanvasElement, initialSky: Sk
   }
   const format = navigator.gpu.getPreferredCanvasFormat();
   ctx.configure({ device, format, alphaMode: 'opaque' });
-  let renderer: TerrainRendererLike = createTerrainRenderer(device, format, variantFor(initialSky));
-  let current = initialSky;
+  let renderer: TerrainRendererLike = createTerrainRenderer(device, format, gameVariant(initialSky, initialWorld));
+  let current = initialSky, currentWorld = initialWorld;
   try {
     await renderer.init();
   } catch (e) {
@@ -86,26 +104,28 @@ export async function createGpuBackend(canvas: HTMLCanvasElement, initialSky: Sk
   let inflight = 0;
   let lost = false;
   let disposed = false;
-  let wanted = initialSky;
+  let wanted = initialSky, wantedWorld = initialWorld;
   let switching: Promise<void> | null = null;
-  // Build renderers until the one drawing is the one wanted; the old one is
+  // Build renderers until the one drawing is the one wanted (sky and world); the old one is
   // destroyed once the frames it drew have left the GPU.
   const switchSky = async () => {
-    while (wanted !== current && !lost && !disposed) {
-      const target = wanted;
-      const next = createTerrainRenderer(device, format, variantFor(target));
+    while ((wanted !== current || wantedWorld !== currentWorld) && !lost && !disposed) {
+      const target = wanted, targetWorld = wantedWorld;
+      const next = createTerrainRenderer(device, format, gameVariant(target, targetWorld));
       try {
         await next.init();
       } catch (e) {
-        console.error(`WebGPU: the ${target} sky failed to build`, e);
+        console.error(`WebGPU: the ${target} sky over the ${targetWorld} failed to build`, e);
         next.destroy();
         wanted = current;
+        wantedWorld = currentWorld;
         break;
       }
       if (lost || disposed) { next.destroy(); break; }
       const old = renderer;
       renderer = next;
       current = target;
+      currentWorld = targetWorld;
       void device.queue.onSubmittedWorkDone().then(() => old.destroy());
     }
     switching = null;
@@ -125,6 +145,11 @@ export async function createGpuBackend(canvas: HTMLCanvasElement, initialSky: Sk
     setSky(mode) {
       wanted = mode;
       if (!switching && wanted !== current) switching = switchSky();
+    },
+    world: () => currentWorld,
+    setWorld(w) {
+      wantedWorld = w;
+      if (!switching && wantedWorld !== currentWorld) switching = switchSky();
     },
     draw(fp) {
       if (lost) return;

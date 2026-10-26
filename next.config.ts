@@ -3,9 +3,10 @@ import path from "path";
 import withBundleAnalyzer from "@next/bundle-analyzer";
 
 const nextConfig: NextConfig = {
-  // `next dev` locks its build directory; NEXT_DIST_DIR gives a second dev server (the preview in
-  // .claude/launch.json) its own, so it can run beside another one.
-  distDir: process.env.NEXT_DIST_DIR || ".next",
+  // `next dev` locks its build directory, and `next build` empties .next: a dev server's directory (and its Turbopack
+  // cache) must not be inside it. scripts/dev-server.sh sets NEXT_DIST_DIR (.next-dev, -2, -3: servers side by side);
+  // a bare `next dev` takes .next-dev too, and only a production build uses .next.
+  distDir: process.env.NEXT_DIST_DIR || (process.env.NODE_ENV === "production" ? ".next" : ".next-dev"),
   output: "standalone",
   outputFileTracingRoot: path.join(__dirname),
   reactStrictMode: true,

@@ -9,7 +9,7 @@
  * is the texture u_hydro (hydro.ts hydroTable, six texels a node) with its header u_hydro_head.
  */
 
-import { CLIMATE, F, GEO, HYDRO, LANDS } from '../../lib/constants';
+import { CLIMATE, CRAG, F, GEO, HYDRO, LANDS, TOWER } from '../../lib/constants';
 import { BI, BIOMES, BIOME_COUNT, LANDFORM, LANDFORM_KEYS, LOOK, SNOW_ALBEDO } from '../../lib/biomes';
 import { CEIL_SPAN, CEIL_START, DRY_TABLE, ERO_STEP, LAND_MEANS, RIDGE_AMP, RIDGE_FREQ } from '../../lib/terrainMath';
 import { COAST_RAMP, CRATER_RIM, SINK } from '../../lib/hydro';
@@ -83,7 +83,11 @@ float basinAt(vec2 w, int seed) {
 float rangeAt(vec2 w, int seed) {
   float rm = smoothstep(${f(GEO.rangeMask[0])}, ${f(GEO.rangeMask[1])}, n01(w, F_RANGEMASK, seed + 3121));
   if (rm <= 0.0) return 0.0;
-  vec2 b = w + ${f(GEO.rangeWarp)} * vec2(vnoise(w.x * F_RANGEWARP, w.y * F_RANGEWARP, seed + 3113), vnoise(w.x * F_RANGEWARP + 3.7, w.y * F_RANGEWARP - 1.9, seed + 3114));
+  // (bent again at three finer scales: hydro.ts rangeAt)
+  vec2 b = w + ${f(GEO.rangeWarp)} * vec2(vnoise(w.x * F_RANGEWARP, w.y * F_RANGEWARP, seed + 3113), vnoise(w.x * F_RANGEWARP + 3.7, w.y * F_RANGEWARP - 1.9, seed + 3114))
+    + vec2(
+      ${f(GEO.rangeBend[0])} * vnoise(w.x * F_PEAKS, w.y * F_PEAKS, seed + 3116) + ${f(GEO.rangeBend[1])} * vnoise(w.x * F_FLOORWOB, w.y * F_FLOORWOB, seed + 3117) + ${f(GEO.rangeBend[2])} * vnoise(w.x * F_TOWER, w.y * F_TOWER, seed + 3118),
+      ${f(GEO.rangeBend[0])} * vnoise(w.x * F_PEAKS, w.y * F_PEAKS, seed + 3119) + ${f(GEO.rangeBend[1])} * vnoise(w.x * F_FLOORWOB, w.y * F_FLOORWOB, seed + 3120) + ${f(GEO.rangeBend[2])} * vnoise(w.x * F_TOWER, w.y * F_TOWER, seed + 3122));
   float ca = ${f(Math.cos(GEO.rangeDir[0]))}, sa = ${f(Math.sin(GEO.rangeDir[0]))};
   float cb = ${f(Math.cos(GEO.rangeDir[1]))}, sb = ${f(Math.sin(GEO.rangeDir[1]))};
   float c1 = 1.0 - abs(vnoise((b.x * ca + b.y * sa) * F_RANGEU, (b.y * ca - b.x * sa) * F_RANGEV, seed + 3111));
@@ -92,12 +96,23 @@ float rangeAt(vec2 w, int seed) {
   float pk = ${f(GEO.pass)} + ${f(1 - GEO.pass)} * n01(w, F_PEAKS, seed + 3131);
   return rm * pow(c, ${f(GEO.rangePow)}) * pk;
 }
+// A tableland's weight at warped w, 0–1 (mirror hydro.ts plateauAt): its outline bent, its wall's width varied.
+float plateauAt(vec2 w, int seed) {
+  float pn0 = 0.72 * n01(w, F_PLATCOARSE, seed + 1401) + 0.28 * n01(w, F_PLATFINE, seed + 1402);
+  if (pn0 < ${f(GEO.plat - 0.05 - GEO.platBand)}) return 0.0;
+  if (pn0 > ${f(GEO.plat + GEO.platEdge + GEO.platRamp + GEO.platBand)}) return 1.0;
+  vec2 p = w + vec2(
+    ${f(GEO.platWarp[0])} * vnoise(w.x * F_PLATBAY, w.y * F_PLATBAY, seed + 1411) + ${f(GEO.platWarp[1])} * vnoise(w.x * F_PLATNOTCH, w.y * F_PLATNOTCH, seed + 1412),
+    ${f(GEO.platWarp[0])} * vnoise(w.x * F_PLATBAY + 5.3, w.y * F_PLATBAY - 2.1, seed + 1413) + ${f(GEO.platWarp[1])} * vnoise(w.x * F_PLATNOTCH + 3.7, w.y * F_PLATNOTCH - 9.1, seed + 1414));
+  float pn = 0.72 * n01(p, F_PLATCOARSE, seed + 1401) + 0.28 * n01(p, F_PLATFINE, seed + 1402);
+  float ew = ${f(GEO.platEdge)} + ${f(GEO.platRamp)} * smoothstep(0.35, 0.7, n01(w, F_PLATWIDTH, seed + 1415));
+  return 0.82 * smoothstep(${f(GEO.plat)}, ${f(GEO.plat)} + ew, pn) + 0.18 * smoothstep(${f(GEO.plat - 0.05)}, ${f(GEO.plat)}, pn);
+}
 float baseAt(vec2 w, int seed) {
   float low = ${f(GEO.low[0])} + ${f(GEO.low[1])} * n01(w, F_UPL, seed + 3101) + ${f(GEO.low[2])} * n01(w, F_UPL2, seed + 3102);
   float rng = rangeAt(w, seed);
   float ms = smoothstep(${f(GEO.massif[0])}, ${f(GEO.massif[1])}, n01(w, F_MASSIF, seed + 3141));
-  float pn = 0.72 * n01(w, F_PLATCOARSE, seed + 1401) + 0.28 * n01(w, F_PLATFINE, seed + 1402);
-  float pl = 0.82 * smoothstep(${f(GEO.plat)}, ${f(GEO.plat + GEO.platEdge)}, pn) + 0.18 * smoothstep(${f(GEO.plat - 0.05)}, ${f(GEO.plat)}, pn);
+  float pl = plateauAt(w, seed);
   float notRange = 1.0 - smoothstep(0.15, 0.45, rng);
   return low + max(${f(GEO.rangeH)} * rng, ${f(GEO.massifH)} * ms * ms) + ${f(GEO.platH)} * pl * notRange - basinAt(w, seed) * notRange;
 }
@@ -150,8 +165,7 @@ Uplift upliftAt(vec2 w, int seed) {
   float rng = rangeAt(w, seed);
   float ms = smoothstep(${f(GEO.massif[0])}, ${f(GEO.massif[1])}, n01(w, F_MASSIF, seed + 3141));
   float massif = ms * ms;
-  float pn = 0.72 * n01(w, F_PLATCOARSE, seed + 1401) + 0.28 * n01(w, F_PLATFINE, seed + 1402);
-  float pl = 0.82 * smoothstep(${f(GEO.plat)}, ${f(GEO.plat + GEO.platEdge)}, pn) + 0.18 * smoothstep(${f(GEO.plat - 0.05)}, ${f(GEO.plat)}, pn);
+  float pl = plateauAt(w, seed);
   o.range = rng; o.massif = massif; o.plat = pl;
   float hi = max(${f(GEO.rangeH)} * rng, ${f(GEO.massifH)} * massif);
   float notRange = 1.0 - smoothstep(0.15, 0.45, rng);
@@ -176,10 +190,14 @@ Uplift upliftAt(vec2 w, int seed) {
 // The regions' weights into wt; the climate into clim (T0, M, C, range); the volcano's and the sacred
 // grove's weights into sp (x, y).
 void regionsFrom(vec2 g, vec2 w, Uplift up, int seed, out float wt[${NB}], out vec4 clim, out vec2 sp) {
-  float T0 = T_BASE + T_AMP * (vnoise(w.x * F_TEMP, w.y * F_TEMP, seed + 1201) + T_FINE * vnoise(w.x * F_TEMPFINE, w.y * F_TEMPFINE, seed + 1202))
+  // (the regions' edges wander: terrainMath.ts regionsInto)
+  vec2 r = w + vec2(
+    ${f(LANDS.edge[0])} * vnoise(w.x * F_TOWER, w.y * F_TOWER, seed + 1211) + ${f(LANDS.edge[1])} * vnoise(w.x * F_PLATNOTCH, w.y * F_PLATNOTCH, seed + 1212),
+    ${f(LANDS.edge[0])} * vnoise(w.x * F_TOWER, w.y * F_TOWER, seed + 1213) + ${f(LANDS.edge[1])} * vnoise(w.x * F_PLATNOTCH, w.y * F_PLATNOTCH, seed + 1214));
+  float T0 = T_BASE + T_AMP * (vnoise(r.x * F_TEMP, r.y * F_TEMP, seed + 1201) + T_FINE * vnoise(r.x * F_TEMPFINE, r.y * F_TEMPFINE, seed + 1202))
     - L_LAT * abs(g.y);
   float C = up.C;
-  float M = M_BASE + M_AMP * (vnoise(w.x * F_MOISTR, w.y * F_MOISTR, seed + 1301) + M_FINE * vnoise(w.x * F_MOISTFINE, w.y * F_MOISTFINE, seed + 1302))
+  float M = M_BASE + M_AMP * (vnoise(r.x * F_MOISTR, r.y * F_MOISTR, seed + 1301) + M_FINE * vnoise(r.x * F_MOISTFINE, r.y * F_MOISTFINE, seed + 1302))
     + M_OCEAN * (1.0 - smoothstep(COAST_LEVEL, COAST_LEVEL + 0.12, C));
   clim = vec4(T0, M, C, up.range);
   float mtn = smoothstep(0.26, 0.5, max(up.range, 0.9 * up.massif));
@@ -193,10 +211,10 @@ void regionsFrom(vec2 g, vec2 w, Uplift up, int seed, out float wt[${NB}], out v
   float hdry = 1.0 - smoothstep(${f(LANDS.hotDry[0])}, ${f(LANDS.hotDry[1])}, M);
   float arid = 1.0 - smoothstep(${f(LANDS.arid[0])}, ${f(LANDS.arid[1])}, M);
   float wet = smoothstep(${f(LANDS.wet[0])}, ${f(LANDS.wet[1])}, M);
-  float bad = smoothstep(${f(LANDS.rugged[0])}, ${f(LANDS.rugged[1])}, n01(w, F_RUGGED, seed + 1501));
-  float lake = smoothstep(${f(LANDS.lakedist[0])}, ${f(LANDS.lakedist[1])}, n01(w, F_LAKEDIST, seed + 1601));
-  float karst = smoothstep(${f(LANDS.karst[0])}, ${f(LANDS.karst[1])}, n01(w, F_KARST, seed + 1701));
-  float marsh = wet * smoothstep(${f(LANDS.marsh[0])}, ${f(LANDS.marsh[1])}, n01(w, F_MARSH, seed + 1801));
+  float bad = smoothstep(${f(LANDS.rugged[0])}, ${f(LANDS.rugged[1])}, n01(r, F_RUGGED, seed + 1501));
+  float lake = smoothstep(${f(LANDS.lakedist[0])}, ${f(LANDS.lakedist[1])}, n01(r, F_LAKEDIST, seed + 1601));
+  float karst = smoothstep(${f(LANDS.karst[0])}, ${f(LANDS.karst[1])}, n01(r, F_KARST, seed + 1701));
+  float marsh = wet * smoothstep(${f(LANDS.marsh[0])}, ${f(LANDS.marsh[1])}, n01(r, F_MARSH, seed + 1801));
   for (int k = 0; k < ${NB}; k++) wt[k] = 0.0;
   wt[${BI.tundra}] += low * cold;
   wt[${BI.taiga}] += low * cool * (1.0 - lake);
@@ -253,21 +271,53 @@ float lfParam(float wt[${NB}], int k) {
 }
 
 // ---- §6/§11 landforms ---------------------------------------------------------
-float karstTowers(vec2 w, int seed) {
-  vec2 p = w * F_TOWER;
+float karstTowers(vec2 w, int seed, float dp) {
+  float wW = clamp(2.0 - 2.0 * dp * F_TOWERWARP, 0.0, 1.0);
+  float wB = clamp(2.0 - 2.0 * dp * F_TOWERBUMP, 0.0, 1.0);
+  float wC = clamp(2.0 - 2.0 * dp * F_TOWERCROWN, 0.0, 1.0);
+  float w1 = clamp(2.0 - dp / 15.0, 0.0, 1.0);
+  float w2 = clamp(2.0 - dp / 7.0, 0.0, 1.0);
+  float aw = ${f(TOWER.warp)} * wW;
+  vec2 wp = w + aw * vec2(vnoise(w.x * F_TOWERWARP, w.y * F_TOWERWARP, seed + 2311), vnoise(w.x * F_TOWERWARP, w.y * F_TOWERWARP, seed + 2312));
+  float crown = 1.0 + ${f(TOWER.crown)} * wC * vnoise(w.x * F_TOWERCROWN, w.y * F_TOWERCROWN, seed + 2313);
+  float bump = 0.0;
+  if (wB > 0.0) bump = ${f(TOWER.bump)} * wB * vnoise(w.x * F_TOWERBUMP, w.y * F_TOWERBUMP, seed + 2314);
+  vec2 p = wp * F_TOWER;
   vec2 ip = floor(p);
   float best = 0.0;
   for (int j = -1; j <= 1; j++) {
     for (int i = -1; i <= 1; i++) {
-      uint h = hash3(int(ip.x) + i, int(ip.y) + j, seed + 2301);
-      vec2 c = ip + vec2(float(i), float(j)) + 0.2 + 0.6 * vec2(float(h & 0xfffu), float((h >> 12u) & 0xfffu)) * (1.0 / 4095.0);
-      vec2 d = p - c;
+      int ci = int(ip.x) + i;
+      int cj = int(ip.y) + j;
+      uint h = hash3(ci, cj, seed + 2301);
+      vec2 d = p - (vec2(float(ci), float(cj)) + 0.2 + 0.6 * vec2(float(h & 0xfffu), float((h >> 12u) & 0xfffu)) * (1.0 / 4095.0));
       float r = (75.0 + 70.0 * float((h >> 24u) & 15u) / 15.0) * F_TOWER;
-      float d2 = dot(d, d);
-      if (d2 >= r * r) continue;
-      float q1 = sqrt(d2) / r;
-      float H = 50.0 + 170.0 * float((h >> 28u) & 15u) / 15.0;
-      best = max(best, H * (1.0 - q1 * q1 * q1 * sqrt(q1)));
+      if (dot(d, d) >= ${f(TOWER.reach)} * r * r) continue;
+      uint g = hash3(ci, cj, seed + 2302);
+      if ((g >> 28u) < ${Math.round(TOWER.absent * 16)}u) continue;
+      float al = 0.5 + 1.6 * (float(g & 63u) / 63.0 - 0.5);
+      float ca = cos(al), sa = sin(al);
+      float sq = sqrt(1.0 + ${f(TOWER.stretch)} * float((g >> 6u) & 15u) / 15.0);
+      vec2 uv = vec2(dot(d, vec2(ca, sa)) / (r * sq), (d.y * ca - d.x * sa) * sq / r);
+      float q0 = length(uv);
+      float q = q0, n1 = 0.0;
+      if (w1 > 0.0 && q0 > 0.3) {
+        vec2 cs = uv / q0;
+        vec2 o = vec2(float((g >> 10u) & 63u), float((g >> 16u) & 63u));
+        n1 = vnoise(${f(TOWER.rho[0])} * cs.x + o.x + 0.9 * q0, ${f(TOWER.rho[0])} * cs.y + o.y - 0.6 * q0, seed + 2321);
+        float D = ${f(TOWER.flute[0])} * w1 * (abs(n1) - 0.38);
+        if (w2 > 0.0) D += ${f(TOWER.flute[1])} * w2 * (abs(vnoise(${f(TOWER.rho[1])} * cs.x + o.x, ${f(TOWER.rho[1])} * cs.y + o.y, seed + 2322)) - 0.38);
+        q = q0 * (1.0 + D * smoothstep(0.3, 0.65, q0));
+      }
+      if (q >= 1.0) continue;
+      float sx = min((1.0 - q) / ${f(TOWER.wall)}, 1.0);
+      float y = sx * sx * sx * (sx * (sx * 6.0 - 15.0) + 10.0);
+      float ns = 5.0 + 1.5 * float((g >> 22u) & 3u);
+      float ph = y * ns + float((g >> 24u) & 15u) / 15.0 + 1.2 * n1;
+      float fl = floor(ph);
+      y += ${f(TOWER.ledge)} * (fl + smoothstep(0.3, 0.7, ph - fl) - ph) / ns * smoothstep(0.0, 0.12, y);
+      float H = (50.0 + 170.0 * float((h >> 28u) & 15u) / 15.0) * crown;
+      best = max(best, (H * (1.0 - ${f(TOWER.dome)} * q * q) + bump) * y);
     }
   }
   return best;
@@ -280,7 +330,9 @@ float dunesE(vec2 g, int seed, float dp) {
   if (wMain <= 0.0) return DUNE_MEAN * amp;
   float ang = 0.6 + 0.9 * vnoise(g.x * F_DUNEFIELD, g.y * F_DUNEFIELD, seed + 2401);
   float ca = cos(ang), sa = sin(ang);
-  float u = (g.x * ca + g.y * sa) * F_DUNE + 0.9 * vnoise(g.x * F_WARP, g.y * F_WARP, seed + 2402) + 0.35 * vnoise(g.x * F_DUNEBEND, g.y * F_DUNEBEND, seed + 2405);
+  // (the crests' bends at three scales: terrainMath.ts dunesE)
+  float u = (g.x * ca + g.y * sa) * F_DUNE + 0.9 * vnoise(g.x * F_WARP, g.y * F_WARP, seed + 2402) + 0.55 * vnoise(g.x * F_DUNEBEND, g.y * F_DUNEBEND, seed + 2405)
+    + 0.16 * clamp(2.0 - 2.0 * dp * F_PLATNOTCH, 0.0, 1.0) * vnoise(g.x * F_PLATNOTCH, g.y * F_PLATNOTCH, seed + 2406);
   float s = fract(u);
   float prof = s < 0.86 ? pow(smoothstep(0.0, 0.86, s), 1.3) : 1.0 - smoothstep(0.86, 1.0, s);
   float d = 30.0 * prof;
@@ -292,12 +344,34 @@ float dunesE(vec2 g, int seed, float dp) {
   return amp * (wMain * d + (1.0 - wMain) * DUNE_MEAN);
 }
 
-float mesasE(vec2 w, int seed, float dp) {
-  float n = 0.7 * n01(w, F_MESA, seed + 2501) + 0.3 * n01(w, F_MESAFINE, seed + 2502);
-  float cw = max(0.011, 0.0012 * dp);
-  return 80.0 * (0.82 * smoothstep(0.0, cw, n - 0.42) + 0.18 * smoothstep(-0.07, 0.0, n - 0.42))
-    + 70.0 * (0.82 * smoothstep(0.0, cw, n - 0.52) + 0.18 * smoothstep(-0.07, 0.0, n - 0.52))
-    + 60.0 * (0.82 * smoothstep(0.0, cw, n - 0.61) + 0.18 * smoothstep(-0.07, 0.0, n - 0.61));
+float mesasE(vec2 w, int seed, float dp, float region0) {
+  // the region's edge wanders (terrainMath.ts mesasE)
+  float region = clamp(region0 + 4.0 * region0 * (1.0 - region0) * (0.45 * clamp(2.0 - 2.0 * dp * F_TOWER, 0.0, 1.0) * vnoise(w.x * F_TOWER, w.y * F_TOWER, seed + 2541)
+    + 0.25 * clamp(2.0 - 2.0 * dp * F_PLATNOTCH, 0.0, 1.0) * vnoise(w.x * F_PLATNOTCH, w.y * F_PLATNOTCH, seed + 2542)), 0.0, 1.0);
+  // the outline bent (as the tablelands': bays and spurs, notches), the finer scale fading out where the footprint would alias it
+  float kb = clamp(2.0 - 4.0 * dp * F_PLATBAY, 0.0, 1.0);
+  float kn = clamp(2.0 - 4.0 * dp * F_PLATNOTCH, 0.0, 1.0);
+  float A = ${f(GEO.mesaWarp[0])} * kb;
+  float B = ${f(GEO.mesaWarp[1])} * kn;
+  vec2 m = w + vec2(
+    A * vnoise(w.x * F_PLATBAY, w.y * F_PLATBAY, seed + 2511) + B * vnoise(w.x * F_PLATNOTCH, w.y * F_PLATNOTCH, seed + 2512),
+    A * vnoise(w.x * F_PLATBAY + 5.3, w.y * F_PLATBAY - 2.1, seed + 2513) + B * vnoise(w.x * F_PLATNOTCH + 3.7, w.y * F_PLATNOTCH - 9.1, seed + 2514));
+  // (toward the region's edge the field is lowered: buttes on its fringe, one plateau in its heart, no wall along its edge)
+  float n = 0.7 * n01(m, F_MESA, seed + 2501) + 0.3 * n01(m, F_MESAFINE, seed + 2502) - (1.0 - region) * ${f(GEO.mesaFade)} * (0.6 + 0.8 * n01(w, F_PLATBAY, seed + 2531));
+  // (the crags: ridged knobs in the field, which only the walls, where the field is steep in height, show)
+  float c0 = clamp(2.0 - 2.0 * dp * F_CRAGBIG, 0.0, 1.0);
+  float c1 = clamp(2.0 - 2.0 * dp * F_CRAG, 0.0, 1.0);
+  float c2 = clamp(2.0 - 2.0 * dp * F_CRAGFINE, 0.0, 1.0);
+  if (c0 > 0.0) { float a = 1.0 - abs(vnoise(w.x * F_CRAGBIG, w.y * F_CRAGBIG, seed + 2523)); n += ${f(CRAG.mesa[0])} * c0 * (a * a - RIDGE_MEAN); }
+  if (c1 > 0.0) { float a = 1.0 - abs(vnoise(w.x * F_CRAG, w.y * F_CRAG, seed + 2521)); n += ${f(CRAG.mesa[1])} * c1 * (a * a - RIDGE_MEAN); }
+  if (c2 > 0.0) { float a = 1.0 - abs(vnoise(w.x * F_CRAGFINE, w.y * F_CRAGFINE, seed + 2522)); n += ${f(CRAG.mesa[2])} * c2 * (a * a - RIDGE_MEAN); }
+  // the walls: sheer, or a slope where the field says so
+  float ramp = smoothstep(0.45, 0.78, n01(w, F_PLATWIDTH, seed + 2515));
+  float cw = max(0.025, 0.02 * dp) * (1.0 + ${f(GEO.mesaRamp)} * ramp);
+  // (scaled in over the region's first quarter: landDetail calls this only where the region's weight is above 0)
+  return smoothstep(0.0, 0.25, region) * (80.0 * (0.62 * smoothstep(0.0, cw, n - 0.42) + 0.38 * smoothstep(-0.2, 0.0, n - 0.42))
+    + 70.0 * (0.62 * smoothstep(0.0, cw, n - 0.52) + 0.38 * smoothstep(-0.2, 0.0, n - 0.52))
+    + 60.0 * (0.62 * smoothstep(0.0, cw, n - 0.61) + 0.38 * smoothstep(-0.2, 0.0, n - 0.61)));
 }
 
 float hillsAt(vec2 m, int seed, float dp) {
@@ -393,7 +467,18 @@ float riverHalfW(float acc) {
 // The meander's offset (m) from a reach's line at along metres from its head, t its share of the reach.
 float meanderOff(float along, float t, float amp, int sg) {
   if (amp <= 0.0) return 0.0;
-  return amp * smoothstep(0.0, 0.12, t) * smoothstep(1.0, 0.88, t) * vnoise(along * F_MEANDER, 0.5, sg);
+  return amp * smoothstep(0.0, 0.12, t) * smoothstep(1.0, 0.88, t) * (0.74 * vnoise(along * F_MEANDER, 0.5, sg) + 0.26 * vnoise(along * F_MEANDER * 3.1, 4.5, sg));
+}
+// How much wider than its base a reach's valley floor is at along (m): a smooth noise, nothing at the nodes.
+float floorWobbleAt(float along, float t, int sg) {
+  return ${f(H.floorWobble)} * smoothstep(0.0, 0.12, t) * smoothstep(1.0, 0.88, t) * (0.5 + 0.5 * (0.6 * vnoise(along * F_FLOORWOB, 11.5, sg) + 0.4 * vnoise(along * F_FLOORWOB * 2.7, 5.5, sg)));
+}
+// How much of its width one side of a reach's floor keeps, along the reach (mirror hydro.ts floorSideAt).
+float floorSideAt(float along, float t, int sg, float side) {
+  float taper = smoothstep(0.0, 0.12, t) * smoothstep(1.0, 0.88, t);
+  float o = side * 40.7;
+  float s = 0.5 + 0.5 * (0.62 * vnoise(along * F_FLOORWOB * 1.9 + o, 21.5, sg) + 0.38 * vnoise(along * F_FLOORWOB * 5.3 + o, 9.5, sg));
+  return 1.0 - taper * 0.75 * (1.0 - s);
 }
 River riverField(vec2 w, int seed, float k) {
   River o;
@@ -409,6 +494,10 @@ River riverField(vec2 w, int seed, float k) {
   vec2 q = w - u_hydro_head.xy * NODE;
   int ci = int(floor(w.x / NODE)), cj = int(floor(w.y / NODE));
   float rL = ${f(H.lakeR)} * NODE;
+  // (the walls' run wanders: hydro.ts riverField)
+  float wk = 1.0 + ${f(H.wallVary[0])} * vnoise(w.x * F_FLOORWOB, w.y * F_FLOORWOB, seed + 3306) + ${f(H.wallVary[1])} * vnoise(w.x * F_TOWER, w.y * F_TOWER, seed + 3307)
+    + ${f(H.wallVary[2])} * vnoise(w.x * F_PLATNOTCH, w.y * F_PLATNOTCH, seed + 3308);
+  float lat = ${f(H.wallLat)} * (0.6 * vnoise(w.x * F_TOWER, w.y * F_TOWER, seed + 3310) + 0.4 * vnoise(w.x * F_PLATNOTCH, w.y * F_PLATNOTCH, seed + 3311));
   // the lakes at sinks, and the lakes the rivers widen into (their bowls are cut below)
   vec4 lk[9];
   vec2 lkN[9];
@@ -428,7 +517,15 @@ River riverField(vec2 w, int seed, float k) {
         vec2 dv = q - n0.xy;
         float dist = length(dv);
         if (dist > ${f(2.5 * Math.max(H.riverLakeR[1], H.reservoirR[1]))}) continue;
-        float rl = rr * (1.0 + 0.28 * vnoise(dv.x / rr * 1.3, dv.y / rr * 1.3, seed + 3503));
+        // (its shore: the noise's own place and a stretch along one axis, from the node's hash: hydro.ts lakeLobe)
+        vec2 lq = dv / rr;
+        uint lid = hash3(i, j, seed + 3510);
+        int lns = int(lid & 0xffffu);
+        float la2 = 6.283185307179586 * float(lid >> 24u) / 255.0;
+        float le = 0.06 + 0.16 * float((lid >> 16u) & 255u) / 255.0;
+        float ld2 = dot(dv, dv);
+        float ell = 1.0 + (ld2 > 1e-9 ? le * ((dv.x * dv.x - dv.y * dv.y) * cos(la2) + 2.0 * dv.x * dv.y * sin(la2)) / ld2 : 0.0);
+        float rl = rr * ell * (1.0 + 0.28 * (0.5 * vnoise(lq.x * 1.3, lq.y * 1.3, seed + 3503 + lns) + 0.3 * vnoise(lq.x * 3.1 + 9.2, lq.y * 3.1 - 4.4, seed + 3504 + lns) + 0.2 * vnoise(lq.x * 7.3 - 5.1, lq.y * 7.3 + 2.7, seed + 3505 + lns)));
         lk[nLk] = vec4(dist, rl, n1.z, ${f(H.riverLakeD[0])} + ${f(H.riverLakeD[1])} * rr);
         lkN[nLk] = dv / max(dist, 1e-6);
         nLk++;
@@ -458,14 +555,18 @@ River riverField(vec2 w, int seed, float k) {
       float t = along / len;
       int sg = int(hash3(i, j, seed + 3301) & 0xffffu);
       // (the river widens as it goes: its head's drainage plus the share of the reach run)
+      int sw = int(hash3(i, j, seed + 3302) & 0xffffu);
       float wd = riverHalfW(acc + clamp(t, 0.0, 1.0))
-        * (1.0 + ${f(H.widthVary)} * vnoise(along * F_MEANDER * 2.3, 7.5, int(hash3(i, j, seed + 3302) & 0xffffu)));
+        * (1.0 + ${f(H.widthVary)} * (0.62 * vnoise(along * F_MEANDER * 2.3, 7.5, sw) + 0.38 * vnoise(along * F_MEANDER * 6.1, 3.5, sw)));
       float vis = a1.w; // (the river shows only below a lake: hydro.ts fedOf)
       // (a river whose water does not show cuts no channel: a dry wash, not a ditch)
       float depth = (${f(H.depth[0])} + ${f(H.depth[1])} * sqrt(acc)) * vis;
       float slope = (Wa - Wb) / len;
       float amp = ${f(H.meanderMin)} + ${f(H.meander - H.meanderMin)} * (1.0 - smoothstep(0.012, 0.05, (a0.z - b0.z) / len));
-      float floorW = (vis > 0.0 ? amp + wd : 0.0) + ${f(H.floor[0])} + ${f(H.floor[1])} * sqrt(acc);
+      // (the floor: hydro.ts riverField: its base width, of which each side keeps a share but not less than the channel and a margin)
+      float baseW = (vis > 0.0 ? amp + wd : 0.0) + ${f(H.floor[0])} + ${f(H.floor[1])} * sqrt(acc) + floorWobbleAt(along, t, int(hash3(i, j, seed + 3305) & 0xffffu));
+      float least = vis > 0.0 ? wd + 8.0 : ${f(H.floor[0])};
+      float floorW = baseW;
       vec4 p0 = hyAt(i, j, 2), p1 = hyAt(i, j, 3), p2 = hyAt(i, j, 4), p3 = hyAt(i, j, 5);
       float dd, ch;
       if (t <= 0.0) { dd = length(r); ch = dd; }
@@ -473,23 +574,27 @@ River riverField(vec2 w, int seed, float k) {
       else {
         float ds = -r.x * u.y + r.y * u.x;
         dd = abs(ds);
+        floorW = max(baseW * floorSideAt(along, t, int(hash3(i, j, seed + 3309) & 0xffffu), ds >= 0.0 ? 0.0 : 1.0), least);
         if (dd - floorW > 400.0) {
           float x = dd - floorW;
           vec4 lf = reachLF(Wa, p0, p1, p2, p3, Wb, t);
           float lvl = lf.y;
-          float cone = lvl + wallRise(k, x, floorW);
+          float cone = lvl + wallRise(k, x * wk + lat, floorW);
           o.R = min(o.R, cone);
           o.F = max(o.F, lvl + ${f(H.floorRise)} - ${f(H.riser)} * x);
           o.xFloor = min(o.xFloor, x);
           if (nR < 34) {
-            sA[nR] = vec4(cone, wallSlope(k, x, floorW), lf.w / len, ${f(H.wallCurve)});
+            sA[nR] = vec4(cone, wallSlope(k, x * wk + lat, floorW) * wk, lf.w / len, ${f(H.wallCurve)});
             sB[nR] = vec4(-u.y, u.x, 0.1, lvl);
             sN[nR] = ivec2(j * 4096 + i, bj * 4096 + bi);
             nR++;
           }
           continue;
         }
-        ch = abs(ds - meanderOff(along, t, amp, sg));
+        // (the banks of unequal reach: the channel's distance scaled so each bank stands where its own half width puts it)
+        float sd = ds - meanderOff(along, t, amp, sg);
+        float skew = ${f(H.bankSkew)} * vnoise(along * F_MEANDER * 1.7, 13.1, int(hash3(i, j, seed + 3304) & 0xffffu));
+        ch = abs(sd) / (1.0 + (sd >= 0.0 ? skew : -skew));
       }
       vec4 lf = reachLF(Wa, p0, p1, p2, p3, Wb, t);
       float Wt = lf.x;
@@ -497,7 +602,9 @@ River riverField(vec2 w, int seed, float k) {
       // (a dry valley has no channel: hydro.ts riverField)
       float chV = vis > 0.0 ? ch : 1e9;
       float wV = vis > 0.0 ? wd : 0.0;
-      float cone = Wv + valleyShape(dd, chV, wV, depth, floorW, k);
+      float ddS = dd > floorW ? floorW + (dd - floorW) * wk + lat * smoothstep(0.0, 40.0, dd - floorW) : dd;
+      float wkS = dd > floorW ? wk : 1.0;
+      float cone = Wv + valleyShape(ddS, chV, wV, depth, floorW, k);
       o.R = min(o.R, cone);
       float fillH = dd < floorW ? 0.3 + ${f(H.floorRise - 0.3)} * (dd / floorW) * (dd / floorW) : ${f(H.floorRise)} - ${f(H.riser)} * (dd - floorW);
       o.F = max(o.F, Wv + fillH);
@@ -510,7 +617,7 @@ River riverField(vec2 w, int seed, float k) {
       if (nR < 34) {
         sN[nR] = ivec2(j * 4096 + i, bj * 4096 + bi);
         if (vis > 0.0 && ch < wd + 0.3) { sA[nR] = vec4(max(cone, Wt), 0.0, fallT, 0.0); sB[nR] = vec4(nrm, 0.1, min(Wt, Wv)); }
-        else { sA[nR] = vec4(cone, valleySlope(dd, chV, wV, depth, floorW, k), fallT, ${f(H.wallCurve)}); sB[nR] = vec4(nrm, dd < floorW + 60.0 ? 0.35 : 0.1, min(Wt, Wv)); }
+        else { sA[nR] = vec4(cone, valleySlope(ddS, chV, wV, depth, floorW, k) * wkS, fallT, ${f(H.wallCurve)}); sB[nR] = vec4(nrm, dd < floorW + 60.0 ? 0.35 : 0.1, min(Wt, Wv)); }
       }
       if (vis > 0.0 && ch - wd < bestCh) {
         bestCh = ch - wd; best = nR;
@@ -532,11 +639,12 @@ River riverField(vec2 w, int seed, float k) {
     if (m >= nLk) break;
     vec4 L4 = lk[m];
     float fl = L4.y + ${f(H.floor[0] + 20)};
-    float cone = L4.z + valleyShape(L4.x, L4.x, L4.y, L4.w, fl, k);
+    float dS = L4.x > fl ? fl + (L4.x - fl) * wk + lat * smoothstep(0.0, 40.0, L4.x - fl) : L4.x;
+    float cone = L4.z + valleyShape(dS, L4.x, L4.y, L4.w, fl, k);
     o.R = min(o.R, cone);
     o.xFloor = min(o.xFloor, L4.x - fl);
     if (nR < 34) {
-      sA[nR] = L4.x < L4.y ? vec4(max(cone, L4.z), 0.0, 0.0, ${f(H.wallCurve)}) : vec4(cone, valleySlope(L4.x, L4.x, L4.y, L4.w, fl, k), 0.0, ${f(H.wallCurve)});
+      sA[nR] = L4.x < L4.y ? vec4(max(cone, L4.z), 0.0, 0.0, ${f(H.wallCurve)}) : vec4(cone, valleySlope(dS, L4.x, L4.y, L4.w, fl, k) * (L4.x > fl ? wk : 1.0), 0.0, ${f(H.wallCurve)});
       sB[nR] = vec4(lkN[m], 0.3, L4.z);
       sN[nR] = ivec2(-1, -2);
       nR++;
@@ -545,7 +653,7 @@ River riverField(vec2 w, int seed, float k) {
   // the nearest channel's water stays under every other reach's surface out to its far bank (that surface
   // falls toward the bank by its slope along the line across the channel, but never below its own river)
   if (best >= 0) {
-    float D = o.w + o.ch + 1.0;
+    float D = (o.w + o.ch) * ${f(1 + H.bankSkew)} + 1.0;
     float cap = 1e9;
     for (int r = 0; r < 34; r++) {
       if (r >= nR) break;
@@ -566,20 +674,42 @@ River riverField(vec2 w, int seed, float k) {
 
 float ceilH(float h) { return h > CEIL_START ? CEIL_START + CEIL_SPAN * tanh((h - CEIL_START) / CEIL_SPAN) : h; }
 
+// The crags (m): rock faces break into knobs, ribs and ledges (mirror terrainMath.ts cragDelta).
+float cragDelta(vec2 g, float e, float slope, int seed, float dp) {
+  float s = smoothstep(${f(CRAG.face[0])}, ${f(CRAG.face[1])}, slope);
+  if (s <= 0.0) return 0.0;
+  float sl = min(slope, 3.2);
+  float w0 = clamp(2.0 - 2.0 * dp * F_CRAGBIG, 0.0, 1.0);
+  float w1 = clamp(2.0 - 2.0 * dp * F_CRAG, 0.0, 1.0);
+  float w2 = clamp(2.0 - 2.0 * dp * F_CRAGFINE, 0.0, 1.0);
+  float d = 0.0;
+  if (w0 > 0.0) { float a = 1.0 - abs(vnoise(g.x * F_CRAGBIG, g.y * F_CRAGBIG, seed + 5124)); d += ${f(CRAG.rough[0])} * w0 * (a * a - RIDGE_MEAN); }
+  if (w1 > 0.0) { float a = 1.0 - abs(vnoise(g.x * F_CRAG, g.y * F_CRAG, seed + 5121)); d += ${f(CRAG.rough[1])} * w1 * (a * a - RIDGE_MEAN); }
+  if (w2 > 0.0) { float a = 1.0 - abs(vnoise(g.x * F_CRAGFINE, g.y * F_CRAGFINE, seed + 5122)); d += ${f(CRAG.rough[2])} * w2 * (a * a - RIDGE_MEAN); }
+  float wl = clamp(2.0 - 2.0 * dp * sl / ${f(CRAG.period)}, 0.0, 1.0);
+  float led = 0.0;
+  if (wl > 0.0) {
+    float ph = e / ${f(CRAG.period)} + 1.6 * vnoise(g.x * F_CRAGSTRATA, g.y * F_CRAGSTRATA, seed + 5123);
+    float fl = floor(ph);
+    led = ${f(CRAG.ledge)} * (fl + smoothstep(0.3, 0.7, ph - fl) - ph) * ${f(CRAG.period)} * wl;
+  }
+  return s * (sl * d + led);
+}
+
 // The regions' detail over the uplift at world g, warped w, before any mask (mirror terrainMath.ts landDetail).
 float landDetail(vec2 g, vec2 w, Uplift up, float hills, float ridge, float karst, float dune, float mesa, float eros, int seed, float dp) {
   float detail = hills * hillsAt(w * F_MACRO, seed, dp);
   float rs = min(1.0, 2.0 * up.range + 1.6 * up.massif);
   if (ridge > 0.0) detail += ridge * (0.3 + 0.7 * rs) * ridgesAt(w, seed, dp);
-  float kw = smoothstep(0.35, 0.75, karst);
+  float kw = smoothstep(0.1, 0.9, karst);
   if (kw > 0.001) {
     float wK = clamp(2.0 - 2.0 * dp / 150.0, 0.0, 1.0);
-    detail += kw * (wK > 0.0 ? wK * karstTowers(w, seed) + (1.0 - wK) * TOWER_MEAN : TOWER_MEAN);
+    detail += kw * (wK > 0.0 ? wK * karstTowers(w, seed, dp) + (1.0 - wK) * TOWER_MEAN : TOWER_MEAN);
   }
   float dw = smoothstep(0.35, 0.75, dune);
   if (dw > 0.001) detail += dw * dunesE(g, seed, dp);
-  float mw = smoothstep(0.35, 0.75, mesa);
-  if (mw > 0.001) detail += mw * mesasE(w, seed, dp);
+  float mw = smoothstep(0.05, 0.95, mesa);
+  if (mw > 0.001) detail += mesasE(w, seed, dp, mw);
   if (eros > 0.01) {
     // (down the land itself, laid out in the world: terrainMath.ts landDetail)
     float rk = ridge > 0.0 ? ridge * (0.3 + 0.7 * rs) : 0.0;
@@ -596,7 +726,9 @@ float landDetail(vec2 g, vec2 w, Uplift up, float hills, float ridge, float kars
       eb[k] = erosionLand(ew, eU, seed, hills, rk);
     }
     vec2 gr = (eb.yz - eb.x) / ERO_STEP;
-    detail += eros * erosionDelta(g, up.U + detail, gr, 0.0, dp); // (no fade target: terrainMath.ts landDetail)
+    // (the gullies' strength wanders, so their flutes are not evenly spaced for kilometres; the crags break every steep face)
+    detail += eros * (0.55 + 0.9 * n01(g, F_PLATNOTCH, seed + 5101)) * erosionDelta(g, up.U + detail, gr, 0.0, dp); // (no fade target: terrainMath.ts landDetail)
+    detail += smoothstep(0.05, 0.4, eros) * cragDelta(g, up.U + detail, length(gr), seed, dp);
   }
   return detail;
 }
@@ -716,10 +848,18 @@ vec4 pondAt(vec2 g, int seed) {
   uint h = hash3(ix, iz, seed + 3401);
   float u = float(h >> 24u) / 255.0;
   float R = ${f(H.pondR[0])} + ${f(H.pondR[1] - H.pondR[0])} * u * u * u;
-  float inset = ${f(H.pondReach * 1.3)} * R / cell;
+  float inset = ${f(H.pondReach * 1.6)} * R / cell;
   vec2 c = (vec2(float(ix), float(iz)) + inset + (1.0 - 2.0 * inset) * vec2(float(h & 0xfffu), float((h >> 12u) & 0xfffu)) / 4095.0) * cell;
+  // (a place in the noise of its own and a stretch along one axis: terrainMath.ts pondAt)
   vec2 qq = (g - c) / R;
-  float d = length(g - c) / (R * (1.0 + 0.3 * vnoise(qq.x * 1.2, qq.y * 1.2, seed + 3403)));
+  uint g3 = hash3(ix, iz, seed + 3406);
+  int pns = int(g3 & 0xffffu);
+  vec2 pdv = g - c;
+  float pd2 = dot(pdv, pdv);
+  float pa2 = 6.283185307179586 * float(g3 >> 24u) / 255.0;
+  float pe = 0.06 + 0.16 * float((g3 >> 16u) & 255u) / 255.0;
+  float pell = 1.0 + (pd2 > 1e-9 ? pe * ((pdv.x * pdv.x - pdv.y * pdv.y) * cos(pa2) + 2.0 * pdv.x * pdv.y * sin(pa2)) / pd2 : 0.0);
+  float d = sqrt(pd2) / (R * pell * (1.0 + 0.3 * (0.6 * vnoise(qq.x * 1.2, qq.y * 1.2, seed + 3403 + pns) + 0.4 * vnoise(qq.x * 3.3 + 7.7, qq.y * 3.3 - 2.9, seed + 3404 + pns))));
   if (d >= ${f(H.pondReach)}) return none;
   uint h2 = hash3(ix, iz, seed + 3402);
   vec2 w;

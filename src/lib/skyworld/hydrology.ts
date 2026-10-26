@@ -26,7 +26,7 @@
  *           `reach` metres down, at most half way to the land below.
  */
 
-import { MAX_WORLD_H, SKY_REALM } from '../constants';
+import { SKY_REALM } from '../constants';
 import { SKY_BIOME_INFO } from './biomes';
 import { baseTop, lakeDist, outline, outlineMax, STREAM_DEPTH, type Lake, type SkyIsland } from './island';
 
@@ -104,8 +104,8 @@ export function planWater(
   isl.fall = {
     x, y, z, dirX: fx, dirZ: fz,
     width: 1.5 * P[3], speed: 2 + 0.25 * P[3],
-    // (and it is mist before it is down among the highest peaks)
-    reach: Math.min(Math.max(90, Math.min(0.5 * (y - land), 220 + 40 * 1.5 * P[3])), y - MAX_WORLD_H - 60),
+    // (and it is mist before it is down near the ground under it)
+    reach: Math.min(Math.max(90, Math.min(0.5 * (y - land), 220 + 40 * 1.5 * P[3])), y - land - 60),
     seed: (isl.seed * 31 + 7) | 0,
   };
 }

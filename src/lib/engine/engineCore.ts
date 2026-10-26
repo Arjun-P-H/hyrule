@@ -18,6 +18,29 @@
  * the WebGPU view the game time each frame; holding T runs it a game hour a
  * second. The page picks the sky (the day–night cycle or the classic sky) and
  * sets the hour, pause and day length through the handle.
+ *
+ * Combat (src/lib/combat/, third person): the hero's locomotion runs inside
+ * the combat world, which takes the mouse's buttons (attack, shield), Q (bow),
+ * G (throw), E (action) and X (swap) besides the movement keys; the camera
+ * turns toward a foe the shield is locked onto and eases over the shoulder to
+ * aim; the world's events play sounds, shake the view and feed the combat HUD
+ * (combat/hud.ts) with its markers. Foes are drawn by the WebGPU view only, so
+ * the WebGL2 view's world has none. In multiplayer the other players' heroes,
+ * played back, are the combat world's rivals (combat/pvp.ts): before each step
+ * it is handed them and their blows and shots, after it its own go out.
+ *
+ * The inventory (combat/pouch.ts, the page's InventoryScreen): its key asks the page to open the
+ * screen, and while it is open the keys and the mouse's buttons leave the hero alone, the hands let
+ * go of what they held and the pointer is freed. Alone in the world, everything stands still behind
+ * it (the clock, the foes, what flies, the hero) but the pose, which follows what is carried; in a
+ * shared world it goes on, as behind the lobby. The screen's commands (equip, unequip, drop, eat)
+ * come through the handle.
+ *
+ * Keys: the keys named in this file are the defaults. Every control is an
+ * action with up to two keys the player may rebind (keybinds.ts); the page
+ * hands the engine the compiled keymap, and a change takes hold at once. The
+ * look keys (none until Key Look is turned on) turn the camera as the mouse
+ * does, at a speed that follows the Mouse Look setting (keyLook.ts).
  */
 
 import { HydroTexture } from './hydroTexture';
@@ -26,17 +49,35 @@ import type { CamMode, RenderApi, StatsStore } from './statsStore';
 import { TERRAIN_FS, TERRAIN_VS, minifyGlsl, withHero } from '@/components/terrain/demoShader';
 import { elevation, updatePlayer, type PlayerState, type InputState } from '@/lib/terrainMath';
 import { DRS_HARDWARE, DRS_SOFTWARE, createDrsState, drsStep, updateFpsEma } from './drs';
-import { createHeroState, firstPersonGround, heroAction, placeHero, updateHero, type HeroInput, type HeroState } from '@/lib/hero/locomotion';
-import { createHeroRig, packHeroUniforms, updateHeroRig, HERO_UNIFORM } from '@/lib/hero/rig';
+import { createHeroState, firstPersonGround, heroAction, placeHero, type HeroState } from '@/lib/hero/locomotion';
+import { createHeroRig, heroLocalToWorld, packHeroUniforms, updateHeroRig, HERO_UNIFORM } from '@/lib/hero/rig';
+import { createRockFrame, focusRocks, freeRocks, packRocks, setRocksOn, type RockFrame } from '@/lib/rocks/field';
 import { createHeroCamera, updateHeroCamera } from '@/lib/hero/camera';
+import { exitOf, portalCrossed, portalOf, spawnPoint } from '@/lib/portal';
 import { skySpawn } from '@/lib/skyworld/realm';
+import { PortalTrip } from '@/lib/portalTrip';
+import { worldSeed, type World } from '@/lib/world';
 import type { GpuBackend, SkyMode } from '@/lib/gpu/engineGpu';
 import { advanceClock, createSkyClock, hourOf, setHour } from '@/lib/sky/clock';
 import { landName } from '@/lib/sky/air';
 import { MAX_REMOTE_HEROES, type FrameParams } from '@/lib/gpu/frame';
 import { characterOf } from '@/lib/hero/characters';
 import type { ClockState, NetLink } from '@/lib/net/link';
-import { RemoteHeroes, SEND_INTERVAL, encodeSnapshot } from '@/lib/net/remoteHeroes';
+import { RemoteHeroes, SEND_INTERVAL, encodeSnapshot, type RemoteHero } from '@/lib/net/remoteHeroes';
+import { ambientTemp, createNoiseMeter, heroNoise, landingLoudness, noisePulse, stepNoise, walkNoise } from '@/lib/map/gauges';
+import { MAP_PEERS, type MapHudState } from '@/lib/map/mapHud';
+import { CombatWorld, createCombatInput, type CombatEvent, type Pickup } from '@/lib/combat/world';
+import { rivalJoint } from '@/lib/combat/pvp';
+import { CombatScene } from '@/lib/combat/scene';
+import { CombatSfx } from '@/lib/combat/sfx';
+import { FOE_KINDS, foeJoint } from '@/lib/combat/foes';
+import { BOWS, SHIELDS, WEAPONS, itemName } from '@/lib/combat/weapons';
+import type { CombatHudState, CombatHudStore } from '@/lib/combat/hud';
+import { readPouch, type PouchCommand, type PouchStore } from '@/lib/combat/pouch';
+import type { CombatFrame } from '@/lib/gpu/frame';
+import { J } from '@/lib/hero/rig';
+import { DEFAULT_KEYMAP, HELD, heldMask, normalizeCode, type Keymap } from './keybinds';
+import { createKeyLook, stepKeyLook } from './keyLook';
 import {
   CHUNK_SIZE,
   FLY_CEILING,
@@ -69,6 +110,8 @@ export type EngineInputs = {
   sensitivity: Ref<number>;
   speedMultiplier: Ref<number>;
   onToggleHud: Ref<(() => void) | undefined>;
+  /** The HUD one step more (+1: the essentials, then everything) or less (−1: the essentials, then nothing). */
+  onHudStep: Ref<((delta: 1 | -1) => void) | undefined>;
   onPointerLockChange: Ref<((locked: boolean) => void) | undefined>;
   /** The sky wanted (drawn by the WebGPU view; the WebGL2 view has only the classic sky). */
   sky: Ref<SkyMode>;
@@ -78,6 +121,24 @@ export type EngineInputs = {
   character?: Ref<number>;
   /** Multiplayer: the session the hero is sent through and other players' heroes come from. */
   net?: Ref<NetLink | null>;
+  /** Foes wake round the hero (false: a peaceful world, e.g. for benchmarks). */
+  foes?: Ref<boolean>;
+  /** The combat HUD's channel (hearts, weapon, arrows, markers). */
+  combatHud?: CombatHudStore | null;
+  /** Which action each key presses (keybinds.ts); the default keys when absent. */
+  keymap?: Ref<Keymap>;
+  /** The inventory screen is open: the hero is left alone (and alone in the world, the world stands still). */
+  menuOpen?: Ref<boolean>;
+  /** The inventory key was pressed: the page opens or closes the screen. */
+  onToggleInventory?: Ref<(() => void) | undefined>;
+  /** The inventory's channel (what the screen lists while it is open). */
+  pouch?: PouchStore | null;
+  /** Start with a full pouch: one of every weapon, shield and bow, and some of every food (?kit=1). */
+  kit?: Ref<boolean>;
+  /** The map's channel (where the hero and the other players are, the temperature, the noise: map/mapHud.ts). */
+  mapHud?: MapHudState | null;
+  /** The map key was pressed: the page opens or closes the map. */
+  onToggleMap?: Ref<(() => void) | undefined>;
 };
 
 /** Where the day starts: the hour, and real minutes per game day. */
@@ -97,6 +158,10 @@ export type EngineHandle = {
   setDayMinutes: (minutes: number) => void;
   /** The sky clock now (multiplayer: an empty world takes the first player's). */
   clock: () => ClockState;
+  /** An inventory command (equip, unequip, drop, eat); whether it did anything. */
+  pouch: (cmd: PouchCommand) => boolean;
+  /** Go to the other world as through the portal (the settings' world switch, for inspection). */
+  travel: () => void;
 };
 
 /** Game hours per real second while T is held. */
@@ -105,6 +170,7 @@ const FAST_TIME = 1;
 /** Metres between characters side by side at the spawn (multiplayer). */
 const SPAWN_GAP = 1.6;
 const NO_REMOTES: readonly Float32Array[] = [];
+const NO_RIVALS: readonly RemoteHero[] = [];
 
 /** What the loop hands the view each frame: one object, refilled. */
 type DrawState = {
@@ -133,6 +199,10 @@ type DrawState = {
   packHero: () => Float32Array;
   /** Pack the other players' heroes for this camera (multiplayer; none without). */
   packRemotes: () => readonly Float32Array[];
+  /** Pack combat (the foes, what flies and flares) for this camera; null when there is none to draw. */
+  packCombat: () => CombatFrame | null;
+  /** The rocks the CPU owns round the hero (rocks/field.ts), for the frame drawn from ds's camera. */
+  packRocks: () => RockFrame | null;
 };
 
 type View = {
@@ -146,6 +216,9 @@ type View = {
   /** The sky drawn, and a request for another (views without a day–night sky: null, no-op). */
   sky(): SkyMode | null;
   setSky(mode: SkyMode): void;
+  /** The world drawn, and a request for the other (views that draw only the land: null, no-op). */
+  world(): World | null;
+  setWorld(world: World): void;
   dispose(): void;
 };
 
@@ -190,6 +263,7 @@ function uniformLocations(gl: WebGL2RenderingContext, prog: WebGLProgram) {
     heroBound: U('u_hero_bound'),
     heroMisc: U('u_hero_misc'),
     heroDress: U('u_hero_dress'),
+    heroGear: U('u_hero_gear'),
     hydro: U('u_hydro'),
     hydroHead: U('u_hydro_head'),
   };
@@ -259,7 +333,7 @@ function createGlView(canvas: HTMLCanvasElement, initialMode: CamMode): View {
   if (initialMode === 'hero') compileHero();
 
   // Views of the packed hero buffer, made on first use (the buffer is reused).
-  let heroViews: { j: Float32Array; torso: Float32Array; head: Float32Array; bound: Float32Array; misc: Float32Array; dress: Float32Array } | null = null;
+  let heroViews: { j: Float32Array; torso: Float32Array; head: Float32Array; bound: Float32Array; misc: Float32Array; dress: Float32Array; gear: Float32Array } | null = null;
 
   let lastW = -1, lastH = -1;
   let lastFov = -1;
@@ -277,6 +351,8 @@ function createGlView(canvas: HTMLCanvasElement, initialMode: CamMode): View {
     busy: () => fence !== null && gl.clientWaitSync(fence, 0, 0) === gl.TIMEOUT_EXPIRED,
     sky: () => null,
     setSky: () => {},
+    world: () => null,
+    setWorld: () => {},
     draw(ds) {
       // Third person draws with the hero program once it has compiled; until
       // then (a moment after start) the terrain program draws without the hero.
@@ -378,6 +454,7 @@ function createGlView(canvas: HTMLCanvasElement, initialMode: CamMode): View {
           bound: hb.subarray(HERO_UNIFORM.bound, HERO_UNIFORM.misc),
           misc: hb.subarray(HERO_UNIFORM.misc, HERO_UNIFORM.dress),
           dress: hb.subarray(HERO_UNIFORM.dress, HERO_UNIFORM.dress + 3),
+          gear: hb.subarray(HERO_UNIFORM.gear, HERO_UNIFORM.length),
         };
         gl.uniform3fv(u.heroJ, heroViews.j);
         gl.uniformMatrix3fv(u.heroTorso, false, heroViews.torso);
@@ -385,6 +462,7 @@ function createGlView(canvas: HTMLCanvasElement, initialMode: CamMode): View {
         gl.uniform4fv(u.heroBound, heroViews.bound);
         gl.uniform4fv(u.heroMisc, heroViews.misc);
         gl.uniform3fv(u.heroDress, heroViews.dress);
+        gl.uniform4fv(u.heroGear, heroViews.gear);
       }
 
       gl.drawArrays(gl.TRIANGLES, 0, 3);
@@ -415,7 +493,7 @@ function createGlView(canvas: HTMLCanvasElement, initialMode: CamMode): View {
 function createGpuView(canvas: HTMLCanvasElement, gpu: GpuBackend): View {
   const fp: FrameParams = {
     x: 0, y: 0, z: 0, yaw: 0, pitch: 0, width: 2, height: 2, tanHalf: 1,
-    seed: 0, marchSteps: 0, shadowSteps: 0, time: 0, hero: null, renderScale: 1, days: 0,
+    seed: 0, marchSteps: 0, shadowSteps: 0, time: 0, hero: null, renderScale: 1, days: 0, combat: null,
   };
   let lastFov = -1;
   return {
@@ -425,6 +503,8 @@ function createGpuView(canvas: HTMLCanvasElement, gpu: GpuBackend): View {
     busy: () => gpu.inFlight() >= 2,
     sky: () => gpu.sky(),
     setSky: (mode) => gpu.setSky(mode),
+    world: () => gpu.world(),
+    setWorld: (w) => gpu.setWorld(w),
     draw(ds) {
       if (ds.fov !== lastFov) {
         lastFov = ds.fov;
@@ -439,6 +519,8 @@ function createGpuView(canvas: HTMLCanvasElement, gpu: GpuBackend): View {
       fp.renderScale = ds.renderScale;
       fp.hero = ds.thirdPerson ? ds.packHero() : null;
       fp.remotes = ds.packRemotes();
+      fp.combat = ds.thirdPerson ? ds.packCombat() : null;
+      fp.rocks = ds.packRocks();
       ds.basisDirty = false;
       gpu.draw(fp);
     },
@@ -468,10 +550,16 @@ export function startEngine(
   const sensitivityRef = inputs.sensitivity;
   const speedMultiplierRef = inputs.speedMultiplier;
   const hudToggleRef = inputs.onToggleHud;
+  const hudStepRef = inputs.onHudStep;
   const onPointerLockChangeRef = inputs.onPointerLockChange;
   const skyRef = inputs.sky;
   const charRef = inputs.character;
   const netRef = inputs.net;
+  const menuRef = inputs.menuOpen;
+  const inventoryToggleRef = inputs.onToggleInventory;
+  const mapToggleRef = inputs.onToggleMap;
+  const mapHud = inputs.mapHud ?? null;
+  const pouchStore = inputs.pouch ?? null;
   const clock = createSkyClock(clockStart.hour, clockStart.dayMinutes);
   let fastTime = false;
   // Multiplayer: the clock changed here (sent at the next frame), when the last snapshot / clock went.
@@ -480,39 +568,21 @@ export function startEngine(
 
   let raf = 0;
   let ro: ResizeObserver | null = null;
+  // The keys: which action each presses (the settings rebind them: keybinds.ts), the keys held now, and the
+  // actions polled every frame (HELD) that those make up, as bits.
+  let keymap: Keymap = inputs.keymap?.current ?? DEFAULT_KEYMAP;
+  const held = new Set<string>();
   let keyMask = 0;
-  const KEY_W = 1 << 0;
-  const KEY_S = 1 << 1;
-  const KEY_A = 1 << 2;
-  const KEY_D = 1 << 3;
-  const KEY_UP = 1 << 4;
-  const KEY_DOWN = 1 << 5;
-  const KEY_LEFT = 1 << 6;
-  const KEY_RIGHT = 1 << 7;
-  const KEY_SHIFT = 1 << 8;
-  const KEY_SPACE = 1 << 9;
-  const KEY_C = 1 << 10;
-  const KEY_CTRL = 1 << 11;
-
-  const keyCodeToBit = (code: string): number => {
-    switch (code) {
-      case 'KeyW': return KEY_W;
-      case 'KeyS': return KEY_S;
-      case 'KeyA': return KEY_A;
-      case 'KeyD': return KEY_D;
-      case 'ArrowUp': return KEY_UP;
-      case 'ArrowDown': return KEY_DOWN;
-      case 'ArrowLeft': return KEY_LEFT;
-      case 'ArrowRight': return KEY_RIGHT;
-      case 'ShiftLeft':
-      case 'ShiftRight': return KEY_SHIFT;
-      case 'Space': return KEY_SPACE;
-      case 'KeyC': return KEY_C;
-      case 'ControlLeft':
-      case 'ControlRight': return KEY_CTRL;
-      default: return 0;
-    }
+  const keyLook = createKeyLook(); // (the look keys turn the camera: keyLook.ts)
+  // Rebound since the last look: the keys held are read again, by the new bindings.
+  const syncKeymap = () => {
+    const km = inputs.keymap?.current ?? DEFAULT_KEYMAP;
+    if (km === keymap) return;
+    keymap = km;
+    keyMask = heldMask(keymap, held);
   };
+  // (a page-scrolling key never scrolls the page while the game has the keyboard)
+  const SCROLL_KEYS = new Set(['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'PageUp', 'PageDown', 'Home', 'End']);
 
   try {
     const view = gpu ? createGpuView(canvas, gpu) : createGlView(canvas, initialMode);
@@ -526,15 +596,21 @@ export function startEngine(
     const tp = createHeroCamera();
     const heroBuf = new Float32Array(HERO_UNIFORM.length);
 
-    // The start: the land's spawn, or (?spawn=sky) a spot up on the nearest archipelago's hub. In a
-    // multiplayer world the five characters start side by side (SPAWN_GAP apart across the view).
-    const spawnFor = (seed: number) => {
-      const sky = spawnAt === 'sky' ? skySpawn(SPAWN.x, SPAWN.z, seed) : null;
+    // The world the hero is in (the land; the inactive cloud world only through the settings' switch), and the
+    // seed its generators see (world.ts): everything below asks seedNow(), never the user's seed itself.
+    let world: World = 'land';
+    const seedNow = () => worldSeed(seedRef.current, world);
+    // The start: the world's spawn (portal.ts spawnPoint). In a multiplayer world the five characters
+    // start side by side (SPAWN_GAP apart across the view).
+    const spawnFor = () => {
+      const sky = spawnAt === 'sky' && world === 'land' ? skySpawn(SPAWN.x, SPAWN.z, seedNow()) : null;
+      if (sky) return sky;
+      const p = spawnPoint(world, seedRef.current);
       const slot = netRef?.current?.inWorld() ? (charRef?.current ?? 0) - 2 : 0;
-      const x = SPAWN.x + Math.cos(SPAWN.yaw) * slot * SPAWN_GAP, z = SPAWN.z - Math.sin(SPAWN.yaw) * slot * SPAWN_GAP;
-      return sky ?? { x, y: elevation(x, z, seed, 0), z, yaw: SPAWN.yaw };
+      const x = p.x + Math.cos(p.yaw) * slot * SPAWN_GAP, z = p.z - Math.sin(p.yaw) * slot * SPAWN_GAP;
+      return { x, y: elevation(x, z, seedNow(), 0), z, yaw: p.yaw };
     };
-    let spawn = spawnFor(seedRef.current);
+    let spawn = spawnFor();
 
     const cam: CamState = {
       yaw: spawn.yaw,
@@ -552,10 +628,10 @@ export function startEngine(
         vz: 0,
         grounded: false,
       },
-      hero: createHeroState(spawn.x, spawn.z, spawn.yaw, seedRef.current),
+      hero: createHeroState(spawn.x, spawn.z, spawn.yaw, seedNow()),
     };
     // (up in the sky the hero starts on the island's top, not on the land below)
-    if (spawnAt === 'sky') placeHero(cam.hero, spawn.x, spawn.y + PLAYER.groundBias, spawn.z, 0, 0, 0, spawn.yaw, seedRef.current);
+    if (spawnAt === 'sky') placeHero(cam.hero, spawn.x, spawn.y + PLAYER.groundBias, spawn.z, 0, 0, 0, spawn.yaw, seedNow());
 
     cam.fly.y = spawn.y + 30;
     cam.player.y = cam.fly.y;
@@ -565,11 +641,198 @@ export function startEngine(
     }
 
     const playerInput: InputState = { forward: 0, strafe: 0, jump: false, sprint: false, yaw: 0 };
-    const heroInput: HeroInput = { forward: 0, strafe: 0, sprint: false, jump: false, sneak: false, camYaw: 0 };
+
+    // Combat: the world round the hero (its locomotion runs in there in third person), its view for
+    // the renderer, its sounds, and what the HUD shows. Foes only where they can be drawn (WebGPU).
+    const combat = new CombatWorld(cam.hero, seedNow());
+    // (development builds: the hero, the camera and the fight on window.__hyrule, for scripted checks in a browser)
+    if (process.env.NODE_ENV === 'development') (window as unknown as { __hyrule?: object }).__hyrule = { cam, combat, rig, freeRocks };
+    if (inputs.kit?.current) combat.stock();
+    const combatScene = new CombatScene();
+    const sfx = new CombatSfx();
+    const combatIn = createCombatInput();
+    const hud = inputs.combatHud ?? null;
+    const noise = createNoiseMeter(); // (the sound meter: map/gauges.ts)
+    let mouseAttack = false, mouseGuard = false;
+    let shake = 0;                                      // the view's shake (m), dying away
+    const alertUntil = new Float64Array(16);            // per foe slot: until when its "!" shows
+    let banner: string | null = null, bannerId = 0, bannerUntil = 0;
+    let hudAt = 0;
+    let combatTime = 0;
+    const MK = new Float64Array(3);
+    // rocks: the CPU owns those round the hero (rocks/field.ts), a rock in the hands follows the rig
+    const RK3 = new Float64Array(3);
+    const rockFrame = createRockFrame();
+    // (only the WebGPU view draws rocks: without it none stand in the way)
+    setRocksOn(!!gpu);
+    let stoneHint: string | null = null;
+
+    const say = (text: string) => { banner = text; bannerId++; bannerUntil = combatTime + 1.6; };
+
+    // The portal (portal.ts, portalTrip.ts): the hero's crossing of the ring (or standing by it) is found in
+    // its step below; the trip itself steps every frame, whatever the view, and on arrival puts the hero (and
+    // the other views' cameras) out of the other world's ring. Health, the pouch, the clock and the link go on
+    // as they were (the fight follows the seed's change).
+    const portalTrip = new PortalTrip();
+    let crossed = false, lastFade = 0;
+    let travelAsked = false; // (the settings' world switch: a trip without the ring)
+    let seedSeen = seedRef.current;
+    const arrive = (to: World) => {
+      world = to;
+      const e = exitOf(world, seedRef.current);
+      placeHero(cam.hero, e.x, e.y + PLAYER.groundBias, e.z, 0, 0, 0, e.yaw, seedNow());
+      cam.yaw = e.yaw;
+      cam.fly = { x: e.x, y: e.y + 3, z: e.z };
+      cam.flyVel = { x: 0, y: 0, z: 0 };
+      cam.player = { x: e.x, y: e.y + PLAYER.height, z: e.z, vx: 0, vy: 0, vz: 0, grounded: false };
+      rig.snap = true;
+      tp.snap = true;
+    };
+
+    /** What happened in the fight this tick: sounds, the view's shake, banners, the foes' "!". */
+    const combatEvents = () => {
+      for (let k = 0; k < combat.eventCount; k++) {
+        const e: CombatEvent = combat.events[k];
+        sfx.play(e, tp.x, tp.y, tp.z, tp.yaw);
+        switch (e.type) {
+          case 'hit': shake = Math.max(shake, 0.05); noisePulse(noise, 0.7); break;
+          case 'crit': shake = Math.max(shake, 0.07); noisePulse(noise, 0.8); say('Headshot'); break;
+          case 'sneak': shake = Math.max(shake, 0.08); say('Sneakstrike'); break;
+          case 'hurt': shake = Math.max(shake, 0.14); noisePulse(noise, 0.75); break;
+          case 'block': shake = Math.max(shake, 0.06); noisePulse(noise, 0.8); break;
+          case 'parry': shake = Math.max(shake, 0.08); noisePulse(noise, 0.9); say('Perfect Guard'); break;
+          case 'dodge': if (e.a === 2) say('Perfect Dodge'); break;
+          case 'flurry': say('Flurry Rush'); break;
+          case 'break': noisePulse(noise, 0.9); say(`${itemName(e.a)} broke!`); break;
+          case 'return': say('The Master Sword returned'); break;
+          case 'pickup': if (e.a >= 0) say(`Got ${itemName(e.a)}`); break;
+          case 'swap': say(WEAPONS[e.a].name); break;
+          case 'empty':
+            if (e.a === 1) say('No shield');
+            else if (e.a === 2) say('No bow');
+            else if (e.a === 3) say('No room for that');
+            else if (combat.act === 'aim') say('No arrows');
+            break;
+          case 'alert': if (e.a >= 0 && e.a < alertUntil.length) alertUntil[e.a] = combatTime + 1.1; break;
+          case 'parried': shake = Math.max(shake, 0.08); break;
+          case 'defeat': {
+            // (another player felled: `a` its place among the rivals)
+            const r = combat.rivals[e.a];
+            say(r && netRef?.current ? `Defeated ${netRef.current.peerName(r.id)}` : 'Defeated');
+            break;
+          }
+        }
+      }
+      if (banner && combatTime > bannerUntil) banner = null;
+    };
+
+    /** What a lying weapon, shield or bow is called. */
+    const pickName = (p: Pickup) => (p.kind === 'shield' ? SHIELDS : p.kind === 'bow' ? BOWS : WEAPONS)[p.weapon].name;
+
+    /** The combat HUD's state (published when it changes, at most every 50 ms). */
+    const publishCombatHud = (now: number) => {
+      if (!hud) return;
+      hudAt = now;
+      const w = combat, c = w.carried();
+      const kind = c ? WEAPONS[c.kind] : null;
+      const sh = w.shieldOn >= 0 ? w.shields[w.shieldOn] : null, bw = w.bowOn >= 0 ? w.bows[w.bowOn] : null;
+      const shk = sh ? SHIELDS[sh.kind] : null, bwk = bw ? BOWS[bw.kind] : null;
+      const left = (g: { wear: number } | null, max: number) => (!g || g.wear === Infinity ? 1 : Math.round((g.wear / max) * 20) / 20);
+      const pick = w.nearestPickup();
+      const s: CombatHudState = {
+        hearts: w.hearts,
+        health: Math.ceil(w.health),
+        weapon: kind ? kind.name : null,
+        wear: !c || !kind || c.wear === Infinity ? 1 : Math.round((c.wear / kind.durability) * 20) / 20,
+        weapons: w.weapons.length,
+        weaponKind: c ? c.kind : -1,
+        shield: shk ? shk.name : null,
+        shieldKind: sh ? sh.kind : -1,
+        shieldWear: left(sh, shk ? shk.durability : 1),
+        bow: bwk ? bwk.name : null,
+        bowKind: bw ? bw.kind : -1,
+        bowWear: left(bw, bwk ? bwk.durability : 1),
+        food: w.food.reduce((a, b) => a + b, 0),
+        arrows: w.arrows,
+        aiming: w.act === 'aim',
+        draw: Math.round(w.draw * 10) / 10,
+        charge: Math.round(w.charge * 10) / 10,
+        prompt: w.flurryWait > 0 ? 'Click|Flurry Rush'
+          : w.act === 'carry' ? 'Click|Throw  ·  E  Put down'
+          : pick >= 0 ? `E|${w.canTake(pick) ? 'Pick up' : 'No room for'} ${pickName(w.pickups[pick])}`
+            : (stoneHint = w.stoneHint()) ? `E|${stoneHint}`
+            : cam.hero.surfing ? 'E|Step off the shield'
+              : w.act === 'guard' && cam.hero.move === 'ground' ? (w.lockedBody() ? 'Space + A/D/S|Dodge' : 'E|Shield surf') : null,
+        banner,
+        bannerId,
+        dead: w.act === 'dead',
+        downBy: w.act === 'dead' && w.downBy !== null && netRef?.current ? netRef.current.peerName(w.downBy) : null,
+        slowed: w.worldScale < 0.5 && w.hitStop <= 0,
+        rush: w.flurryWait > 0,
+      };
+      hud.set(s);
+    };
+
+    /** A marker over the world at (x, y, z), if in view; false off screen. */
+    const putMarker = (kind: 'lock' | 'bar' | 'alert' | 'notice', x: number, y: number, z: number, value: number): void => {
+      const mk = hud!.markers;
+      if (mk.count >= mk.list.length) return;
+      const b = ds.basis;
+      const rx0 = x - ds.x, ry0 = y - ds.y, rz0 = z - ds.z;
+      const vz = rx0 * b[6] + ry0 * b[7] + rz0 * b[8];
+      if (vz < 0.3) return;
+      const W = canvas.clientWidth, H = canvas.clientHeight;
+      const th = Math.tan((ds.fov * Math.PI) / 360);
+      const sx = (rx0 * b[0] + ry0 * b[1] + rz0 * b[2]) / (vz * th * (W / Math.max(H, 1)));
+      const sy = (rx0 * b[3] + ry0 * b[4] + rz0 * b[5]) / (vz * th);
+      if (Math.abs(sx) > 1.1 || Math.abs(sy) > 1.1) return;
+      const m = mk.list[mk.count++];
+      m.kind = kind; m.x = (sx * 0.5 + 0.5) * W; m.y = (0.5 - sy * 0.5) * H; m.value = value;
+      m.near = Math.max(0, Math.min(1, 1 - (vz - 3) / 35));
+    };
+
+    /** Where the foes' markers are this frame (lock-on, their hearts, "!" and "?"). */
+    const placeMarkers = () => {
+      if (!hud) return;
+      const mk = hud.markers;
+      mk.count = 0;
+      mk.version++;
+      if (cam.mode !== 'hero') return;
+      for (const f of combat.foes) {
+        if (!f.live || f.mind === 'dead') continue;
+        const kind = FOE_KINDS[f.kind];
+        foeJoint(f, J.head, MK);
+        const d = Math.hypot(MK[0] - ds.x, MK[1] - ds.y, MK[2] - ds.z);
+        if (d > 48) continue;
+        const locked = combat.lock === f.slot;
+        const top = MK[1] + 0.5 * kind.scale;
+        if (alertUntil[f.slot] > combatTime) putMarker('alert', MK[0], top + 0.1, MK[2], 1);
+        else if (!f.roused && f.aware > 0.1) putMarker('notice', MK[0], top + 0.1, MK[2], f.aware);
+        if ((locked || f.hp < kind.hp) && d < 36) putMarker('bar', MK[0], top - 0.08, MK[2], f.hp / kind.hp);
+        if (locked) {
+          foeJoint(f, J.chest, MK);
+          putMarker('lock', MK[0], MK[1], MK[2], 1);
+        }
+      }
+      // other players: their hearts once hurt (or locked onto), the lock-on reticle
+      for (const r of combat.rivals) {
+        if (r.pose.act === 'dead') continue;
+        rivalJoint(r, J.head, MK);
+        const d = Math.hypot(MK[0] - ds.x, MK[1] - ds.y, MK[2] - ds.z);
+        if (d > 48) continue;
+        const locked = combat.lockRival === r;
+        const full = Math.max(1, r.hearts * 4);
+        if ((locked || r.health < full) && d < 36) putMarker('bar', MK[0], MK[1] + 0.42, MK[2], r.health / full);
+        if (locked) {
+          rivalJoint(r, J.chest, MK);
+          putMarker('lock', MK[0], MK[1], MK[2], 1);
+        }
+      }
+    };
 
     /** Drop into third person with the hero's root (feet) at x, y, z. */
     const enterHero = (x: number, y: number, z: number, vx: number, vy: number, vz: number) => {
-      placeHero(cam.hero, x, y, z, vx, vy, vz, cam.yaw, seedRef.current);
+      placeHero(cam.hero, x, y, z, vx, vy, vz, cam.yaw, seedNow());
       cam.mode = 'hero';
       cam.onFoot = 'hero';
       cam.pitch = HERO_CAMERA.pitch;
@@ -578,8 +841,8 @@ export function startEngine(
     };
 
     const doRespawn = () => {
-      const s = seedRef.current;
-      spawn = spawnFor(s);
+      const s = seedNow();
+      spawn = spawnFor();
       const ground = spawn.y;
       const spawnY = ground + 30;
       cam.yaw = spawn.yaw;
@@ -598,6 +861,8 @@ export function startEngine(
       placeHero(cam.hero, spawn.x, ground + PLAYER.groundBias, spawn.z, 0, 0, 0, spawn.yaw, s);
       cam.hero.stamina = 1;
       cam.hero.exhausted = false;
+      if (combat.seed !== s) combat.reset(s);
+      combat.revive();
       rig.snap = true;
       tp.snap = true;
       if (cam.mode === 'hero') cam.pitch = HERO_CAMERA.pitch;
@@ -680,40 +945,38 @@ export function startEngine(
       if ((e.target as HTMLElement)?.tagName === 'INPUT' || (e.target as HTMLElement)?.tagName === 'TEXTAREA') {
         return;
       }
-      if (inputs.inputBlocked?.current) {
+      // The inventory key opens and closes the screen (it still works while the screen holds the keys;
+      // not behind the lobby, nor to open it when the hero is down).
+      if (down && !e.repeat && !inputs.inputBlocked?.current && cam.mode === 'hero' && !e.metaKey && !e.ctrlKey) {
+        syncKeymap();
+        if (keymap.get(normalizeCode(e.code)) === 'inventory' && (menuRef?.current || combat.act !== 'dead')) {
+          e.preventDefault();
+          inventoryToggleRef?.current?.();
+          return;
+        }
+      }
+      // The map key opens and closes the map in every view (it still works while the map holds the keys).
+      if (down && !e.repeat && !inputs.inputBlocked?.current && !e.metaKey && !e.ctrlKey) {
+        syncKeymap();
+        if (keymap.get(normalizeCode(e.code)) === 'map') {
+          e.preventDefault();
+          mapToggleRef?.current?.();
+          return;
+        }
+      }
+      if (inputs.inputBlocked?.current || menuRef?.current) {
+        held.clear();
         keyMask = 0;
         fastTime = false;
         return;
       }
 
-      if (e.code === 'KeyF' && down) {
-        if (!e.repeat) doToggleMode();
-        return;
-      }
-
-      if (e.code === 'KeyV' && down && !e.metaKey && !e.ctrlKey) {
-        if (!e.repeat) doToggleView();
-        return;
-      }
-
-      if (e.code === 'KeyR' && down && !e.metaKey && !e.ctrlKey) {
-        doRespawn();
-        return;
-      }
-
-      if (e.code === 'KeyT' && !e.metaKey && !e.ctrlKey) {
-        fastTime = down;
-        return;
-      }
-
-      if (e.code === 'KeyH' && down && !e.metaKey && !e.ctrlKey) {
-        hudToggleRef.current?.();
-        return;
-      }
-
-      const bit = keyCodeToBit(e.code);
-      if (down) keyMask |= bit;
-      else keyMask &= ~bit;
+      syncKeymap();
+      const code = normalizeCode(e.code);
+      // (every key is tracked, so a release is never missed; those that press nothing held make no bit)
+      if (down) held.add(code);
+      else held.delete(code);
+      keyMask = heldMask(keymap, held);
 
       const isInteracting =
         enablePointerLock ||
@@ -721,8 +984,37 @@ export function startEngine(
         document.activeElement === canvas ||
         dragging;
 
-      if (isInteracting && ['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.code)) {
+      if (isInteracting && SCROLL_KEYS.has(code)) {
         e.preventDefault();
+      }
+
+      // The one-shot keys leave the browser's own shortcuts (Ctrl+R, Cmd+H…) alone.
+      const plain = (!e.metaKey && !e.ctrlKey) || code === 'Control';
+      switch (keymap.get(code)) {
+        case 'toggleMode':
+          if (down && !e.repeat) doToggleMode();
+          return;
+        case 'toggleView':
+          if (down && !e.repeat && plain) doToggleView();
+          return;
+        case 'respawn':
+          if (down && plain) doRespawn();
+          return;
+        case 'fastTime':
+          if (plain) fastTime = down;
+          return;
+        case 'toggleHud':
+          if (down && plain) hudToggleRef.current?.();
+          return;
+        case 'hudMore':
+          if (down && !e.repeat && plain) hudStepRef.current?.(1);
+          return;
+        case 'hudLess':
+          if (down && !e.repeat && plain) hudStepRef.current?.(-1);
+          return;
+        case 'mute':
+          if (down && !e.repeat && plain) sfx.muted = !sfx.muted;
+          return;
       }
     };
 
@@ -730,9 +1022,12 @@ export function startEngine(
     const ku = (e: KeyboardEvent) => onKey(e, false);
 
     let dragging = false;
+    let lookAt = -Infinity;                    // when the view was last turned up or down by hand (ms)
+    let pitchFloor: number = HERO_CAMERA.pitchMin; // the orbit's lowest pitch (lower while skydiving)
     let lastX = 0, lastY = 0;
 
     const pd = (e: PointerEvent) => {
+      sfx.wake(); // (a gesture: the browser lets audio start now)
       if (enablePointerLock && document.pointerLockElement !== canvas) {
         // Refused in embedded frames and without a user gesture (the promise
         // rejects); dragging still looks around, so the refusal is ignored.
@@ -754,7 +1049,21 @@ export function startEngine(
       }
     };
 
-    const clearKeys = () => { keyMask = 0; fastTime = false; };
+    const clearKeys = () => { held.clear(); keyMask = 0; fastTime = false; mouseAttack = false; mouseGuard = false; };
+
+    // The mouse's buttons fight (once the pointer is locked: the click that locks it does nothing
+    // else). mousedown, not pointerdown: a second button pressed while one is held is only a
+    // pointermove to pointer events.
+    const md = (e: MouseEvent) => {
+      if (inputs.inputBlocked?.current || menuRef?.current || document.pointerLockElement !== canvas) return;
+      if (e.button === 0) mouseAttack = true;
+      else if (e.button === 2) mouseGuard = true;
+    };
+    const mu = (e: MouseEvent) => {
+      if (e.button === 0) mouseAttack = false;
+      else if (e.button === 2) mouseGuard = false;
+    };
+    const noMenu = (e: Event) => e.preventDefault();
 
     // Mouse wheel: third-person camera distance.
     const onWheel = (e: WheelEvent) => {
@@ -770,10 +1079,12 @@ export function startEngine(
         if (Math.abs(mx) > 250 || Math.abs(my) > 250) return;
         cam.yaw += mx * sens * 0.8;
         cam.pitch -= my * sens * 0.8;
+        if (my !== 0) lookAt = performance.now();
         cam.pitch = Math.max(-1.45, Math.min(1.45, cam.pitch));
       } else if (dragging) {
         cam.yaw += (e.clientX - lastX) * sens;
         cam.pitch -= (e.clientY - lastY) * sens;
+        if (e.clientY !== lastY) lookAt = performance.now();
         cam.pitch = Math.max(-1.45, Math.min(1.45, cam.pitch));
         lastX = e.clientX;
         lastY = e.clientY;
@@ -798,6 +1109,9 @@ export function startEngine(
     window.addEventListener('pointermove', pm);
     canvas.addEventListener('pointercancel', pu);
     canvas.addEventListener('wheel', onWheel, { passive: true });
+    canvas.addEventListener('mousedown', md);
+    window.addEventListener('mouseup', mu);
+    canvas.addEventListener('contextmenu', noMenu);
 
     const PRESET_MAP: Record<PresetId, (typeof QUALITY_PRESETS)[number]> = {
       low: QUALITY_PRESETS[0],
@@ -860,15 +1174,25 @@ export function startEngine(
         return heroBuf;
       },
       packRemotes: () => (netRef?.current ? remotes.pack(ds.x, ds.y, ds.z, MAX_REMOTE_HEROES) : NO_REMOTES),
+      packCombat: () => (gpu ? combatScene.pack(combat, ds.x, ds.y, ds.z) : null),
+      packRocks: () => packRocks(ds.x, ds.z, rockFrame),
     };
 
     // Multiplayer: other players' heroes, this player's snapshot (the hero, or the first-person /
     // flying camera as a hero standing or gliding there), and the shared clock.
     const remotes = new RemoteHeroes();
     const snap: number[] = [];
-    const proxy = createHeroState(spawn.x, spawn.z, spawn.yaw, seedRef.current);
-    const netFrame = (net: NetLink, now: number, dt: number) => {
-      remotes.update(net, now, dt);
+    const proxy = createHeroState(spawn.x, spawn.z, spawn.yaw, seedNow());
+    // Before the step: the others played back for now (the combat world's rivals) and their blows and
+    // shots (fought in third person only: the first-person and flying views take none).
+    const takeCombat = (id: string, _at: number, d: readonly number[]) => { if (cam.mode === 'hero') combat.receive(id, d); };
+    const netIn = (net: NetLink, now: number, dt: number) => {
+      remotes.update(net, now, dt, world);
+      combat.rivals = net.inWorld() ? remotes.list() : NO_RIVALS;
+      net.drainCombat(takeCombat);
+    };
+    // After it: this player's snapshot and the clock.
+    const netOut = (net: NetLink, now: number) => {
       if (!net.inWorld()) return;
       const c = net.takeClock();
       if (c) {
@@ -892,7 +1216,7 @@ export function startEngine(
           h.ground = fly || !cam.player.grounded ? h.y - 50 : h.y - PLAYER.groundBias;
           h.gx = 0; h.gz = 0;
         }
-        net.sendState(encodeSnapshot(h, now, snap));
+        net.sendState(cam.mode === 'hero' ? encodeSnapshot(h, now, snap, combat.pose, combat.health, combat.hearts, world) : encodeSnapshot(h, now, snap, undefined, undefined, undefined, world));
       }
       // The world's clock: when changed here (T held: a few times a second), and now and then from its keeper.
       if ((clockDirty && now - sentClockAt > 250) || (net.keepsClock() && now - sentClockAt > 2000)) {
@@ -909,6 +1233,13 @@ export function startEngine(
       originX: number, originZ: number, resScale: number,
     ) => {
       statsAt = now;
+      const land = landName(x, z, seedNow());
+      if (mapHud) {
+        const t = ambientTemp(x, y, z, seedNow(), hourOf(clock.days));
+        // (eased, so crossing from one land to the next is not a jump)
+        mapHud.temp = Math.abs(t - mapHud.temp) > 12 || !mapHud.live ? t : mapHud.temp + (t - mapHud.temp) * 0.4;
+        mapHud.land = land;
+      }
       statsStore.set({
         fps: Math.round(fpsEma),
         x, y, z,
@@ -926,8 +1257,49 @@ export function startEngine(
         hour: hourOf(clock.days),
         paused: clock.paused,
         dayMinutes: clock.dayMinutes,
-        land: landName(x, z, seedRef.current),
+        land,
+        world,
       });
+    };
+
+    // The map's channel, every frame: where the hero is and which way the view faces, the other players
+    // (as played back), and how loud the hero is.
+    const feedMap = (m: MapHudState, dt: number, px: number, py: number, pz: number, silent: boolean) => {
+      const hero = cam.mode === 'hero';
+      m.live = true;
+      m.seed = seedRef.current;
+      m.world = world;
+      m.mode = cam.mode;
+      m.x = hero ? cam.hero.x : px;
+      m.y = hero ? cam.hero.y : py;
+      m.z = hero ? cam.hero.z : pz;
+      m.heading = lastYaw;
+      m.facing = hero ? cam.hero.yaw : lastYaw;
+      let loud = 0;
+      if (hero) {
+        const h = cam.hero;
+        if (h.landings !== noise.landings) {
+          if (noise.landings >= 0) noisePulse(noise, landingLoudness(h.impact));
+          noise.landings = h.landings;
+        }
+        loud = heroNoise(h);
+      } else if (cam.mode === 'walk') {
+        loud = walkNoise(Math.hypot(cam.player.vx, cam.player.vz), (keyMask & HELD.sprint) !== 0);
+      }
+      m.noise = stepNoise(noise, dt, silent ? 0 : loud);
+      const net = netRef?.current;
+      let n = 0;
+      if (net && net.inWorld()) {
+        const list = remotes.list();
+        for (let k = 0; k < list.length && n < MAP_PEERS; k++) {
+          const r = list[k], p = m.peers[n++];
+          if (p.id !== r.id || p.name === 'Someone') { p.id = r.id; p.name = net.peerName(r.id); }
+          p.char = r.char;
+          p.x = r.body.x; p.y = r.body.y; p.z = r.body.z;
+          p.yaw = r.body.yaw;
+        }
+      }
+      m.peerCount = n;
     };
 
     const setBasis = (yaw: number, pitch: number) => {
@@ -951,6 +1323,22 @@ export function startEngine(
       ds.basisDirty = true;
     };
 
+    // The inventory screen opens: the keys and buttons are let go, so are the hands' acts, and the pointer is freed.
+    let menuWas = false;
+    let pouchAt = -Infinity;
+    // (the shader's clock — the wind in the grass, the water — stands still with the world: the time it has stood)
+    let frozenTotal = 0, frozenSince = -1;
+    const onMenu = (open: boolean) => {
+      if (open) {
+        clearKeys();
+        combat.cancelActs();
+        if (document.pointerLockElement === canvas) document.exitPointerLock();
+        pouchAt = -Infinity;
+      } else if (enablePointerLock && document.pointerLockElement !== canvas) {
+        (canvas.requestPointerLock?.() as Promise<void> | undefined)?.catch?.(() => {});
+      }
+    };
+
     const frame = (now: number) => {
       raf = requestAnimationFrame(frame);
       const active = isIntersecting && isTabVisible && runRef.current;
@@ -961,11 +1349,25 @@ export function startEngine(
         return;
       }
 
-      const s = seedRef.current;
+      // A new seed while in the cloud world: out of its ring (alone on the land the hero stays where it is,
+      // as it always has; in a shared world the page respawns everyone)
+      if (seedRef.current !== seedSeen) {
+        seedSeen = seedRef.current;
+        if (world === 'clouds') doRespawn();
+      }
+      const s = seedNow();
       const p = PRESET_MAP[software ? 'low' : (presetRef.current ?? 'med')] ?? PRESET_MAP.med;
+      // The inventory screen: the hero is left alone; alone in the world, everything stands still behind it.
+      const menu = !!menuRef?.current;
+      if (menu !== menuWas) { menuWas = menu; onMenu(menu); }
+      const blocked = menu || !!inputs.inputBlocked?.current;
+      const frozen = menu && !netRef?.current?.inWorld();
+      if (frozen) { if (frozenSince < 0) frozenSince = now; }
+      else if (frozenSince >= 0) { frozenTotal += now - frozenSince; frozenSince = -1; }
       // The sky: the one wanted (the view builds it in the background), and the clock.
       if (view.sky() !== null && skyRef.current !== view.sky()) view.setSky(skyRef.current);
-      if (fastTime) {
+      if (frozen) { /* (the clock stands still) */ }
+      else if (fastTime) {
         clock.days += (dt * FAST_TIME) / 24;
         clockDirty = true;
       } else advanceClock(clock, dt);
@@ -976,35 +1378,108 @@ export function startEngine(
       }
 
       // Locomotion update via zero-allocation bitmask
-      const fwdKey = ((keyMask & (KEY_W | KEY_UP)) ? 1 : 0) - ((keyMask & (KEY_S | KEY_DOWN)) ? 1 : 0);
-      const strKey = ((keyMask & (KEY_D | KEY_RIGHT)) ? 1 : 0) - ((keyMask & (KEY_A | KEY_LEFT)) ? 1 : 0);
-      const sprint = (keyMask & KEY_SHIFT) !== 0;
-      const jump = (keyMask & KEY_SPACE) !== 0;
-      const descend = (keyMask & (KEY_C | KEY_CTRL)) !== 0;
+      syncKeymap();
+      const fwdKey = ((keyMask & HELD.forward) ? 1 : 0) - ((keyMask & HELD.back) ? 1 : 0);
+      const strKey = ((keyMask & HELD.right) ? 1 : 0) - ((keyMask & HELD.left) ? 1 : 0);
+      const sprint = (keyMask & HELD.sprint) !== 0;
+      const jump = (keyMask & HELD.jump) !== 0;
+      const descend = (keyMask & HELD.crouch) !== 0;
+      // The look keys turn the view, as the mouse does (behind the lobby they wait with the rest).
+      if (!blocked) stepKeyLook(keyLook, keyMask, dt, sensitivityRef.current, cam);
+      if (keyLook.dirY !== 0) lookAt = now;
 
       // Third person aims from its own eye after the hero moves (below).
       if (cam.mode !== 'hero') setBasis(cam.yaw, cam.pitch);
+
+      const net = netRef?.current;
+      if (net) netIn(net, now, dt);
 
       let px: number, py: number, pz: number, grounded = false;
 
       switch (cam.mode) {
       case 'hero': {
-        if (cam.pitch < HERO_CAMERA.pitchMin) cam.pitch = HERO_CAMERA.pitchMin;
+        // Skydiving, the view tips to look down the fall (−68°, −82° in a nosedive) unless the mouse or the
+        // look keys moved it lately; the floor comes back up gently after.
+        const sky = cam.hero.move === 'air' && cam.hero.skydive;
+        if (sky && now - lookAt > 700) {
+          cam.pitch += (-(68 + 14 * cam.hero.dive) * Math.PI / 180 - cam.pitch) * (1 - Math.exp(-1.6 * dt));
+        }
+        pitchFloor = sky ? -1.45 : Math.min(HERO_CAMERA.pitchMin, pitchFloor + 0.8 * dt);
+        if (cam.pitch < pitchFloor) cam.pitch = pitchFloor;
         else if (cam.pitch > HERO_CAMERA.pitchMax) cam.pitch = HERO_CAMERA.pitchMax;
-        heroInput.forward = fwdKey;
-        heroInput.strafe = strKey;
-        heroInput.sprint = sprint;
-        heroInput.jump = jump;
-        heroInput.sneak = (keyMask & KEY_C) !== 0;
-        heroInput.camYaw = cam.yaw;
-        updateHero(cam.hero, heroInput, dt, s);
-        updateHeroRig(rig, cam.hero, dt);
-        updateHeroCamera(tp, cam.hero, cam.yaw, cam.pitch, dt, s);
+        if (combat.seed !== s) combat.reset(s);
+        combat.foesOn = !!gpu && (inputs.foes?.current ?? true);
+        // (behind the lobby the foes wait)
+        combat.paused = blocked;
+        // The hero moves and fights in the combat world (its locomotion runs in there).
+        const ci = combatIn;
+        ci.forward = fwdKey;
+        ci.strafe = strKey;
+        ci.sprint = sprint;
+        ci.jump = jump;
+        ci.sneak = (keyMask & HELD.crouch) !== 0;
+        ci.attack = mouseAttack || (keyMask & HELD.attack) !== 0;
+        ci.guard = mouseGuard || (keyMask & HELD.guard) !== 0;
+        ci.aim = (keyMask & HELD.aim) !== 0;
+        ci.throw = (keyMask & HELD.throw) !== 0;
+        ci.action = (keyMask & HELD.interact) !== 0;
+        ci.swap = (keyMask & HELD.swap) !== 0;
+        ci.camYaw = cam.yaw;
+        ci.camPitch = tp.pitch;
+        // (the view: last frame's eye and the way through the screen's centre, for the bow and throws)
+        ci.eyeX = tp.x; ci.eyeY = tp.y; ci.eyeZ = tp.z;
+        const cpv = Math.cos(tp.pitch);
+        ci.dirX = Math.sin(tp.yaw) * cpv; ci.dirY = Math.sin(tp.pitch); ci.dirZ = Math.cos(tp.yaw) * cpv;
+        combat.netTime = now;
+        if (frozen) {
+          // (standing still behind the inventory: only the pose follows what is carried)
+          combat.refreshPose(ci);
+          updateHeroRig(rig, cam.hero, 0, combat.pose);
+        } else {
+          const hx0 = cam.hero.x, hy0 = cam.hero.y, hz0 = cam.hero.z;
+          combat.step(dt, ci);
+          // (only the cloud world has a ring: the land's is gone while that world is inactive)
+          if (world === 'clouds') {
+            const ring = portalOf(world, seedRef.current);
+            crossed = portalCrossed(ring, hx0, hy0, hz0, cam.hero.x, cam.hero.y, cam.hero.z);
+          }
+          // (what the fight sends the other players: its blows and shots, what came of theirs)
+          if (net) for (let k = 0; k < combat.outCount; k++) net.sendCombat(combat.outbox[k].d, combat.outbox[k].to);
+          combat.outCount = 0;
+          combatTime += dt;
+          updateHeroRig(rig, cam.hero, combat.heroDt, combat.pose);
+        }
+        // a rock in the hands goes where the rig holds it
+        if (combat.stone && rig.rockAt[0] === rig.rockAt[0]) {
+          heroLocalToWorld(rig, cam.hero, rig.rockAt[0], rig.rockAt[1], rig.rockAt[2], RK3);
+          combat.holdStone(RK3[0], RK3[1], RK3[2]);
+        }
+        // Locked on: the orbit turns to keep the foe (or the other player) ahead.
+        const lb = frozen ? null : combat.lockedBody();
+        if (lb) {
+          const want = Math.atan2(lb.x - cam.hero.x, lb.z - cam.hero.z);
+          const d = want - cam.yaw;
+          cam.yaw += (d - 2 * Math.PI * Math.round(d / (2 * Math.PI))) * (1 - Math.exp(-HERO_CAMERA.lockRate * dt));
+        }
+        updateHeroCamera(tp, cam.hero, cam.yaw, cam.pitch, dt, s, combat.act === 'aim' || combat.act === 'throw');
+        if (!frozen) {
+          combatScene.update(combat, rig, dt);
+          combatEvents();
+        }
+        // fallen: back at the spawn after a moment
+        if (combat.act === 'dead' && combat.downFor > 3.2) doRespawn();
+        // a blow shakes the view a moment
+        if (shake > 1e-3) {
+          tp.x += (Math.random() - 0.5) * shake; tp.y += (Math.random() - 0.5) * shake; tp.z += (Math.random() - 0.5) * shake;
+          shake *= Math.exp(-16 * dt);
+        } else shake = 0;
         setBasis(tp.yaw, tp.pitch);
         px = tp.x;
         py = tp.y;
         pz = tp.z;
         grounded = cam.hero.move === 'ground';
+        if (now - hudAt > 50) publishCombatHud(now);
+        if (menu && pouchStore && now - pouchAt > 100) { pouchAt = now; pouchStore.set(readPouch(combat)); }
         break;
       }
       case 'walk': {
@@ -1053,20 +1528,33 @@ export function startEngine(
       default:
         assertNever(cam.mode);
       }
+      const tr = portalTrip.step(dt, crossed || travelAsked, false, world, view);
+      crossed = false;
+      travelAsked = false;
+      if (tr.arrive) arrive(tr.arrive);
+      if (tr.say) say(tr.say);
+      const fade = portalTrip.fade();
+      if (fade !== lastFade) {
+        lastFade = fade;
+        canvas.style.filter = fade > 0 ? `brightness(${(1 - fade).toFixed(3)})` : '';
+      }
+      // (the rocks round the hero, or round the camera out of the hero's view, are the CPU's: solid and drawn alike)
+      if (cam.mode === 'hero') focusRocks(cam.hero.x, cam.hero.z, s); else focusRocks(px, pz, s);
 
       const ox = Math.floor(px / CHUNK_SIZE) * CHUNK_SIZE;
       const oz = Math.floor(pz / CHUNK_SIZE) * CHUNK_SIZE;
 
-      const net = netRef?.current;
-      if (net) netFrame(net, now, dt);
+      if (net) netOut(net, now);
+      if (mapHud) feedMap(mapHud, dt, px, py, pz, blocked);
 
       if (view.busy()) {
         if (now - statsAt > 200) publishStats(now, px, py, pz, grounded, ox, oz, p.resScale);
         return;
       }
 
-      ds.time = (now - t0) * 0.001;
-      ds.fov = fovRef.current;
+      ds.time = (now - t0 - frozenTotal - (frozenSince >= 0 ? now - frozenSince : 0)) * 0.001;
+      // (drawing the bow, the view narrows a little)
+      ds.fov = fovRef.current * (cam.mode === 'hero' ? (1 - 0.14 * tp.aim) * tp.fov : 1);
       ds.seed = s;
       ds.marchSteps = software ? Math.min(p.marchSteps, 48) : p.marchSteps;
       ds.shadowSteps = software ? Math.min(p.shadowSteps, 10) : p.shadowSteps;
@@ -1080,6 +1568,7 @@ export function startEngine(
       ds.thirdPerson = cam.mode === 'hero';
       ds.renderScale = p.resScale * auto.scale;
       ds.days = clock.days;
+      placeMarkers();
       view.draw(ds);
 
       const rdt = Math.min((now - lastRender) / 1000, 1.0);
@@ -1113,15 +1602,38 @@ export function startEngine(
       window.removeEventListener('pointermove', pm);
       canvas.removeEventListener('pointercancel', pu);
       canvas.removeEventListener('wheel', onWheel);
+      canvas.removeEventListener('mousedown', md);
+      window.removeEventListener('mouseup', mu);
+      canvas.removeEventListener('contextmenu', noMenu);
+      sfx.dispose();
 
       view.dispose();
     };
     return {
-      dispose, respawn: doRespawn, toggleMode: doToggleMode, toggleView: doToggleView,
+      dispose, respawn: doRespawn, toggleMode: doToggleMode, toggleView: doToggleView, travel: () => { travelAsked = true; },
       setHour: (hour) => { setHour(clock, hour); clockDirty = true; },
       setTimePaused: (paused) => { clock.paused = paused; clockDirty = true; },
       setDayMinutes: (minutes) => { clock.dayMinutes = minutes; clockDirty = true; },
       clock: () => ({ days: clock.days, paused: clock.paused, dayMinutes: clock.dayMinutes }),
+      pouch: (cmd) => {
+        // (the world may be standing still, so what the command did is heard and shown here and now)
+        combat.eventCount = 0;
+        let ok = false;
+        switch (cmd.op) {
+          case 'equip': ok = combat.equip(cmd.cat, cmd.index); break;
+          case 'unequip': ok = combat.unequip(cmd.cat); break;
+          case 'drop': ok = combat.discard(cmd.cat, cmd.index); break;
+          case 'eat': ok = combat.eat(cmd.index); break;
+          default: assertNever(cmd);
+        }
+        combatEvents();
+        combat.eventCount = 0;
+        if (ok) {
+          pouchStore?.set(readPouch(combat));
+          publishCombatHud(performance.now());
+        }
+        return ok;
+      },
     };
   } catch (e) {
     ro?.disconnect();

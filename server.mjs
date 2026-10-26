@@ -13,6 +13,9 @@
  * (src/lib/hero/characters.ts). Each browser simulates its own hero and sends
  * its state ~15 times a second; the relay passes it to the others, and keeps
  * the world's seed and clock (the first player's) for those who join later.
+ * Players fight each other too: their blows and shots, and what came of them,
+ * are passed on as they are (src/lib/combat/pvp.ts) — each browser settles
+ * what strikes its own hero.
  */
 
 import { spawn, spawnSync } from 'node:child_process';
@@ -32,7 +35,8 @@ process.env.NODE_ENV = prod ? 'production' : 'development';
 
 const MAX_PLAYERS = 5;   // one per character
 const CHARACTERS = 5;
-const MAX_SNAPSHOT = 32; // numbers in one state message
+const MAX_SNAPSHOT = 48; // numbers in one state message (remoteHeroes.ts S.length, with room to grow)
+const MAX_COMBAT = 16;   // … in one combat message (a blow, a shot, what came of one)
 const MP_PATH = '/mp';
 
 // ---- production build ------------------------------------------------------
@@ -129,6 +133,14 @@ function onMessage(ws, c, raw, isBinary) {
       break;
     case 's': // hero state: passed on as it is
       if (c.joined && finiteList(m.d, MAX_SNAPSHOT)) broadcast({ t: 's', id: c.id, d: m.d }, { except: ws, inWorld: true });
+      break;
+    case 'c': // combat: to one player (`to`), or to everyone else in the world
+      if (!c.joined || !finiteList(m.d, MAX_COMBAT)) break;
+      if (typeof m.to === 'string') {
+        for (const [other, o] of clients) {
+          if (o.id === m.to && o.joined && other !== ws) send(other, { t: 'c', id: c.id, d: m.d });
+        }
+      } else broadcast({ t: 'c', id: c.id, d: m.d }, { except: ws, inWorld: true });
       break;
     case 'seed':
       if (!c.joined || !validSeed(m.seed) || m.seed === world.seed) break;

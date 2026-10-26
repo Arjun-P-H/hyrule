@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import {
   horizonDip, moonElongation, moonIllumination, moonTheta, pathDir, pathElevation, POLE, SKY, starBasis, sunTheta, wrapTheta,
 } from '../src/lib/sky/celestial';
-import { advanceClock, clockText, createSkyClock, dayPhase, hourOf, pace, setHour } from '../src/lib/sky/clock';
+import { advanceClock, clockText, clockText5, createSkyClock, dayPhase, hourOf, pace, setHour } from '../src/lib/sky/clock';
 import { transmittance } from '../src/lib/sky/atmosphere';
 import { computeLightRig, createLightRig, keyAltitude, KEY_ALTS } from '../src/lib/sky/lightRig';
 
@@ -130,6 +130,12 @@ describe('clock', () => {
     expect(clockText(18.25)).toBe('18:15');
     expect(clockText(0)).toBe('00:00');
     expect(clockText(23.999)).toBe('23:59');
+    // the HUD's clock moves in steps of five minutes
+    expect(clockText5(18.25)).toBe('18:15');
+    expect(clockText5(18 + 4 / 60)).toBe('18:00');
+    expect(clockText5(18 + 9.99 / 60)).toBe('18:05');
+    expect(clockText5(23.999)).toBe('23:55');
+    expect(clockText5(0)).toBe('00:00');
   });
 });
 

@@ -4,7 +4,7 @@
  * vertex buffer and one index buffer for instanced indirect draws.
  * ---------------------------------------------------------------------------
  * Each shape starts as a skeleton (trunk and branch paths, leaf clumps,
- * conifer tiers, palm fronds, cactus arms); every level of detail is emitted
+ * conifer boughs, palm fronds, cactus arms); every level of detail is emitted
  * from the same skeleton, so switching levels never changes the silhouette.
  *
  * - Trunks and branches: tapered tubes along bent paths (parallel-transport
@@ -13,9 +13,10 @@
  * - Canopies: clusters of lumpy leaf clumps (displaced icospheres) whose
  *   normals lean outward from the crown's centre, so a crown shades as one
  *   soft volume while its outline stays lumpy.
- * - Conifers: stacked cone skirts with jagged, drooping rims. Palms: curved
- *   ringed trunks under V-folded, serrated, drooping fronds. Cacti: ribbed
- *   columns with bent arms.
+ * - Conifers: a tall bare trunk under whorls of boughs, each a feather-edged
+ *   sheet folded along its midrib, that leaves the trunk angled down and droops
+ *   toward its tip (far away, a skirt round each whorl). Palms: curved ringed trunks under
+ *   V-folded, serrated, drooping fronds. Cacti: ribbed columns with bent arms.
  *
  * Vertex (VERTEX_BYTES): position (3 × f32, metres, trunk foot at the origin,
  * y up), normal (snorm8 × 4), attributes (unorm8 × 4): part, wind sway (0 at
@@ -23,9 +24,9 @@
  * the foot), variation (per clump or limb, for colour); surface coordinates
  * (unorm16 × 2) for the shader's patterns: on trunks, limbs and cacti the
  * turn round the tube (0 → 1, a seam vertex closes each ring) and the metres
- * along it (/ SURFACE_SPAN); on fronds the side (0 one edge, ½ the midrib,
- * 1 the other) and the metres from the stalk; on leaf cards the corner (0 or
- * 1 each way). Clumps and skirts use their position.
+ * along it (/ SURFACE_SPAN); on fronds and boughs the side (0 one edge, ½ the
+ * midrib, 1 the other) and the metres from the stalk; on leaf cards the corner (0 or
+ * 1 each way). Clumps use their position.
  *
  * Leaf cards: near levels of broadleaf crowns also carry cards spread over
  * each clump (four vertices at the card's centre, one per corner; the shader
@@ -34,6 +35,7 @@
  * they can be drawn by a pipeline that cuts out the leaves' shapes.
  */
 
+import { BOUGH_ASPECT } from './leafAtlas';
 import { LODS, SPECIES, SPECIES_INFO, VARIANTS, type Species } from './species';
 
 export const VERTEX_BYTES = 24;
@@ -89,6 +91,7 @@ class Builder {
     return this.count - 1;
   }
   tri(a: number, b: number, c: number): void { this.idx.push(a, b, c); }
+  triCard(a: number, b: number, c: number): void { this.cardIdx.push(a, b, c); }
 }
 
 type Crown = { c: V3; r: number };
@@ -107,6 +110,7 @@ type TubeOpts = {
   sides: number;
   height: number;              // tree height, for sway
   crown?: Crown;               // bark inside it is shaded darker
+  crownShade?: number;         // by how much there (0.25 unless given)
   vary: number;
   tip?: boolean;               // close the far end with a point
   /** Radius multiplier around the tube (θ) and along it (point index): ribs, buttresses, flares. */
@@ -149,7 +153,7 @@ function tube(b: Builder, path: V3[], radii: number[], o: TubeOpts): void {
       let n = norm(cross(tangent, up));
       if (len(n) < 0.5 || !Number.isFinite(n[0])) n = norm(sub(p, path[i]));
       const inCrown = o.crown ? 1 - smooth(0.55, 1.05, len(sub(p, o.crown.c)) / o.crown.r) : 0;
-      const ao = (0.62 + 0.38 * smooth(0.0, 1.6, p[1])) * (1 - 0.25 * inCrown);
+      const ao = (0.62 + 0.38 * smooth(0.0, 1.6, p[1])) * (1 - (o.crownShade ?? 0.25) * inCrown);
       b.vertex(p, n, o.part, Math.pow(clamp01(p[1] / o.height), 1.5), ao, o.vary, k / o.sides, along[i]);
     }
   }
@@ -299,13 +303,15 @@ type Limb = {
   tip?: boolean;            // close the far end with a point
   shaped?: boolean;         // apply the skeleton's shape function (buttresses, flare, ribs)
 };
-type Tier = { y: number; h: number; r: number; droop: number; seed: number; turn: number };
+/** A conifer's bough: its midrib from the trunk to the tip (equal arc lengths) and how wide the sheet round it grows. */
+type Bough = { a: number; path: V3[]; len: number; width: number; vary: number; seed: number };
 type Frond = { a: number; e: number; len: number; width: number; droop: number; seed: number };
 type Skeleton = {
   height: number;
   limbs: Limb[];
   clumps: Clump[];
-  tiers?: Tier[];
+  /** Conifer boughs in runs up their spiral (bottom first), each run in order of azimuth; then the spire. */
+  whorls?: Bough[][];
   fronds?: { base: V3; list: Frond[] };
   accents?: Clump[];
   shape?: TubeOpts['shape'];
@@ -313,6 +319,8 @@ type Skeleton = {
   lod2Blobs?: 1 | 2;        // merged blobs standing in for the crown far away
   lod2Levels?: 0 | 1;       // limb levels still drawn far away (bare and flat-topped trees need theirs)
   keepPoints?: boolean;     // use every path point at LOD 0 (shaped profiles)
+  shade?: Crown;            // bark inside it is shaded darker (a crown of boughs, which are not clumps)
+  shadeDepth?: number;      // by how much (TubeOpts crownShade)
 };
 
 /** Oak and maple: a stout trunk forking into a few rising limbs, a broad lumpy crown. */
@@ -406,26 +414,119 @@ function birch(r: Rng): Skeleton {
   return { height: H, limbs, clumps, lod2Blobs: 2 };
 }
 
-/** Pine / fir: a straight trunk under stacked jagged skirts, narrowing to a spike. */
+const TAU = 2 * Math.PI;
+/** Steps in a bough's midrib. */
+const BOUGH_STEPS = 16;
+
+/**
+ * A bough's midrib, trunk to tip, in `BOUGH_STEPS` equal steps: it leaves the trunk at elevation `e0`,
+ * bends down by `bend` (radians) along its length, more toward the tip, and curls back up by `curl`
+ * over its outer part; scaled so that it reaches `reach` metres out from the trunk's axis.
+ */
+function boughPath(root: V3, a: number, e0: number, bend: number, reach: number, curl = 0): { path: V3[]; len: number } {
+  const unit: V3[] = [[0, 0, 0]];
+  let x = 0, y = 0;
+  for (let i = 1; i <= BOUGH_STEPS; i++) {
+    const f = (i - 0.5) / BOUGH_STEPS;
+    const e = e0 - bend * Math.pow(f, 1.4) + curl * Math.pow(f, 2.5);
+    x += Math.cos(e) / BOUGH_STEPS;
+    y += Math.sin(e) / BOUGH_STEPS;
+    unit.push([x, y, 0]);
+  }
+  const len = reach / Math.max(x, 0.2);
+  const ca = Math.cos(a), sa = Math.sin(a);
+  return { len, path: unit.map((p) => add(root, [p[0] * ca * len, p[1] * len, p[0] * sa * len])) };
+}
+
+/**
+ * Spruce / fir: a tall, straight, bare trunk and, from nearly two-fifths of the way up, whorls of boughs that
+ * leave it angled a little down and droop toward their tips, the lowest the longest and the most bowed, shorter
+ * and more upright toward a thin spire. The boughs are staggered turn by turn, so the layers show
+ * through each other.
+ */
 function pine(r: Rng): Skeleton {
   const H = SPECIES_INFO.pine.height * r(0.88, 1.1);
   const k = H / 17;
-  const lean: V3 = [r(-0.25, 0.25), 0, r(-0.25, 0.25)];
-  const trunk: V3[] = [[0, -0.6, 0], mul(add(lean, [0, H * 0.5, 0]), 0.5), add(mul(lean, 0.7), [0, H * 0.75, 0]), add(lean, [0, H, 0])];
-  const tiers: Tier[] = [];
-  const n = 7;
-  for (let i = 0; i < n; i++) {
-    const t = i / n;
-    tiers.push({
-      y: H * (0.2 + 0.7 * t),
-      h: H * 0.27 * (1 - 0.42 * t),
-      r: (0.35 + 3.75 * Math.pow(1 - t, 0.95)) * k * r(0.9, 1.08),
-      droop: r(0.18, 0.3),
-      seed: (r() * 1e9) | 0,
-      turn: r(0, 6.283),
-    });
+  const lean: V3 = [r(-0.3, 0.3), 0, r(-0.3, 0.3)];
+  const bow: V3 = [r(-0.14, 0.14), 0, r(-0.14, 0.14)];
+  const trunkAt = (y: number): V3 => {
+    const t = clamp01((y + 0.6) / (H + 0.6));
+    const w = Math.sin(Math.PI * t);
+    return [lean[0] * t * t + bow[0] * w, y, lean[2] * t * t + bow[2] * w];
+  };
+  // A column, hardly thinner at the top than at the foot, that comes to a sharp point in its last
+  // few metres (more rings up there, for the point).
+  const trunk: V3[] = [];
+  const radii: number[] = [];
+  for (const t of [0, 0.12, 0.25, 0.4, 0.55, 0.7, 0.82, 0.89, 0.94, 0.975, 1]) {
+    trunk.push(trunkAt(-0.6 + (0.86 * H + 0.6) * t)); // (its tip hidden in the leader's spike)
+    const point = t <= 0.82 ? 1 : Math.pow(clamp01(1 - (t - 0.82) / 0.18), 0.75);
+    radii.push(Math.max(0.035, 0.44 * k * (1 - 0.22 * t) * point));
   }
-  return { height: H, limbs: [{ path: trunk, r0: 0.38 * k, r1: 0.05, level: 0, vary: r() }], clumps: [], tiers };
+  // A point on the trunk's surface at height y, toward azimuth a (a little inside it, so what grows from it is joined on).
+  const onBark = (y: number, a: number): V3 => {
+    const t = clamp01((y + 0.6) / (0.86 * H + 0.6));
+    const rad = 0.9 * 0.44 * k * (1 - 0.22 * t) * (t <= 0.82 ? 1 : Math.pow(clamp01(1 - (t - 0.82) / 0.18), 0.75));
+    return add(trunkAt(y), [rad * Math.cos(a), 0, rad * Math.sin(a)]);
+  };
+  // The foot swells and spreads a little into roots.
+  const rootTurn = r(0, 6.283);
+  const shape = (th: number, _i: number, p: V3) => {
+    const y = p[1] + 0.6;
+    return 1 + 0.7 * Math.exp(-y / 0.55) + 0.25 * Math.exp(-y / 0.9) * Math.pow(Math.max(0, Math.cos(4 * th + rootTurn)), 2);
+  };
+
+  const y0 = H * r(0.37, 0.41);
+  const yTop = H * 0.9;
+  const W = 8 + Math.floor(r(0, 2));
+  const spin = r(0, 6.283);
+  // As many boughs as whorls of three or four would hold, but each on its own: they spiral up the trunk, each
+  // a little higher than the last and turned the golden angle from it, so at every height some bough
+  // crosses in front of the trunk whichever way it is seen from (closer together toward the top, where the
+  // boughs are short, so they still close over it there).
+  let N = 0;
+  for (let j = 0; j < W; j++) N += Math.max(3, Math.round(4.4 - 1.2 * Math.pow(j / (W - 1), 1.2) + r(-0.5, 0.5)));
+  const spiral: Bough[] = [];
+  for (let n = 0; n < N; n++) {
+    const u = n / (N - 1);
+    const y = y0 + (yTop - y0) * Math.pow(u, 0.62) + r(-0.04, 0.04) * k;
+    const a = (((spin + n * 2.39996 + r(-0.15, 0.15)) % TAU) + TAU) % TAU;
+    // Reach: graded from the bottom up, as the Hyrule spruces are: long boughs below, shorter through the
+    // middle, short ones under the spire; each a little longer or shorter.
+    const reach = Math.max(1.2 * k, 4.4 * k * (1 - 0.66 * Math.pow(u, 1.1)) * r(0.78, 1.12));
+    // (they leave the trunk sloping down, run on down most of their length and curl up a little at the tip,
+    // which still points a little down)
+    const e0 = (-27 + 8 * Math.pow(u, 1.2) + r(-4, 4)) * Math.PI / 180;
+    const curl = (23 - 6 * u + r(-5, 5)) * Math.PI / 180;
+    // (each grows from the trunk's surface, so where it starts shows)
+    const { path, len } = boughPath(onBark(y, a), a, e0, 0, reach, curl);
+    // (the short ones up top relatively broader, so they still span the trunk)
+    spiral.push({ a, path, len, width: 0.5 * BOUGH_ASPECT * Math.max(len, 0.55 * len + 1.2 * k) * r(0.95, 1.12), vary: r(), seed: (r() * 1e9) | 0 });
+  }
+  // (in runs of four up the spiral, each run a "whorl" for the skirts that stand in for the boughs far off)
+  const whorls: Bough[][] = [];
+  for (let n = 0; n < N; n += 4) whorls.push(spiral.slice(n, n + 4).sort((p, q) => p.a - q.a));
+  // The spire: a few sprigs round the leader's foot, swept up along it, and the leader itself, a tall narrow
+  // spike of two crossed sheets standing straight up from below the trunk's tip, so the top of the trunk is inside it.
+  const spire: Bough[] = [];
+  for (let i = 0; i < 5; i++) {
+    const a = spin + (i * TAU) / 5 + r(-0.3, 0.3);
+    const y = H * r(0.8, 0.88);
+    // (swept up along the spike, so the head comes to a point)
+    const { path, len } = boughPath(trunkAt(y), a, (52 + r(-6, 6)) * Math.PI / 180, 0.35, 1.0 * k * r(0.85, 1.15));
+    spire.push({ a, path, len, width: 0.32 * BOUGH_ASPECT * len, vary: r(), seed: (r() * 1e9) | 0 });
+  }
+  const tipLen = 4.2 * k * r(0.92, 1.05);
+  for (const a of [spin, spin + Math.PI / 2]) {
+    const root = trunkAt(H * 0.74);
+    const path = Array.from({ length: BOUGH_STEPS + 1 }, (_, i) => add(root, [0, (tipLen * i) / BOUGH_STEPS, 0]));
+    spire.push({ a, path, len: tipLen, width: 0.3 * BOUGH_ASPECT * tipLen, vary: r(), seed: (r() * 1e9) | 0 });
+  }
+  // (bottom whorl first: drawn in that order, the boughs above fail the depth test before their cut-out is shaded)
+  whorls.push(spire);
+  const limbs: Limb[] = [{ path: trunk, r0: 0, r1: 0, radii, level: 0, vary: r(), tip: true, shaped: true }];
+  // (the trunk darkens where the crown's boughs shade it: deep in their shade, as the spruces of the Hyrule games are)
+  return { height: H, limbs, clumps: [], whorls, shape, keepPoints: true, shade: { c: [0, 0.66 * H, 0], r: 0.4 * H }, shadeDepth: 0.72 };
 }
 
 /** Rainforest giant: a buttressed pillar, spreading limbs, a wide flat layered canopy. */
@@ -651,9 +752,14 @@ const BODY_SPAN = [0.3, 0.9, 1.5];
  * A trunk as the hero bumps into it: a circle round the trunk's centre at hip
  * height wide enough for it from knee to shoulder (flare, buttress fins and
  * lean included; model space, scale 1), and the height its trunk reaches
- * (above that only crowns, which the hero passes through).
+ * (above that only crowns, which the hero passes through). `prof` follows the
+ * trunk up for climbing: PROFILE knots of (height, centre x, z off the circle's,
+ * radius), its rings as drawn (at their widest) from knee height to the top.
  */
-export type TrunkCollider = { x: number; z: number; r: number; top: number };
+export type TrunkCollider = { x: number; z: number; r: number; top: number; prof: number[] };
+
+/** Knots of a trunk's climbing profile (TrunkCollider.prof). */
+const PROFILE = 8;
 
 /** One collider per (species, shape), index species · VARIANTS + variant; null for bushes. */
 export function trunkColliders(): Array<TrunkCollider | null> {
@@ -682,7 +788,16 @@ export function trunkColliders(): Array<TrunkCollider | null> {
       };
       const c = at(BODY_SPAN[1]).p;
       const r = Math.max(...BODY_SPAN.map((h) => { const q = at(h); return Math.hypot(q.p[0] - c[0], q.p[2] - c[2]) + q.r; }));
-      out.push({ x: c[0], z: c[2], r, top: t.path[n - 1][1] });
+      const top = t.path[n - 1][1];
+      // (the rings themselves from the knees to the top: the trunk tapering and leaning as it is drawn)
+      const prof: number[] = [];
+      const lo = Math.min(BODY_SPAN[0], top);
+      for (let k = 0; k < PROFILE; k++) {
+        const h = lo + ((top - lo) * k) / (PROFILE - 1);
+        const q = at(h);
+        prof.push(h, q.p[0] - c[0], q.p[2] - c[2], q.r);
+      }
+      out.push({ x: c[0], z: c[2], r, top, prof });
     }
   }
   return out;
@@ -697,49 +812,84 @@ const DETAIL = [
   { sides: [4, 3, 3], points: [2, 2, 2], subdiv: 0, levels: 0, amp: 0.06 },
 ] as const;
 
-function emitTiers(b: Builder, s: Skeleton, lod: number): void {
-  const src = s.tiers!;
-  const n = [7, 5, 3][lod];
-  const sides = [10, 7, 5][lod];
+/** The point a fraction t of the way along a path of equal steps. */
+function along(path: V3[], t: number): V3 {
+  const f = clamp01(t) * (path.length - 1);
+  const i = Math.min(path.length - 2, Math.floor(f));
+  return add(path[i], mul(sub(path[i + 1], path[i]), f - i));
+}
+
+/** The share of its width a bough's sheet has a fraction t of the way along: narrower toward both ends, and already broad where it leaves the trunk (the texture's own outline does the rest). */
+/** How far a bough's edges hang below its midrib, as a share of its half-width. */
+const FOLD = 1;
+
+const sheetWidth = (t: number) => Math.min(1, 0.9 + t, 0.35 + 3.25 * (1 - t));
+
+/**
+ * Boughs: each a sheet along its midrib, folded (both halves sag from the midrib), that the shader cuts a
+ * feathered bough out of (the 'fir' spray, leafAtlas.ts): the sheet's triangles are the mesh's cards
+ * (the second index range, drawn cut out in two steps, forest.ts). Their texture coordinates run
+ * across the sheet and along it, 0 to 1. (Far away, a skirt per whorl stands in for them: emitSkirts.)
+ */
+function emitBoughs(b: Builder, s: Skeleton, lod: number): void {
   const H = s.height;
-  for (let j = 0; j < n; j++) {
-    // Tiers for this LOD sample the skeleton's profile (same outline at every level).
-    const t = n === 1 ? 0 : j / (n - 1);
-    const f = t * (src.length - 1);
-    const i0 = Math.floor(f), i1 = Math.min(src.length - 1, i0 + 1), w = f - i0;
-    const T = { y: src[i0].y + (src[i1].y - src[i0].y) * w, r: src[i0].r + (src[i1].r - src[i0].r) * w, droop: src[i0].droop, seed: src[i0].seed, turn: src[i0].turn };
-    const h = (src[i0].h + (src[i1].h - src[i0].h) * w) * (7 / n) ** 0.35;
-    const r = rng(T.seed);
-    const shade = 0.78 + 0.22 * t;
-    const rim: number[] = [], mid: number[] = [];
-    const axis: V3 = [0, T.y, 0];
-    for (let k = 0; k < sides; k++) {
-      const th = T.turn + (2 * Math.PI * k) / sides + r(-0.12, 0.12);
-      const jag = 1 + r(-0.16, 0.14);
-      const d: V3 = [Math.cos(th), 0, Math.sin(th)];
-      const pr = add(axis, [d[0] * T.r * jag, -T.droop * T.r * (0.8 + 0.4 * r()), d[2] * T.r * jag]);
-      const pm = add(axis, [d[0] * T.r * 0.5, h * 0.42, d[2] * T.r * 0.5]);
-      const nr = norm(add(mul(d, 0.78), [0, 0.62, 0]));
-      rim.push(b.vertex(pr, nr, PART.leaf, 0.2 + Math.pow(clamp01(pr[1] / H), 1.4), shade, r()));
-      mid.push(b.vertex(pm, norm(add(mul(d, 0.6), [0, 0.8, 0])), PART.leaf, 0.2 + Math.pow(clamp01(pm[1] / H), 1.4), 0.62 * shade + 0.2, r()));
+  if (lod === 2) { emitSkirts(b, s); return; }
+  s.whorls!.forEach((whorl) => whorl.forEach((g) => {
+    const r = rng(g.seed);
+    const rows = lod === 0 ? (g.len > 2.4 ? 6 : g.len > 1.6 ? 4 : 3) : g.len > 3.6 ? 3 : 2;
+    const flip = r() < 0.5 ? 1 : 0; // (which side of the texture is which: the boughs are not all alike)
+    const side: V3 = [-Math.sin(g.a), 0, Math.cos(g.a)];
+    const out: V3 = norm([Math.cos(g.a) * 0.78, 0.62, Math.sin(g.a) * 0.78]); // the crown's own lean: outward and up
+    const rootY = g.path[0][1];
+    const high = clamp01(rootY / H);
+    const ids: number[][] = [];
+    for (let i = 0; i <= rows; i++) {
+      const t = i / rows;
+      const m = along(g.path, t);
+      const T = norm(sub(along(g.path, Math.min(1, t + 0.04)), along(g.path, Math.max(0, t - 0.04))));
+      const up = norm(cross(side, T)); // the sheet's upper face
+      const w = g.width * sheetWidth(t);
+      const sway = clamp01(Math.pow(high, 1.5) + 0.1 * t);
+      const ao = clamp01((0.42 + 0.58 * smooth(0, 0.8, t)) * (0.6 + 0.4 * Math.pow(high, 0.8)));
+      const vary = clamp01(g.vary + r(-0.1, 0.1));
+      const v = t * SURFACE_SPAN; // (stored as the fraction of the way along)
+      // Folded along the midrib: a ridge there, both halves sagging down from it, more toward the edge.
+      const across = (sgn: 1 | -1, f: number): number => {
+        const p = add(m, add(mul(side, sgn * f * w), mul(up, -FOLD * Math.pow(f, 1.3) * w)));
+        const n = norm(add(mul(norm(add(up, mul(side, sgn * 1.3 * FOLD * Math.pow(f, 0.3)))), 0.7), mul(out, 0.3)));
+        return b.vertex(p, n, PART.frond, sway, ao, vary, 0.5 + 0.5 * f * sgn * (2 * flip - 1), v);
+      };
+      const mid = b.vertex(m, norm(add(mul(up, 0.62), mul(out, 0.38))), PART.frond, sway, ao, vary, 0.5, v);
+      ids.push(lod === 0 && g.len > 2.2 ? [across(1, 1), across(1, 0.5), mid, across(-1, 0.5), across(-1, 1)] : [across(1, 1), mid, across(-1, 1)]);
     }
-    const apex = b.vertex([0, T.y + h, 0], [0, 1, 0], PART.leaf, 0.2 + Math.pow(clamp01((T.y + h) / H), 1.4), 0.9, r());
-    for (let k = 0; k < sides; k++) {
-      const k1 = (k + 1) % sides;
-      b.tri(rim[k], mid[k1], rim[k1]);
-      b.tri(rim[k], mid[k], mid[k1]);
-      b.tri(mid[k], apex, mid[k1]);
+    for (let i = 0; i < rows; i++) {
+      for (let c = 0; c + 1 < ids[i].length; c++) {
+        const a0 = ids[i][c], a1 = ids[i][c + 1], b0 = ids[i + 1][c], b1 = ids[i + 1][c + 1];
+        b.triCard(a0, a1, b0); b.triCard(a1, b1, b0);
+      }
     }
-    if (lod === 0) {
-      // Dark underside closing the skirt toward the trunk: its own rim, facing down (the skirt's rim
-      // faces up and out), lighter out at the rim where light gets under the branches.
-      const inner = b.vertex([0, T.y + h * 0.08, 0], [0, -1, 0], PART.leaf, 0.2 + Math.pow(clamp01(T.y / H), 1.4), 0.3, 0.5);
-      const under = rim.map((v) => {
-        const p: V3 = [b.pos[3 * v], b.pos[3 * v + 1], b.pos[3 * v + 2]];
-        return b.vertex(p, [0, -1, 0], PART.leaf, b.att[4 * v + 1], 0.65, b.att[4 * v + 3]);
-      });
-      for (let k = 0; k < sides; k++) b.tri(under[k], under[(k + 1) % sides], inner);
-    }
+  }));
+}
+
+/**
+ * Far away, a skirt round each whorl stands in for its boughs: a fan from the trunk to a rim through
+ * the boughs' tips, opaque, its colour the mean of the feathered boughs it replaces.
+ */
+function emitSkirts(b: Builder, s: Skeleton): void {
+  const H = s.height;
+  for (const whorl of s.whorls!) {
+    if (whorl.length < 3) continue;
+    const root = whorl[0].path[0];
+    const reach = whorl.reduce((p, g) => p + Math.hypot(g.path[BOUGH_STEPS][0] - root[0], g.path[BOUGH_STEPS][2] - root[2]), 0) / whorl.length;
+    const attach = Math.pow(clamp01(root[1] / H), 1.5);
+    const apex = b.vertex(add(root, [0, 0.14 * reach + 0.2, 0]), [0, 1, 0], PART.frond, attach, 0.65, whorl[0].vary, 0.5, 0);
+    // (six tips at most: at this range a seventh would not be seen)
+    const rim = Array.from({ length: Math.min(whorl.length, 6) }, (_, i) => whorl[Math.floor((i * whorl.length) / Math.min(whorl.length, 6))]).map((g) => {
+      const tip = g.path[BOUGH_STEPS];
+      const e = norm(sub(tip, root));
+      return b.vertex(tip, norm(add(mul([e[0], 0, e[2]], 0.78), [0, 0.62, 0])), PART.frond, clamp01(attach + 0.1), 0.9, g.vary, 0, g.len);
+    });
+    for (let k = 0; k < rim.length; k++) b.tri(apex, rim[k], rim[(k + 1) % rim.length]);
   }
 }
 
@@ -847,13 +997,13 @@ function emit(s: Skeleton, lod: number, card = 0): Builder {
     const points = lod === 0 && s.keepPoints ? n : cactus ? [n, 6, 4][lod] : D.points[l.level];
     const [path, rr] = resample(l.path, radii, points);
     tube(b, path, rr, {
-      part: s.part ?? PART.bark, sides: cactus ? [16, 8, 5][lod] : D.sides[l.level], height: H, crown, vary: l.vary,
+      part: s.part ?? PART.bark, sides: cactus ? [16, 8, 5][lod] : D.sides[l.level], height: H, crown: crown ?? s.shade, crownShade: s.shadeDepth, vary: l.vary,
       tip: l.tip && lod < 2,
       shape: l.shaped && (lod < 2 || cactus) ? s.shape : undefined,
       along0: l.level === 0 ? 0 : 8 * l.vary,
     });
   }
-  if (s.tiers) emitTiers(b, s, lod);
+  if (s.whorls) emitBoughs(b, s, lod);
   if (s.fronds) emitFronds(b, s, lod);
   if (crown) {
     const list = lod < 2 ? s.clumps : s.lod2Blobs === 1 ? [singleBlob(s.clumps, 0.92)] : mergeClumps(s.clumps, 0.9);

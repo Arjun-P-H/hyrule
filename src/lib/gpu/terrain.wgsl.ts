@@ -14,8 +14,15 @@
  * rings (a geometry clipmap) and shades it with the same shadeSurface().
  */
 
-import { WORLD_WGSL, wgslF32 as f } from './worldgen.wgsl';
+import { worldWGSL, wgslF32 as f } from './worldgen.wgsl';
+import type { World } from '../world';
 import { HERO_WGSL, NO_HERO_WGSL } from './hero.wgsl';
+import { combatWGSL } from './combat.wgsl';
+import { rocksWGSL } from './rocks.wgsl';
+import { modelIslesWGSL } from './modelIsles.wgsl';
+import { GROUND_SAMPLE_WGSL } from './groundTex.wgsl';
+import { GROUND_DETAIL_WGSL } from './groundDetail.wgsl';
+import { GROUND_COVER_WGSL } from './groundCover.wgsl';
 import { grassWGSL, type GrassSpec } from './grass.wgsl';
 import { skyRealmWGSL } from './skyRealm.wgsl';
 import { WATERFALLS_WGSL } from './waterfalls.wgsl';
@@ -25,6 +32,7 @@ import { faunaWGSL } from './fauna.wgsl';
 import { motesWGSL } from './motes.wgsl';
 import { lanternsWGSL } from './lanterns';
 import { RUINS_WGSL, RUIN_SITES_WGSL } from './ruins.wgsl';
+import { PUFFS_WGSL } from './puffs.wgsl';
 import { canopyWGSL, forestWGSL, type ForestSpec } from './forest.wgsl';
 import { PLACE } from '../forest/placement';
 import { SPECIES, SPECIES_INFO } from '../forest/species';
@@ -49,9 +57,11 @@ type CachedOptions = {
    * horizons along the sun's path (horizonShader), for a sun that moves.
    */
   sun?: 'classic' | 'path';
+  /** The world whose surface the shader evaluates (default: the land). */
+  world?: World;
 };
 
-type TerrainShaderOptions = { height: 'direct' } | ({ height: 'cached' } & CachedOptions);
+type TerrainShaderOptions = { height: 'direct'; world?: World } | ({ height: 'cached' } & CachedOptions);
 
 /** Frame uniform block: 112 bytes (see setFrame in terrainRenderer.ts). */
 export const FRAME_BYTES = 112;
@@ -86,7 +96,7 @@ fn grassDensityFrom(veg: f32, slope: f32, patchN: f32) -> f32 {
  * meadow patches, flowers; bioA — soil (√rgb), grass cover; bioB — grass (√rgb, its hue patches baked
  * in), blade height / BLADE_SCALE; bioC — rock (√rgb), strata.
  */
-const BLADE_SCALE = 3;
+const BLADE_SCALE = 6;
 const lookWGSL = () => /* wgsl */ `
 const BLADE_SCALE: f32 = ${f(BLADE_SCALE)};
 `;
@@ -428,7 +438,7 @@ fn ${name}(ro: vec3f, rd: vec3f) -> vec3f {
 /** The ray-march renderer: fullscreen triangle, one fragment per pixel. */
 export function terrainShader(opts: TerrainShaderOptions): string {
   return /* wgsl */ `${HALF_WGSL(false)}
-${WORLD_WGSL}
+${worldWGSL(opts.world ?? 'land')}
 ${FRAME_WGSL}
 ${heightSourceWGSL(opts)}
 ${CLASSIC_LIGHT_WGSL}
@@ -606,11 +616,11 @@ fn fogInscatter(rd: vec3f) -> vec3f {
 }
 fn surfaceFog(col: vec3f, t: f32, h: f32, rd: vec3f) -> vec3f { return surfaceFogOd(col, t, h, rd, fogOd(t, rd)); }
 fn surfaceFogOd(col: vec3f, t: f32, h: f32, rd: vec3f, od: f32) -> vec3f {
-  if (od < 0.0005) { return cloudVeil(col, t, h, rd); }
+  if (od < 0.0005) { return worldHaze(cloudVeil(col, t, h, rd), t, rd); }
   let inscatter = fogInscatter(rd);
-  if (od > FOG_OPAQUE) { return cloudVeil(inscatter, t, h, rd); }
+  if (od > FOG_OPAQUE) { return worldHaze(cloudVeil(inscatter, t, h, rd), t, rd); }
   let T = exp(-vec3f(0.58, 0.72, 0.95) * od);
-  return cloudVeil(col * T + inscatter * (1.0 - T), t, h, rd);
+  return worldHaze(cloudVeil(col * T + inscatter * (1.0 - T), t, h, rd), t, rd);
 }
 
 // The cloud deck (CLOUD_PLANE) at chunk-local xz, seen from tc metres: its coverage and thickness.
@@ -662,12 +672,20 @@ type RasterOptions = CachedOptions & {
   islands?: boolean;
   clip?: boolean;
   ruins?: boolean;
+  /** The cloud world's puffs (puffs.wgsl.ts). */
+  puffs?: boolean;
   /** Trees (forest.wgsl.ts), with the measured bounds of their models. */
   forest?: { spec: ForestSpec; bounds: ReadonlyArray<{ top: number; radius: number }> } | null;
   /** Per-cell diagonals chosen from the heights (ringTris), else one fixed diagonal. */
   diag?: boolean;
   /** The classic fixed sky, or the day–night cycle (sky.wgsl.ts; bindings 17–19). */
   sky?: 'classic' | 'cycle';
+  /** Combat (combat.wgsl.ts): the foes, the parts and the sprites. */
+  combat?: boolean;
+  /** Rocks (rocks.wgsl.ts): the scatter and the draws. */
+  rocks?: boolean;
+  /** The land's model isles (modelIsles.wgsl.ts). */
+  modelIsles?: boolean;
 };
 
 /**
@@ -799,12 +817,35 @@ fn ringTris(@builtin(global_invocation_id) id: vec3u) {
  * integers in level-0 lattice units relative to a per-frame reference point,
  * so shared vertices round identically in every ring (watertight).
  */
+/**
+ * The cloud world's warm haze (the reference paintings): a golden layer of air over the cloud sea, densest
+ * low down (HAZE_H scale height over HAZE_BASE), glowing toward the sun, over every surface's fog and over
+ * the sky alike; on the land (CLOUD_WORLD false) nothing.
+ */
+const WORLD_HAZE_WGSL = /* wgsl */ `
+const HAZE_BASE: f32 = 1000.0;
+const HAZE_H: f32 = 800.0;
+const HAZE_SIGMA: f32 = ${f(1 / 4500)};
+fn worldHaze(col: vec3f, t: f32, rd: vec3f) -> vec3f {
+  if (!CLOUD_WORLD) { return col; }
+  let a = (u.camPos.y - HAZE_BASE) / HAZE_H;
+  let k = rd.y * t / HAZE_H;
+  var depth = t * exp(-a);
+  if (abs(k) > 1e-3) { depth = t * (exp(-a) - exp(-(a + k))) / k; }
+  let T = exp(-HAZE_SIGMA * depth);
+  let sun = pow(max(dot(rd, keyDir()), 0.0), 6.0);
+  // (gold, as bright as the horizon's air: the hour's light, the paintings' hue)
+  let haze = dot(skyHorCol(), vec3f(0.2126, 0.7152, 0.0722)) * vec3f(1.18, 0.95, 0.62) + keyCol(u.camPos.y) * vec3f(1.0, 0.8, 0.5) * (0.45 * sun);
+  return mix(haze, col, T);
+}
+`;
+
 export function rasterShader(opts: RasterOptions): string {
   const cycle = opts.sky === 'cycle';
   const islands = !!opts.islands;
   return /* wgsl */ `${islands && opts.clip ? 'enable clip_distances;' : ''}
 ${HALF_WGSL(!!opts.f16)}
-${WORLD_WGSL}
+${worldWGSL(opts.world ?? 'land')}
 ${FRAME_WGSL}
 ${heightSourceWGSL({ height: 'cached', ...opts, sun: cycle ? 'path' : 'classic' })}
 ${SHADE_WGSL}
@@ -812,10 +853,15 @@ ${HERO_WGSL}
 fn sunVisibility(p: vec3f, so: vec3f) -> f32 { return sunAt(p.xz) * treeShadowAt(p) * skyShadowAt(p); }
 
 ${cycle ? cycleSkyWGSL({ sky: 17, light: 18, view: 19 }) : CLASSIC_LIGHT_WGSL + CLASSIC_RASTER_SKY_WGSL}
+${WORLD_HAZE_WGSL}
 ${opts.grass ? grassWGSL(opts.grass, islands) : NO_TINT_WGSL}
-${opts.forest ? forestWGSL(opts.forest.spec, opts.forest.bounds, islands) : 'fn treeShadowAt(p: vec3f) -> f32 { return 1.0; }'}
+${opts.forest ? forestWGSL(opts.forest.spec, opts.forest.bounds, islands, !!opts.modelIsles && !islands) : 'fn treeShadowAt(p: vec3f) -> f32 { return 1.0; }'}
 ${opts.ruins ? RUIN_SITES_WGSL + RUINS_WGSL : 'fn inRuinSite(xz: vec2f) -> bool { return false; }'}
+${opts.puffs ? PUFFS_WGSL : ''}
 ${islands ? skyRealmWGSL(!!opts.clip) + WATERFALLS_WGSL + structuresWGSL(!!opts.forest) + effectsWGSL() + faunaWGSL() + motesWGSL() + lanternsWGSL() : 'fn skyShadowAt(p: vec3f) -> f32 { return 1.0; }'}
+${opts.combat ? combatWGSL() : ''}
+${opts.rocks ? rocksWGSL(!!opts.forest && opts.forest.spec.shadowRes > 0) : ''}
+${opts.modelIsles ? modelIslesWGSL({ forest: !!opts.forest, falls: !islands }) + (islands ? '' : WATERFALLS_WGSL) : ''}
 
 struct Mesh {
   cam: vec4f,                        // camera rel. the reference lattice point: x, y (height), z; spacing0
@@ -837,6 +883,12 @@ const CAMERA_NEAR: f32 = ${f(CAMERA.near)};
 @group(0) @binding(39) var bioBTex: texture_2d_array<f32>;
 @group(0) @binding(40) var bioCTex: texture_2d_array<f32>;
 ${lookWGSL()}
+${GROUND_SAMPLE_WGSL}
+${GROUND_DETAIL_WGSL}
+// Bench only: the ground's detail left out (the textures are not read: terrain.wgsl.ts shadeGround).
+override STUB_DETAIL: bool = false;
+// (diagnostic: the detail's code in the shader, its lookups never made: what having it costs, apart from running it)
+override DETAIL_DORMANT: bool = false;
 // The far forest's canopy layer (forest.wgsl.ts canopyAt): its albedo (√, premultiplied by its cover), its cover.
 @group(0) @binding(25) var canopyTex: texture_2d_array<f32>;
 
@@ -953,11 +1005,13 @@ fn beachAt(gc: GroundCache, p: vec3f, slope: f32) -> f32 {
     * max(seaShore, 0.8 * (1.0 - gc.bioA.a));
 }
 
-struct GroundLook { albedo: vec3f, glow: vec3f, snow: f32 };
+struct GroundLook { albedo: vec3f, glow: vec3f, snow: f32, w: vec4f };
 // The ground's colour at p from its biome layers (gc), its slope and its height above the water:
 // grass over soil, rock on the steep (banded in strata in canyon country), sand on low gentle shores,
-// mud by the water in wet lands, snow above the snow line, lava's glow on a volcano.
-fn groundLook(gc: GroundCache, p: vec3f, slope: f32) -> GroundLook {
+// mud by the water in wet lands, snow above the snow line, lava's glow on a volcano. wg: the grass's share
+// of the ground that is not rock (grassDensityFrom, ragged by the turf's tufts where it thins); the
+// shares of grass, soil, rock and sand in the colour come back as look.w (the snow's is the rest).
+fn groundLook(gc: GroundCache, p: vec3f, slope: f32, wg: f32) -> GroundLook {
   let soil = gc.bioA.rgb * gc.bioA.rgb;
   let cover = gc.bioA.a;
   let grassCol = gc.bioB.rgb * gc.bioB.rgb;
@@ -965,8 +1019,7 @@ fn groundLook(gc: GroundCache, p: vec3f, slope: f32) -> GroundLook {
   let strata = gc.bioC.a;
   let wetLava = gc.mat.y;
   let g = p.xz + u.origin;
-  let dens = grassDensityFrom(cover, slope, gc.mat.z);
-  var col = mix(soil, grassCol * 0.8, clamp(dens * 1.2, 0.0, 0.9));
+  var col = mix(soil, grassCol * 0.8, wg);
   // rock: the steep, and outcrops where little grows
   let rockAmt = smoothstep(0.72, 1.15, slope + (1.0 - cover) * 0.22);
   if (rockAmt > 0.0) {
@@ -991,6 +1044,9 @@ fn groundLook(gc: GroundCache, p: vec3f, slope: f32) -> GroundLook {
   col *= 1.0 - 0.4 * ((1.0 - smoothstep(0.0, 1.5, above)) * 0.55 + wet * 0.35);
   let snow = snowAt(gc, p, slope);
   col = mix(col, SNOW, snow);
+  let sandW = beach * 0.85;
+  let ground = (1.0 - snow) * (1.0 - sandW);
+  let shares = vec4f(wg * (1.0 - rockAmt) * ground, (1.0 - wg) * (1.0 - rockAmt) * ground, rockAmt * ground, sandW * (1.0 - snow));
   var glow = vec3f(0.0);
   if (wetLava < -0.01) {
     // Lava: a dark crust broken over the glow, slowly drifting and pulsing.
@@ -999,7 +1055,7 @@ fn groundLook(gc: GroundCache, p: vec3f, slope: f32) -> GroundLook {
     col = mix(col, vec3f(0.02, 0.016, 0.014), lv);
     glow = LAVA_GLOW * lv * (0.3 + 0.7 * (1.0 - crust)) * (0.85 + 0.15 * sin(u.time * 1.3 + g.x * 0.05));
   }
-  return GroundLook(col, glow, snow);
+  return GroundLook(col, glow, snow, shares);
 }
 
 // Wind-packed snow near the camera: drifts (~12 m across) and sastrugi ridges (~2.5 m) lying across
@@ -1031,7 +1087,7 @@ fn snowRelief(n: vec3f, p: vec3f, dp: f32, amt: f32) -> vec3f {
 // The ground at p (its height from gc), seen at distance tS along rd: shadeSurface's terrain
 // shading with its normal, sun and noise fields read from the clipmap instead of evaluated per
 // pixel; the biome and the grass's tint, which turn sharply with height and slope, per pixel.
-fn shadeGround(p: vec3f, rd: vec3f, tS: f32, gc: GroundCache) -> vec3f {
+fn shadeGround(p: vec3f, rd: vec3f, tS: f32, gc: GroundCache, ddx: vec3f, ddy: vec3f) -> vec3f {
   // Behind fog too thick to see through, only the fog shows.
   let od = fogOd(tS, rd) + reachOd(p.xz - u.camPos.xz);
   if (od > FOG_OPAQUE && !STUB_FOG) { return surfaceFogOd(vec3f(0.0), tS, p.y, rd, od); }
@@ -1052,14 +1108,48 @@ fn shadeGround(p: vec3f, rd: vec3f, tS: f32, gc: GroundCache) -> vec3f {
   }
   var albedo = vec3f(0.1, 0.16, 0.05);
   var glow = vec3f(0.0);
-  if (!STUB_BIOME) {
-    let look = groundLook(gc, p, length(grad));
-    albedo = bedTint(look.albedo, p, gc.wt);
+  var cav = 1.0;
+  if (CLOUD_WORLD) {
+    // cloud: white, a faint mottle; deep in the creases and down the steep flanks grey-blue, the domes'
+    // tops bright (no ground texture)
+    let deep = (1.0 - smoothstep(900.0, 1250.0, p.y)) * 0.6 + (1.0 - smoothstep(0.25, 0.9, n.y)) * 0.4;
+    albedo = CLOUD_ALBEDO * (0.95 + 0.05 * vnoise(p.x * 0.05, p.z * 0.05, 8105)) * mix(vec3f(1.04), vec3f(0.5, 0.55, 0.66), deep);
+  } else if (!STUB_BIOME) {
+    let slope = length(grad);
+    // The detail (groundDetail), near the camera: the textures' mips have averaged it away past DETAIL_NEAR.
+    var wg = clamp(grassDensityFrom(gc.bioA.a, slope, gc.mat.z) * 1.2, 0.0, 0.9);
+    // (a lawn needs none past a few tens of metres: there the blades hide the ground, and the far lawn is the colour alone;
+    // near, the ground shows between the tufts)
+    let lawn = smoothstep(0.55, 0.85, wg) * (1.0 - smoothstep(0.35, 0.6, slope));
+    let bare = 1.0 - lawn * smoothstep(4.0, 11.0, tS);
+    let dk = select(0.0, (1.0 - smoothstep(DETAIL_NEAR, DETAIL_FAR, tS)) * bare, !STUB_DETAIL && !STUB_GRAD && !(DETAIL_DORMANT && u.footprint > 0.0));
+    var turf = vec4f(0.5, 0.5, 0.5, 1.0);
+    if (dk > 0.0 && wg > 0.01) {
+      // Where the grass thins, the turf's tufts hold on and bare earth shows between them: a ragged edge.
+      turf = gTop(GL_TURF, p.xz, ddx.xz, ddy.xz);
+      wg = mix(wg, 0.9 * smoothstep(0.32, 0.68, wg / 0.9 + (turf.a - 0.62) * 0.85), dk);
+    }
+    let look = groundLook(gc, p, slope, wg);
+    albedo = look.albedo;
+    if (dk > 0.0) {
+      let d = groundDetail(gc, p, n, slope, look.w, turf, ddx, ddy, dk, tS);
+      let mossCol = gc.bioB.rgb * gc.bioB.rgb * 0.75;
+      albedo = mix(albedo, mossCol, d.moss) * d.tone;
+      albedo = mix(albedo, vec3f(dot(albedo, vec3f(0.3, 0.59, 0.11))) * 0.95, 0.6 * d.grey);
+      n = d.n;
+      cav = d.cav;
+    }
+    // Under a lawn the blades shade the ground (they are drawn out to a couple of hundred metres, thinning with
+    // the ring): the ground between the tufts is not the blades' bright green.
+    let shade = (1.0 - smoothstep(25.0, 110.0, tS)) * lawn * select(1.0, 0.0, STUB_DETAIL);
+    albedo *= 1.0 - 0.3 * shade;
+    albedo = bedTint(albedo, p, gc.wt);
     glow = look.glow;
     if (look.snow > 0.01 && !STUB_GRAD) { n = snowRelief(n, p, tS * u.footprint, look.snow); }
   }
   let L = keyDir();
-  let ndl = max(dot(n, L), 0.0);
+  // (cloud wraps the light round its billows)
+  let ndl = select(max(dot(n, L), 0.0), clamp((dot(n, L) + 0.05) / 1.05, 0.0, 1.0), CLOUD_WORLD);
   // Past the trees' reach the forest is painted on (canopyAt), lit as its trees are: it needs the
   // sun even where the ground faces away from it, its crowns' light wrapping round them.
   let canopyFar = CANOPY_ON && (tS > CANOPY_NEAR || CANOPY_MODE >= 2u) && CANOPY_MODE != 1u && !STUB_BIOME;
@@ -1071,8 +1161,9 @@ fn shadeGround(p: vec3f, rd: vec3f, tS: f32, gc: GroundCache) -> vec3f {
     if (sh > 0.0) { sh = min(sh, heroShadowAt(p - u.camPos)); }
   }
   let kc = keyCol(p.y);
-  let sunTerm = albedo * kc * ndl * sh * causticsAt(p, gc.wt);
-  let ambTerm = albedo * skyAmb(n, 0.22 + 0.28 * max(n.y, 0.0)) * heroAOAt(p - u.camPos);
+  let sunTerm = albedo * kc * ndl * sh * causticsAt(p, gc.wt) * mix(1.0, cav, 0.4);
+  // (cloud: less fill, so its shaded flanks stay shaded under the exposure)
+  let ambTerm = albedo * skyAmb(n, 0.22 + 0.28 * max(n.y, 0.0)) * heroAOAt(p - u.camPos) * cav * select(1.0, 0.55, CLOUD_WORLD);
   var col = sunTerm + ambTerm + glow;
   // The far forest over the ground (once the ground is lit, so little else is held meanwhile): its
   // canopy by its cover, broken into crowns while they are bigger than a pixel.
@@ -1180,6 +1271,9 @@ fn vsTerrain(@builtin(vertex_index) vi: u32, @builtin(instance_index) ring: u32)
 ${opts.diag ? ringTrisWGSL(opts.k) : ''}
 @fragment
 fn fsTerrain(i: TOut) -> @location(0) vec4f {
+  // (the position's derivatives, for the ground textures' filtering: taken where the control flow is uniform)
+  let ddx = dpdx(i.rel);
+  let ddy = dpdy(i.rel);
   let ro = u.camPos;
   let tS = length(i.rel);
   let rd = i.rel / tS;
@@ -1194,7 +1288,7 @@ fn fsTerrain(i: TOut) -> @location(0) vec4f {
   }
   let gc = groundCacheAt(p.xz);
   p.y = gc.h;
-  return display(shadeGround(p, rd, tS, gc));
+  return display(shadeGround(p, rd, tS, gc, ddx, ddy));
 }
 
 // Water: the rings again, on the water's surface (the sea, lakes, rivers' pools; where the surface
@@ -1461,7 +1555,7 @@ fn vsSky(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4f {
 fn fsSky(@builtin(position) fc: vec4f) -> @location(0) vec4f {
   let rd = cameraRay(fc.xy);
   if (u.camPos.y < u.camWater) { return underwater(rd); }
-  return display(shadeSky(u.camPos, rd));
+  return display(worldHaze(shadeSky(u.camPos, rd), 1e6, rd));
 }
 `;
 }
@@ -1471,9 +1565,9 @@ fn fsSky(@builtin(position) fc: vec4f) -> @location(0) vec4f {
  * The point's chunk-local position is exact (integer × power-of-two spacing)
  * and E is evaluated on the same fp32 global the renderer would form.
  */
-export function genShader(n: number): string {
+export function genShader(n: number, world: World = 'land'): string {
   return /* wgsl */ `
-${WORLD_WGSL}
+${worldWGSL(world)}
 struct Gen {
   origin: vec2f,   // chunk origin
   rel0: vec2i,     // first lattice point of the rectangle, relative to the origin
@@ -1508,7 +1602,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
  */
 export function sunShader(opts: CachedOptions): string {
   return /* wgsl */ `
-${WORLD_WGSL}
+${worldWGSL(opts.world ?? 'land')}
 struct Gen {
   origin: vec2f,
   rel0: vec2i,
@@ -1563,7 +1657,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
  */
 export function biomeShader(opts: CachedOptions): string {
   return /* wgsl */ `
-${WORLD_WGSL}
+${worldWGSL(opts.world ?? 'land')}
 struct Gen {
   origin: vec2f,
   rel0: vec2i,
@@ -1581,6 +1675,7 @@ ${heightSourceWGSL({ height: 'cached', ...opts, sun: undefined })}
 @group(0) @binding(6) var bioBOut: texture_storage_2d_array<rgba8unorm, write>;
 @group(0) @binding(7) var bioCOut: texture_storage_2d_array<rgba8unorm, write>;
 ${lookWGSL()}
+${GROUND_COVER_WGSL}
 
 @compute @workgroup_size(8, 8)
 fn main(@builtin(global_invocation_id) id: vec3u) {
@@ -1596,6 +1691,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   var rock = vec3f(0.0);
   var a = vec4f(0.0);
   var b = vec2f(0.0);
+  var gUse = vec4f(0.0);
   for (var k = 0; k < ${BIOME_COUNT}; k++) {
     let w = r.w[k];
     if (w <= 0.0) { continue; }
@@ -1605,11 +1701,18 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     rock += w * LK_ROCK[k];
     a += w * LK_A[k];
     b += w * LK_B[k];
+    gUse += w * LK_USE[k];
   }
+  // The rock's colour in patches of tens of metres, warmer and cooler, lighter and darker: a cliff of one flat tone is a painted wall.
+  let rockV = vnoise(g.x / 41.0, g.y / 41.0, gen.seed + 7811);
+  let rockW = vnoise(g.x / 130.0 + 3.1, g.y / 130.0 - 1.7, gen.seed + 7812);
+  rock = rock * (1.0 + 0.16 * rockV) * vec3f(1.0 + 0.07 * rockW, 1.0, 1.0 - 0.09 * rockW);
+  // Roads, bare patches, long and short grass (groundCover.wgsl.ts).
+  let gu = groundUse(g, s, gen.seed, gUse);
   // Meadow patches (density, 22 m) and the grass's hue patches (30 m): lush to dry, drier in dry air.
   let patchN = 0.5 + 0.5 * vnoise(g.x * 0.045, g.y * 0.045, gen.seed + 7777);
   let patchHue = 0.5 + 0.5 * vnoise(g.x * 0.033, g.y * 0.033, gen.seed + 7707);
-  let dryness = clamp(patchHue * 1.3 - 0.45 + (0.5 - r.M) * 0.8, 0.0, 1.0);
+  let dryness = clamp(patchHue * 1.3 - 0.45 + (0.5 - r.M) * 0.8 + gu.z, 0.0, 1.0);
   let grassCol = mix(grass, dry, dryness * 0.75);
   // The snow line (m): where the air is SNOW_T, lowered by the biome's frost.
   let snowAlt = (r.T0 - SNOW_T - b.x) / L_ALT;
@@ -1621,8 +1724,9 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   }
   let wl = select(a.w, -lava, lava > 0.01);
   textureStore(matOut, st, gen.level, vec4f(snowAlt, wl, patchN, b.y));
-  textureStore(bioAOut, st, gen.level, vec4f(sqrt(soil), a.x));
-  textureStore(bioBOut, st, gen.level, vec4f(sqrt(grassCol), a.y / BLADE_SCALE));
+  // (trodden soil is paler and drier; a road or a bare patch is cover 0, the grass round it thin and short)
+  textureStore(bioAOut, st, gen.level, vec4f(sqrt(soil * mix(vec3f(1.0), vec3f(1.12, 1.07, 0.96), gu.w)), a.x * gu.x));
+  textureStore(bioBOut, st, gen.level, vec4f(sqrt(grassCol), clamp(a.y * gu.y / BLADE_SCALE, 0.0, 1.0)));
   textureStore(bioCOut, st, gen.level, vec4f(sqrt(rock), a.z));
 }
 `;
@@ -1647,7 +1751,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
 export function horizonShader(opts: CachedOptions): string {
   const cosLat = Math.cos(SKY.latitude), sinLat = Math.sin(SKY.latitude);
   return /* wgsl */ `
-${WORLD_WGSL}
+${worldWGSL(opts.world ?? 'land')}
 struct Gen {
   origin: vec2f,
   rel0: vec2i,
@@ -1732,8 +1836,9 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
 }
 
 /** Elevation readback on a grid (parity with the CPU twin and the GLSL probe). */
-export const PROBE_WGSL = /* wgsl */ `
-${WORLD_WGSL}
+export function probeWGSL(world: World): string {
+  return /* wgsl */ `
+${worldWGSL(world)}
 struct Probe {
   origin: vec2f,
   local0: vec2f,
@@ -1755,3 +1860,4 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   outBuf[id.y * pr.w + id.x] = vec4f(sf.e, g.x, g.y, sf.w);
 }
 `;
+}

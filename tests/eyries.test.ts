@@ -1,5 +1,7 @@
 import { describe, expect, test } from 'bun:test';
-import { SKY_REALM as S, SPAWN } from '../src/lib/constants';
+import { elevation } from '../src/lib/terrainMath';
+import { ISLAND_LOWER } from '../src/lib/skyworld/heights';
+import { SPAWN } from '../src/lib/constants';
 import { createHeroState, placeHero, updateHero, type HeroInput } from '../src/lib/hero/locomotion';
 import { archipelagoInCell } from '../src/lib/skyworld/archipelago';
 import { EYRIE_CLASSES } from '../src/lib/skyworld/eyrie/classes';
@@ -104,7 +106,8 @@ describe('the Eyries: classes and their islands', () => {
         expect(a.arches.length).toBe(0);
         expect(others.some((isl) => Math.abs(isl.tiltX) + Math.abs(isl.tiltZ) > 0.01)).toBe(true);
       }
-      if (a.cls === 'rime') expect(main.y).toBeGreaterThan(2550);
+      // (the classes' heights, all pulled down by the heights in use: the Ice Watch still the highest, the Wells the lowest)
+      if (a.cls === 'rime') expect(main.y).toBeGreaterThan(2550 - ISLAND_LOWER);
       if (a.cls === 'wells') expect(main.y).toBeLessThan(1900);
       if (a.cls === 'ember') expect(main.under).toBe('basalt');
     }
@@ -176,7 +179,7 @@ describe('the Eyries: what is built', () => {
       expect(onIsland || onBridge).toBe(true);
       for (const p of st.pieces) {
         pieceBox(p, box);
-        expect(box[4]).toBeGreaterThan(S.floor);
+        expect(box[4]).toBeGreaterThan(elevation(0.5 * (box[0] + box[3]), 0.5 * (box[2] + box[5]), SEED, 0));
       }
     }
   });

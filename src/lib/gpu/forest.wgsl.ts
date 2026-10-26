@@ -17,15 +17,18 @@
  *               indirect draws — and to the shadow buckets inside the shadow box.
  * forestClamp   caps each bucket's instance count at its capacity.
  * vsTree/fsTree the tree: yaw, scale, wind; its surfaces (procedural, fixed to
- *               the model): bark by species that bumps the normal, needle tufts
- *               on conifers, leaflets on fronds, cactus ribs and areoles; snow.
+ *               the model): bark by species that bumps the normal (a spruce's
+ *               streaks and grain), leaflets on fronds, cactus ribs and areoles; snow.
  *               Broadleaf crowns are dark inner foliage under their leaf cards.
  * vsCardDepth/fsCardDepth, vsCard/fsCard
  *               leaf cards round near broadleaf crowns, turned to face the camera:
  *               first their depth, a leaf spray (leafAtlas.ts) cut out by a dither
  *               of its coverage; then their colour where that depth is equal, each
  *               leaf lit by the crown's normal bent its own way (shaded once per
- *               pixel, and without discard, so hidden-surface removal works).
+ *               pixel, and without discard, so hidden-surface removal works). The
+ *               same two steps draw a conifer's boughs, which are sheets (not turned
+ *               to the camera) with a feathered bough painted on them, cut at its
+ *               edge near and dithered far.
  * vsTreeShadow  the same transform into the sun's orthographic shadow map.
  * treeShadowAt  sun visibility under the trees (5 filtered comparison taps),
  *               used by every surface, the grass, the hero and the trees.
@@ -61,7 +64,7 @@ export type ForestSpec = {
   shadowRange: number;
   /** Cross-fade levels of detail with a dither (else switch outright). */
   fade?: boolean;
-  /** Surface detail on the trees: leaf clusters, needles, leaflets, bark (else plain colours; for measuring its cost). */
+  /** Surface detail on the trees: leaf sprays, sprigs, leaflets, bark (else plain colours; for measuring its cost). */
   detail?: boolean;
 };
 
@@ -88,7 +91,7 @@ const SHADOW_NEAR = 32;
 export const REGION = CAP.map((_, g) => CAP.slice(0, g).reduce((p, c) => p + KINDS * c, 0));
 export const INSTANCES = REGION[GROUPS - 1] + KINDS * CAP[GROUPS - 1];
 export const BUCKETS = GROUPS * KINDS;
-/** Groups whose trees carry leaf cards: whole and fading trees at levels 0 and 1. */
+/** Groups whose trees carry leaf cards (and a conifer's cut-out boughs): whole and fading trees at levels 0 and 1. */
 export const CARD_GROUPS = [0, 1, 4, 5] as const;
 /** Beyond this distance (m) a stable share of the plants drops out (the rest grow a little). */
 const FAR_THIN = 420;
@@ -207,7 +210,7 @@ fn forestFieldAt(x: f32, z: f32, seed: i32) -> f32 {
 }
 
 /** forest/placement.ts as WGSL: its tables, then its steps mirrored (keep the two in step). */
-function placementWGSL(islands: boolean): string {
+function placementWGSL(islands: boolean, modelPlants: boolean): string {
   const Z = ZONE_RULES;
   const noise = (wl: number, off: number) => `plNoise(x, z, ${f(wl)}, ${off})`;
   return /* wgsl */ `${forestFieldsWGSL()}
@@ -387,7 +390,14 @@ fn plantAt(ix: i32, iz: i32, lid: vec2f, xz: vec2f, bits: u32) -> vec4u {
   return vec4u(0u);
 }
 
-${islands ? skyPlacementWGSL() : 'fn skyPlantAt(ix: i32, iz: i32, lid: vec2f, corner: vec2f, bits: u32) -> vec4u { return vec4u(0u); }'}
+${islands ? skyPlacementWGSL() : ''}
+// The forest's sky layer: a plant up on a sky island (the realm's), else on a model isle (modelIsles.wgsl.ts).
+fn skyPlantAt(ix: i32, iz: i32, lid: vec2f, corner: vec2f, bits: u32) -> vec4u {
+  var r = vec4u(0u);
+  ${islands ? 'r = realmPlantAt(ix, iz, lid, corner, bits);' : ''}
+  ${modelPlants ? 'if (r.w == 0u) { r = modelPlantAt(ix, iz, lid, corner, bits); }' : ''}
+  return r;
+}
 `;
 }
 
@@ -418,7 +428,7 @@ fn skyRecord(sp: u32, pal: u32, off: vec2f, y: f32, scale: f32, snow: bool, bits
   return vec4u(bitcast<u32>(off.x), bitcast<u32>(off.y), bitcast<u32>(y), info);
 }
 
-fn skyPlantAt(ix: i32, iz: i32, lid: vec2f, corner: vec2f, bits: u32) -> vec4u {
+fn realmPlantAt(ix: i32, iz: i32, lid: vec2f, corner: vec2f, bits: u32) -> vec4u {
   let h0 = hash3(ix, iz, u.seed + 7301);
   let h1 = hash3(ix, iz, u.seed + 7302);
   let h2 = hash3(ix, iz, u.seed + 7303);
@@ -540,7 +550,7 @@ fn canopyAt(g: vec2f, e: f32, wt: f32, slope: f32, hills: f32, hillSlope: f32, s
 `;
 }
 
-export function forestWGSL(spec: ForestSpec, bounds: ReadonlyArray<{ top: number; radius: number }>, islands = false): string {
+export function forestWGSL(spec: ForestSpec, bounds: ReadonlyArray<{ top: number; radius: number }>, islands = false, modelPlants = false): string {
   const S = SPECIES.map((s) => SPECIES_INFO[s]);
   const sp = (name: (typeof SPECIES)[number]) => `${SPECIES.indexOf(name)}u`;
   const side = spec.side;
@@ -583,7 +593,6 @@ const SP_LEAF0: array<vec3f, ${S.length}> = ${arr('vec3f', S.map((s) => v3(s.lea
 const SP_LEAF1: array<vec3f, ${S.length}> = ${arr('vec3f', S.map((s) => v3(s.leaf[1])))};
 const SP_BARK: array<vec3f, ${S.length}> = ${arr('vec3f', S.map((s) => v3(s.bark)))};
 const SP_ACCENT: array<vec3f, ${S.length}> = ${arr('vec3f', S.map((s) => v3(s.accent)))};
-const SP_CLUSTER: array<f32, ${S.length}> = ${arr('f32', S.map((s) => f(s.cluster)))};
 const SP_GLOSS: array<f32, ${S.length}> = ${arr('f32', S.map((s) => f(s.gloss)))};
 const SP_PAINT: array<vec4f, ${S.length}> = ${arr('vec4f', SPECIES.map((s) => `vec4f(${(PAINT[s] ?? PAINT.oak!).map(f).join(', ')})`))};
 const F_SPAN: f32 = ${f(SURFACE_SPAN)};
@@ -626,7 +635,7 @@ fn treeShadowAt(p: vec3f) -> f32 {${spec.shadowRes ? '' : ' return 1.0;'}
 }
 
 // ---- placement -------------------------------------------------------------------
-${placementWGSL(islands)}
+${placementWGSL(islands, modelPlants)}
 @group(1) @binding(23) var<storage, read_write> forestSlots: array<vec4u>;
 @group(1) @binding(24) var<storage, read_write> forestTiles: array<vec4i>;
 @group(1) @binding(25) var<storage, read> forestJobs: array<vec4i>;
@@ -947,94 +956,9 @@ fn bumped(n: vec3f, pos: vec3f, uv: vec2f, g: vec2f) -> vec3f {
 }
 
 // World axes from model axes (the tree's yaw: rot = (cos, sin)), and back.
-fn toWorld(v: vec3f, rot: vec2f) -> vec3f { return vec3f(rot.x * v.x + rot.y * v.z, v.y, -rot.y * v.x + rot.x * v.z); }
 fn toModel(v: vec3f, rot: vec2f) -> vec3f { return vec3f(rot.x * v.x - rot.y * v.z, v.y, rot.y * v.x + rot.x * v.z); }
 
-// Squeeze space e times along the unit axis \`ax\` (round domes there are drawn out e times along it
-// here), and the normal that goes with it.
-fn squeeze(q: vec3f, ax: vec3f, e: f32) -> vec3f { return q - (1.0 - 1.0 / e) * ax * dot(q, ax); }
-fn squeezeN(n: vec3f, ax: vec3f, e: f32) -> vec3f { return normalize(n + (e - 1.0) * ax * dot(n, ax)); }
-
-struct Dome { t: vec3f, top: f32, top2: f32, cell: vec3f };
-// Leaf clusters: spheres round jittered points of a 3D lattice, seen where they break the crown's
-// surface; at each point the one standing highest covers it, so clusters overlap like scales, with
-// round edges. Points keep to the middle 40 % of their cells and radii to 0.6–0.8 cells, so the
-// 2 × 2 × 2 cells nearest a point hold every sphere that can reach it. \`n\`: the surface normal in
-// lattice axes. Returns the covering sphere's offset along the surface (in radii), how high it and
-// the next stand over the surface (−9: none), and its cell.
-fn domes(q: vec3f, n: vec3f) -> Dome {
-  var o = Dome(vec3f(0.0), -9.0, -9.0, vec3f(0.0));
-  let b = floor(q - 0.5);
-  for (var k = 0u; k < 8u; k++) {
-    let c = b + vec3f(f32(k & 1u), f32((k >> 1u) & 1u), f32(k >> 2u));
-    let hv = hash33(c);
-    let d = q - c - 0.3 - 0.4 * hv;
-    let R = 0.6 + 0.2 * hv.z;
-    let r2 = R * R - dot(d, d);
-    // Only a sphere round the point reaches the surface here (most don't: test that first).
-    if (r2 > 0.0) {
-      let along = dot(d, n);
-      let t = d - n * along;
-      let top = sqrt(r2 + along * along) - along;
-      if (top > o.top) { o.top2 = o.top; o.top = top; o.t = t / R; o.cell = c; } else if (top > o.top2) { o.top2 = top; }
-    }
-  }
-  return o;
-}
-
 struct Leaves { n: vec3f, tone: f32, shift: f32, occl: f32, rim: f32, sun: f32 };
-
-// Occlusion of a dome: dark in the crease where it meets the next, a little toward its rim; a gap
-// (nothing covers the point) looks deep into the crown.
-fn domeOccl(d: Dome, crease: f32) -> f32 {
-  if (d.top < -1.0) { return 0.4; }
-  return mix(1.0 - crease, 1.0, smoothstep(0.0, 0.25, d.top - d.top2)) * (1.0 - 0.3 * smoothstep(0.7, 1.0, length(d.t)));
-}
-
-// A conifer's skirts: needle tufts (domes drawn out down the slope, away from the trunk), lighter
-// at their tips; close up, bundles of needles within them and needles streaking along them.
-fn needles(lp: vec3f, nw: vec3f, rot: vec2f, sp: u32, px: f32) -> Leaves {
-  var o = Leaves(nw, 1.0, 0.0, 1.0, 0.0, 1.0);
-  let size = SP_CLUSTER[sp];
-  let k = size / max(px, 1e-6); // a tuft's size in pixels
-  let detail = smoothstep(2.5, 6.0, k);
-  // (the flat, dark underside closing each skirt stays plain)
-  if (detail <= 0.0 || nw.y < -0.95) { return o; }
-  let n = toModel(nw, rot);
-  let out = normalize(vec3f(lp.x, 0.0, lp.z) + vec3f(1e-3, 0.0, 0.0));
-  let down = normalize(out - vec3f(0.0, 0.9, 0.0));
-  let dm = domes(squeeze(lp / size, down, 2.0), squeezeN(n, down, 2.0));
-  let covered = dm.top > -1.0;
-  let r = hash33(dm.cell + 19.19);
-  var tilt = vec3f(0.0);
-  if (covered) { tilt = 1.2 * squeeze(dm.t, down, 2.0) + 0.4 * (r - 0.5); }
-  o.n = normalize(nw + detail * toWorld(tilt, rot));
-  let oc = domeOccl(dm, 0.5);
-  o.occl = mix(1.0, oc, detail);
-  o.sun = mix(1.0, select(0.2, 0.35 + 0.65 * oc, covered), detail);
-  let tip = smoothstep(0.0, 0.9, dot(dm.t, down)) * select(0.0, 1.0, covered);
-  o.tone = 1.0 + detail * (0.3 * r.x - 0.15 + 0.25 * tip);
-  o.shift = detail * (0.35 * (r.y - 0.5) + 0.3 * tip);
-  o.rim = detail * tip;
-  let fine = detail * smoothstep(24.0, 48.0, k) * smoothstep(-0.5, -0.3, nw.y);
-  if (fine > 0.0 && covered) {
-    let nb = domes(squeeze(lp / size * 2.6 + 3.7, down, 2.6), squeezeN(n, down, 2.6));
-    let r2 = hash33(nb.cell + 43.7);
-    var t2 = vec3f(0.0);
-    if (nb.top > -1.0) { t2 = 0.5 * squeeze(nb.t, down, 2.6) + 0.3 * (r2 - 0.5); }
-    o.n = normalize(o.n + fine * toWorld(t2, rot));
-    o.occl *= mix(1.0, domeOccl(nb, 0.3), fine);
-    o.tone *= 1.0 + fine * (0.2 * r2.x - 0.1 + 0.15 * smoothstep(0.2, 0.9, dot(nb.t, down)));
-  }
-  // Needles: fine streaks down the tufts, where they span a few pixels (periodic round the tree).
-  let rho = length(lp.xz);
-  let streak = detail * smoothstep(2.0, 4.0, 6.2831853 * max(rho, 0.3) / 150.0 / max(px, 1e-6));
-  if (streak > 0.0) {
-    let v = pnoise(vec2f((atan2(lp.z, lp.x) * (1.0 / 6.2831853) + 0.5) * 150.0, (rho - 0.9 * lp.y) * 2.0), 150.0);
-    o.tone *= 1.0 + streak * (0.3 * v - 0.15);
-  }
-  return o;
-}
 
 struct Frond { g: vec2f, tone: f32, shift: f32, occl: f32 };
 // Palm fronds: leaflets slanting toward the tip, parted by dark slits, a pale midrib; the relief's
@@ -1104,26 +1028,48 @@ fn bark(sp: u32, base: vec3f, uv: vec2f, lp: vec3f, fw: vec2f, up: f32) -> Bark 
       o.albedo = col;
     }
     case SP_PINE: {
-      // Scaly plates parted by dark fissures, grey-brown below, smoother and orange up the trunk.
-      let up = smoothstep(0.3, 0.75, lp.y / SP_TOP[sp]);
-      var col = mix(vec3f(0.15, 0.095, 0.065), vec3f(0.42, 0.2, 0.085), up);
-      let d = keep(fw, 10.0, 0.45);
+      // A spruce's trunk as the Hyrule games paint it: smooth wood, no cracks: warm red-brown, darker toward
+      // the foot, in broad patches redder or browner; long soft streaks and fine fibres running up it, its
+      // grooves shallow and soft; the odd knot (the stub of an old branch) low down.
+      let up = smoothstep(0.04, 0.45, lp.y / SP_TOP[sp]);
+      var col = mix(vec3f(0.13, 0.075, 0.05), vec3f(0.36, 0.19, 0.11), up);
+      let warp = 0.5 * (pnoise(vec2f(uv.x * 3.0, s * 0.3), 3.0) - 0.5);
+      col *= 0.8 + 0.4 * pnoise(vec2f(uv.x * 4.0 + warp, s * 0.5), 4.0);
+      col = mix(col, col * vec3f(1.3, 1.05, 0.85), 0.45 * smoothstep(0.45, 0.8, pnoise(vec2f(uv.x * 6.0, s * 0.9 + 9.0), 6.0)));
+      var h = vec3f(0.0);
+      let d = keep(fw, 22.0, 1.0);
       if (d > 0.0) {
-        let warp = 0.45 * (pnoise(vec2f(uv.x * 10.0, s / 0.45 * 0.6), 10.0) - 0.5);
-        let c = cell2(vec2f(uv.x * 10.0 + warp, s / 0.45), 10.0);
-        let r = hash33(vec3f(c.cell, 3.0));
-        let e = edgeG(c);
-        let pl = smoothG(0.02, 0.1 + 0.2 * r.z, e);
-        let k = d * (1.0 - 0.75 * up);
-        // Plates flake in layers: a redder, paler rim round each, fine cracks across them.
-        let flake = smoothstep(0.4, 0.15, e.x) * pl.x;
-        let cracks = smoothstep(0.62, 0.8, pnoise(vec2f(uv.x * 40.0, s * 9.0), 40.0));
-        col *= 1.0 + d * (0.4 * r.x - 0.2);
-        col = mix(col, vec3f(0.3, 0.14, 0.07) * (0.8 + 0.4 * r.y), 0.55 * flake * k);
-        col *= 1.0 - 0.35 * cracks * pl.x * k;
-        col = mix(col, vec3f(0.045, 0.035, 0.03), 0.9 * (1.0 - pl.x) * k);
-        o.h = 0.035 * k * vec3f(pl.x, pl.y * 10.0, pl.z / 0.45);
+        // Streaks: noise drawn out up the trunk, each a little lighter or darker, the darker ones sunk 8 mm.
+        let st = pnoiseG(vec2f(uv.x * 22.0 + warp * 4.0, s / 1.0), 22.0);
+        let st2 = pnoise(vec2f(uv.x * 44.0 + warp * 7.0, s / 0.6 + 3.7), 44.0);
+        col *= mix(1.0, 0.5 + 0.95 * smoothstep(0.25, 0.75, 0.62 * st.x + 0.38 * st2), d);
+        // Long dark stains running down the wood.
+        let stain = smoothstep(0.58, 0.8, pnoise(vec2f(uv.x * 9.0 + warp * 2.0, s * 0.22 + 1.9), 9.0));
+        col = mix(col, col * vec3f(0.5, 0.45, 0.42), 0.7 * stain * d);
+        // Knots: most cells of a 3 round × 1 per 0.9 m grid, a dark ring round a paler boss, on the lower trunk.
+        let g = vec2f(uv.x * 3.0, s / 0.9);
+        let gc = floor(g);
+        let gw = vec2f(gc.x - 3.0 * floor(gc.x / 3.0), gc.y);
+        let r = hash33(vec3f(gw, 4.0));
+        let e = length((g - gc - vec2f(0.25 + 0.5 * r.x, 0.25 + 0.5 * r.y)) / vec2f(0.1, 0.07));
+        let knot = (1.0 - smoothstep(0.75, 1.0, e)) * step(hash12(gw + 4.7), 0.45) * (1.0 - smoothstep(0.2, 0.4, lp.y / SP_TOP[sp])) * d;
+        col = mix(col, col * 0.45, 0.8 * knot * smoothstep(0.5, 0.85, e));
+        col = mix(col, col * vec3f(1.3, 1.15, 1.0), 0.5 * knot * (1.0 - smoothstep(0.3, 0.55, e)));
+        h = d * 0.012 * vec3f(st.x, st.y * 22.0, st.z / 1.0);
       }
+      let df = keep(fw, 48.0, 0.5);
+      if (df > 0.0) {
+        // Fibres: fine lines of grain up the wood, 2 mm deep.
+        let fib = pnoiseG(vec2f(uv.x * 48.0 + warp * 8.0, s / 0.5), 48.0);
+        col *= mix(1.0, 0.8 + 0.4 * fib.x, df);
+        h += df * 0.002 * vec3f(fib.x, fib.y * 48.0, fib.z / 0.5);
+      }
+      // Up in the crown, between the boughs, the trunk is deep in their shade: dark, an olive brown.
+      let crown = smoothstep(0.3, 0.44, lp.y / SP_TOP[sp]);
+      col = mix(col, col * vec3f(0.24, 0.3, 0.28), crown);
+      // (darker still toward the top, where it runs inside the leader's spike)
+      col *= 1.0 - 0.45 * smoothstep(0.55, 0.75, lp.y / SP_TOP[sp]);
+      o.h = h;
       o.albedo = col;
     }
     case SP_PALM: {
@@ -1279,14 +1225,15 @@ fn fsTree(i: TreeOut, @builtin(front_facing) front: bool) -> @location(0) vec4f 
         lv.occl *= 0.55 + 0.25 * deep.x;
         lv.sun *= 0.35 + 0.45 * deep.x;
         lv.tone = 0.55 + 0.55 * deep.y;
-      } else if (TREE_DETAIL && !inside && sp == SP_PINE) { lv = needles(lp, n, rot, sp, px); }
+      }
       n = lv.n;
       ao *= lv.occl;
       shift = lv.shift;
       tone *= lv.tone;
       thin = lv.rim;
       shadow = lv.sun;
-    } else if (TREE_DETAIL) {
+    } else if (TREE_DETAIL && sp != SP_PINE) {
+      // (a conifer's skirts, which stand in for its boughs far off and fill between them near, are plain)
       let fr = frond(i.uv, fw);
       slope = fr.g;
       ao *= fr.occl;
@@ -1313,7 +1260,7 @@ fn fsTree(i: TreeOut, @builtin(front_facing) front: bool) -> @location(0) vec4f 
   // The relief (bark, leaflets) bends the normal; out here in uniform control flow, for the derivatives.
   if (TREE_DETAIL) { n = bumped(n, i.rel, i.uv, slope * i.inst.z); }
   if ((i.info & F_SNOW) != 0u) {
-    // Snow settles on whatever faces up: tier tops, branch crooks, bush crowns.
+    // Snow settles on whatever faces up: skirt tops, branch crooks, bush crowns.
     let cover = smoothstep(0.5, 0.82, n.y + 0.55 * (pat - 0.5)) * smoothstep(0.2, 0.6, ao);
     albedo = mix(albedo, vec3f(0.82, 0.86, 0.92), cover);
     leafy *= 1.0 - cover;
@@ -1373,6 +1320,8 @@ struct Corner { rel: vec3f, centre: vec3f, cs: vec2f, uv: vec2f };
 fn cardCorner(pos: vec3f, attr: vec4f, uv: vec2f, inst: Inst) -> Corner {
   let c = treePlace(pos, attr, inst);
   let sp = inst.q.x & 15u;
+  // A conifer's bough is a sheet where it stands, its coordinates across and along the bough.
+  if (sp == SP_PINE) { return Corner(c, c, vec2f(1.0, 0.0), uv); }
   let h = hash33(floor(pos * 64.0) + 0.5);
   var size = SP_CARD[sp] * (0.8 + 0.4 * h.x) * inst.p.w * mix(1.0, 1.75, min(f32(inst.q.w), 1.0));
   // A camera in among the leaves: the cards round it give way (they would fill the view). Far out
@@ -1410,10 +1359,15 @@ fn vsCardDepth(@location(0) pos: vec3f, @location(1) nrm: vec4f, @location(2) at
 @fragment
 fn fsCardDepth(i: CardDepthOut) -> @location(0) vec4f {
   let tex = textureSample(leafTex, leafSamp, i.uv, i32(i.look.y));
+  // Texels a pixel spans (before any discard, for the derivatives).
+  let tpp = max(length(dpdx(i.uv)), length(dpdy(i.uv))) * ${LEAF_SIZE}.0;
   let h = fract(52.9829189 * fract(dot(i.pos.xy, vec2f(0.06711056, 0.00583715))) + forest.camOff.w);
   let fade = i.look.x;
   if (fade < 1.5) { if (fade >= 0.0) { if (h >= fade) { discard; } } else if (h < -1.0 - fade) { discard; } }
-  let h2 = fract(52.9829189 * fract(dot(i.pos.xy, vec2f(0.00583715, 0.06711056))) + 1.6180339 * forest.camOff.w);
+  var h2 = fract(52.9829189 * fract(dot(i.pos.xy, vec2f(0.00583715, 0.06711056))) + 1.6180339 * forest.camOff.w);
+  // A conifer's bough, near enough for its texels to be seen, is cut at its edge (only that is dithered):
+  // a stipple over the whole feathering would show against snow; far off, the mean coverage is what counts.
+  if (i32(i.look.y) == SP_SPRAY[SP_PINE]) { h2 = mix(h2, 0.5 + 0.3 * (h2 - 0.5), 1.0 - smoothstep(0.7, 1.6, tpp)); }
   if (tex.r <= max(h2, 0.04)) { discard; }
   return vec4f(0.0);
 }
@@ -1452,7 +1406,7 @@ fn vsCard(@location(0) pos: vec3f, @location(1) nrm: vec4f, @location(2) attr: v
 
 // The cards' colour, where the depth pass left each card's own depth (one leaf per pixel, no discard).
 @fragment
-fn fsCard(i: CardOut) -> @location(0) vec4f {
+fn fsCard(i: CardOut, @builtin(front_facing) front: bool) -> @location(0) vec4f {
   let tex = textureSample(leafTex, leafSamp, i.uv, i32(i.turn.w));
   let dist = length(i.rel);
   let rd = i.rel / dist;
@@ -1460,25 +1414,43 @@ fn fsCard(i: CardOut) -> @location(0) vec4f {
   let cov = max(tex.r, 1e-3);
   let tone = tex.g / cov;
   let tilt = tex.ba / cov * 2.0 - 1.0;
-  // The leaf's normal: the crown's, bent the way the leaf faces on the card (x right, y down it).
-  let ax = u.basis[0] * i.turn.x + u.basis[1] * i.turn.y;
-  let ay = u.basis[1] * i.turn.x - u.basis[0] * i.turn.y;
-  var n = normalize(normalize(i.n) + 0.9 * (tilt.x * ax - tilt.y * ay) - 0.3 * rd);
   let sp = i.info & 15u;
   let tint = infoTint(i.info);
   let pal = leafPal(i.info, sp, tint);
   let ao = i.look.z;
   let vary = i.look.w;
-  var albedo = mix(pal[0], pal[1], clamp(0.05 + 0.4 * vary + 0.35 * ao + 0.25 * (tint - 0.5) + 0.6 * (tone - 0.55), 0.0, 1.0)) * (0.7 + 0.5 * tone);
+  var n: vec3f;
+  var albedo: vec3f;
+  var occl = ao;
   var leafy = 1.0;
+  var cover = 0.0;
+  if (sp == SP_PINE) {
+    // A conifer's bough: the sheet's normal (the crown's, leaning the sheet's way), bent the way each
+    // sprig and cluster faces. Its underside is in the shade of the bough above and lit as if half
+    // turned up, light coming through the needles; from the ground, undersides are most of what is seen.
+    let up = normalize(i.n);
+    let side = normalize(vec3f(-up.z, 0.0, up.x) + vec3f(1e-4, 0.0, 0.0));
+    let along = normalize(cross(up, side));
+    n = normalize(up + 0.6 * (tilt.x * side + tilt.y * along));
+    if (!front) { n = normalize(mix(-n, vec3f(0.0, 1.0, 0.0), 0.45)); occl *= 0.8; }
+    albedo = mix(pal[0], pal[1], clamp(0.08 + 0.4 * vary + 0.35 * ao + 0.25 * (tint - 0.5) + 1.1 * (tone - 0.5), 0.0, 1.0)) * (0.55 + 0.8 * tone);
+    // Snow lies on the tops of the sprigs, thinning toward the feathered edge.
+    cover = smoothstep(0.5, 0.82, n.y + 0.2) * smoothstep(0.2, 0.6, ao) * smoothstep(0.35, 0.9, tex.r) * select(0.0, 1.0, front);
+  } else {
+    // The leaf's normal: the crown's, bent the way the leaf faces on the card (x right, y down it).
+    let ax = u.basis[0] * i.turn.x + u.basis[1] * i.turn.y;
+    let ay = u.basis[1] * i.turn.x - u.basis[0] * i.turn.y;
+    n = normalize(normalize(i.n) + 0.9 * (tilt.x * ax - tilt.y * ay) - 0.3 * rd);
+    albedo = mix(pal[0], pal[1], clamp(0.05 + 0.4 * vary + 0.35 * ao + 0.25 * (tint - 0.5) + 0.6 * (tone - 0.55), 0.0, 1.0)) * (0.7 + 0.5 * tone);
+    cover = smoothstep(0.55, 0.85, n.y) * smoothstep(0.3, 0.7, ao);
+  }
   if ((i.info & F_SNOW) != 0u) {
-    let cover = smoothstep(0.55, 0.85, n.y) * smoothstep(0.3, 0.7, ao);
     albedo = mix(albedo, vec3f(0.82, 0.86, 0.92), cover);
     leafy = 1.0 - cover;
   }
   var sun = i.look.x * i.shade;
   if (sun > 0.0 && i.turn.z < 0.5) { sun = min(sun, heroShadowAt(i.rel)); }
-  return treeLight(albedo, n, i.rel, rd, dist, sun, ao, leafy, 1.0, SP_GLOSS[sp] * leafy);
+  return treeLight(albedo, n, i.rel, rd, dist, sun, occl, leafy, 1.0, SP_GLOSS[sp] * leafy);
 }
 `;
 }

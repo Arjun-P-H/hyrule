@@ -21,6 +21,7 @@
  * tree ferns, wind-stunted and rime-frosted pines. Linear RGB throughout.
  */
 
+import { ISLAND_LOWER } from './heights';
 import { LIGHT } from '../constants';
 import type { Species } from '../forest/species';
 
@@ -203,6 +204,10 @@ const smooth = (e0: number, e1: number, x: number) => {
  * whose roots hang in the cloud deck drinks its mist) and its radius.
  */
 export function skyClimate(top: number, tip: number, radius: number): { cloud: number; cold: number; high: number; exposed: number } {
+  // (judged at the height the island had before the heights in use pulled it down, heights.ts: low islands keep
+  // the original mix of biomes, the Ice Watch its frost)
+  top += ISLAND_LOWER;
+  tip += ISLAND_LOWER;
   const deck = LIGHT.cloudPlane;
   return {
     cloud: 1 - smooth(deck + 100, deck + 700, tip),  // its underside steeped in the deck's mist

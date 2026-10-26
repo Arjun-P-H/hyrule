@@ -346,7 +346,9 @@ and `components/terrain/landsGlsl.ts`.
   form massifs a few kilometres across, like Hebra or the Gerudo Highlands, not continent-long
   chains. Summits reach about 880 m.
 - **Massifs:** lone peaks of 340 m.
-- **Tablelands:** 190 m behind cliff walls.
+- **Tablelands:** 190 m behind cliff walls, their outlines bent by two scales of noise (210 m at 600 m,
+  60 m at 150 m: `GEO.platWarp`) so no wall runs straight for kilometres. Mountain crests too:
+  the 9 km bends are bent again at 380, 130 and 45 m (`GEO.rangeBend`).
 - **Basins:** bowls of 450–900 m radius, 14–34 m deep.
 - **Volcanoes:** one candidate per 8 km cell, kept where it stands on land, off the ranges and in
   land of at least 4 °C at sea level: about one volcano per 150 km², in warm country as TotK's is.
@@ -382,6 +384,12 @@ and `components/terrain/landsGlsl.ts`.
   That is 14 m where a river leaves its lake, ~34 m one node down, ~84 m at acc 5 and 180 m from
   acc ~12: wider than TotK's (4 / 8 / 21 / 41 / 64 m), by the player's request. Channel depth is
   3 + √acc m.
+- **Valleys are not trenches.** Each side of a valley's floor keeps ¼ – 1 of its width on its own
+  noise (never less than the channel and a margin), the walls' run beyond the floor is stretched by
+  up to a third and shifted sideways by up to 110 m (`HYDRO.wallVary`, `wallLat`), the channel's
+  width varies along the reach (`widthVary`) and its banks differ in slope (`bankSkew`), steep
+  reaches meander at least 55 m (`meanderMin`), and a floor's width wanders along the reach
+  (`floorWobble`): a canyon's walls are not parallel lines. See [`GROUND.md`](GROUND.md).
 - **Dry valleys.** A valley with no lake above it carries no water, and has no channel and no falls:
   its floor (10 + 5·√acc m each side of its line) and its walls. Every valley's walls leave the
   floor at the floor's own slope and steepen to their region's slope over about 12 m
@@ -401,6 +409,9 @@ and `components/terrain/landsGlsl.ts`.
   - Its level is the river's where it leaves the lake: held by its outlet, so it never spills.
     Lakes form only where that outlet is within 0.5 m of the node's level, or the lake would sit far
     under the river flowing in.
+  - Its shore is its own: three octaves of lobes at a place in the noise drawn from the node's hash,
+    and a stretch of 6 – 22 % along one axis, so no two lakes (or ponds, which are drawn the same
+    way from their cell's hash) are the same shape scaled.
   - Land must stand above its level all round it (out to 1.28 radii), and it must clear other
     valleys, or it would stand over falling land.
   - Its bowl is 9.5–27 m deep (6 m + 7 % of its radius; reservoirs 12–35 m), with a shore rising

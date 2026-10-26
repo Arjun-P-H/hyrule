@@ -65,8 +65,11 @@ function rangeAt(wx: number, wz: number, seed: number): number {
   const rm = smoothstep(GEO.rangeMask[0], GEO.rangeMask[1], n01(wx, wz, F.rangemask, seed + 3121));
   if (rm <= 0) return 0;
   // two chain directions, blended over ~50 km; the chains bent by a 9 km warp
-  const bx = wx + GEO.rangeWarp * vnoise(wx * F.rangewarp, wz * F.rangewarp, seed + 3113);
-  const bz = wz + GEO.rangeWarp * vnoise(wx * F.rangewarp + 3.7, wz * F.rangewarp - 1.9, seed + 3114);
+  const [g0, g1, g2] = GEO.rangeBend;
+  const bx = wx + GEO.rangeWarp * vnoise(wx * F.rangewarp, wz * F.rangewarp, seed + 3113)
+    + g0 * vnoise(wx * F.peaks, wz * F.peaks, seed + 3116) + g1 * vnoise(wx * F.floorwob, wz * F.floorwob, seed + 3117) + g2 * vnoise(wx * F.tower, wz * F.tower, seed + 3118);
+  const bz = wz + GEO.rangeWarp * vnoise(wx * F.rangewarp + 3.7, wz * F.rangewarp - 1.9, seed + 3114)
+    + g0 * vnoise(wx * F.peaks, wz * F.peaks, seed + 3119) + g1 * vnoise(wx * F.floorwob, wz * F.floorwob, seed + 3120) + g2 * vnoise(wx * F.tower, wz * F.tower, seed + 3122);
   const ca = Math.cos(GEO.rangeDir[0]), sa = Math.sin(GEO.rangeDir[0]);
   const cb = Math.cos(GEO.rangeDir[1]), sb = Math.sin(GEO.rangeDir[1]);
   const c1 = 1 - Math.abs(vnoise((bx * ca + bz * sa) * F.rangeu, (bz * ca - bx * sa) * F.rangev, seed + 3111));
@@ -124,13 +127,31 @@ function coastHeight(raw: number, inland: number, cliff: number, wx: number, wz:
   return raw * inland + (1 - inland) * cliff * Math.min(raw, cap);
 }
 
+/**
+ * A tableland's weight at warped (wx, wz) (0–1): the field pn it stands where it is high, its outline bent by a warp of
+ * two scales (bays and spurs, notches: a wall that was a smooth contour of one smooth field ran straight for
+ * kilometres), its wall's width varied (a sheer cliff here, a long ramp there: GEO.platEdge … platEdge + platRamp,
+ * by F.platwidth), under a talus skirt. Far from the edge the warp cannot reach it: wholly there (1) or not (0).
+ */
+function plateauAt(wx: number, wz: number, seed: number): number {
+  const pn0 = 0.72 * n01(wx, wz, F.platcoarse, seed + 1401) + 0.28 * n01(wx, wz, F.platfine, seed + 1402);
+  if (pn0 < GEO.plat - 0.05 - GEO.platBand) return 0;
+  if (pn0 > GEO.plat + GEO.platEdge + GEO.platRamp + GEO.platBand) return 1;
+  // the outline bent: the plane warped by two scales of noise (a shift in metres, whatever the field's slope)
+  const [D1, D2] = GEO.platWarp;
+  const px = wx + D1 * vnoise(wx * F.platbay, wz * F.platbay, seed + 1411) + D2 * vnoise(wx * F.platnotch, wz * F.platnotch, seed + 1412);
+  const pz = wz + D1 * vnoise(wx * F.platbay + 5.3, wz * F.platbay - 2.1, seed + 1413) + D2 * vnoise(wx * F.platnotch + 3.7, wz * F.platnotch - 9.1, seed + 1414);
+  const pn = 0.72 * n01(px, pz, F.platcoarse, seed + 1401) + 0.28 * n01(px, pz, F.platfine, seed + 1402);
+  const ew = GEO.platEdge + GEO.platRamp * smoothstep(0.35, 0.7, n01(wx, wz, F.platwidth, seed + 1415));
+  return 0.82 * smoothstep(GEO.plat, GEO.plat + ew, pn) + 0.18 * smoothstep(GEO.plat - 0.05, GEO.plat, pn);
+}
+
 /** The uplift's raw height over the shore at warped (wx, wz) without a volcano (m): lowland, ranges, massifs, tablelands, basins. */
 function baseAt(wx: number, wz: number, seed: number): number {
   const low = GEO.low[0] + GEO.low[1] * n01(wx, wz, F.upl, seed + 3101) + GEO.low[2] * n01(wx, wz, F.upl2, seed + 3102);
   const rng = rangeAt(wx, wz, seed);
   const ms = smoothstep(GEO.massif[0], GEO.massif[1], n01(wx, wz, F.massif, seed + 3141));
-  const pn = 0.72 * n01(wx, wz, F.platcoarse, seed + 1401) + 0.28 * n01(wx, wz, F.platfine, seed + 1402);
-  const pl = 0.82 * smoothstep(GEO.plat, GEO.plat + GEO.platEdge, pn) + 0.18 * smoothstep(GEO.plat - 0.05, GEO.plat, pn);
+  const pl = plateauAt(wx, wz, seed);
   const notRange = 1 - smoothstep(0.15, 0.45, rng);
   return low + Math.max(GEO.rangeH * rng, GEO.massifH * ms * ms) + GEO.platH * pl * notRange - basinAt(wx, wz, seed) * notRange;
 }
@@ -154,9 +175,8 @@ export function upliftAt(wx: number, wz: number, seed: number): number {
   // lone massifs (landmark mountains off the ranges)
   const ms = smoothstep(GEO.massif[0], GEO.massif[1], n01(wx, wz, F.massif, seed + 3141));
   const massif = ms * ms;
-  // tablelands: a cliff wall over a talus skirt
-  const pn = 0.72 * n01(wx, wz, F.platcoarse, seed + 1401) + 0.28 * n01(wx, wz, F.platfine, seed + 1402);
-  const pl = 0.82 * smoothstep(GEO.plat, GEO.plat + GEO.platEdge, pn) + 0.18 * smoothstep(GEO.plat - 0.05, GEO.plat, pn);
+  // tablelands: a cliff wall (or a ramp) over a talus skirt
+  const pl = plateauAt(wx, wz, seed);
   UP.range = rng;
   UP.massif = massif;
   UP.plat = pl;
@@ -339,7 +359,7 @@ function reachFloor(m: HydroNode, n: HydroNode, seed: number): number {
 
 /** A valley floor's half width round a node of drainage acc, where its meanders die out (m). */
 function nodeFloor(acc: number): number {
-  return channelW(acc) + HYDRO.floor[0] + HYDRO.floor[1] * Math.sqrt(acc);
+  return channelW(acc) + HYDRO.floor[0] + HYDRO.floor[1] * Math.sqrt(acc) + HYDRO.floorWobble;
 }
 
 /**
@@ -576,7 +596,25 @@ const LK_X = new Float64Array(9), LK_R = new Float64Array(9), LK_W = new Float64
 function meanderAt(along: number, t: number, amp: number, segSeed: number): number {
   if (amp <= 0) return 0;
   const taper = smoothstep(0, 0.12, t) * smoothstep(1, 0.88, t);
-  return amp * taper * vnoise(along * F.meander, 0.5, segSeed);
+  // (a second, fainter harmonic: banks are never the pure curve of one scale)
+  return amp * taper * (0.74 * vnoise(along * F.meander, 0.5, segSeed) + 0.26 * vnoise(along * F.meander * 3.1, 4.5, segSeed));
+}
+
+/** How much wider than its base a reach's valley floor is at `along` (m): a smooth noise, nothing at the nodes. */
+function floorWobbleAt(along: number, t: number, sg: number): number {
+  const taper = smoothstep(0, 0.12, t) * smoothstep(1, 0.88, t);
+  return HYDRO.floorWobble * taper * (0.5 + 0.5 * (0.6 * vnoise(along * F.floorwob, 11.5, sg) + 0.4 * vnoise(along * F.floorwob * 2.7, 5.5, sg)));
+}
+
+/**
+ * How much of its width one side of a reach's valley floor keeps at `along` (¼–1, all of it at the nodes): each side's edge wanders
+ * on its own, so a floor's two walls are not parallel lines.
+ */
+function floorSideAt(along: number, t: number, sg: number, side: number): number {
+  const taper = smoothstep(0, 0.12, t) * smoothstep(1, 0.88, t);
+  const o = side * 40.7;
+  const s = 0.5 + 0.5 * (0.62 * vnoise(along * F.floorwob * 1.9 + o, 21.5, sg) + 0.38 * vnoise(along * F.floorwob * 5.3 + o, 9.5, sg));
+  return 1 - taper * 0.75 * (1 - s);
 }
 
 /** Valley shape above the reach's level at distance dd from its line and ch from its channel (m). */
@@ -622,6 +660,10 @@ function valleySlope(dd: number, ch: number, w: number, depth: number, floor: nu
  */
 export function riverField(wx: number, wz: number, seed: number, k: number, lakes: boolean): void {
   const ci = Math.floor(wx / NODE), cj = Math.floor(wz / NODE);
+  // (the walls' run wanders: see HYDRO.wallVary)
+  const wk = 1 + HYDRO.wallVary[0] * vnoise(wx * F.floorwob, wz * F.floorwob, seed + 3306) + HYDRO.wallVary[1] * vnoise(wx * F.tower, wz * F.tower, seed + 3307)
+    + HYDRO.wallVary[2] * vnoise(wx * F.platnotch, wz * F.platnotch, seed + 3308);
+  const lat = HYDRO.wallLat * (0.6 * vnoise(wx * F.tower, wz * F.tower, seed + 3310) + 0.4 * vnoise(wx * F.platnotch, wz * F.platnotch, seed + 3311));
   // the lakes first: a lake's level is found with riverField itself (which overwrites RF)
   let L = -Infinity, lakeK = 0, lakeMask = 0, Lnear = -Infinity;
   if (lakes) {
@@ -649,7 +691,7 @@ export function riverField(wx: number, wz: number, seed: number, k: number, lake
       if (r <= 0) continue;
       const dx = wx - s.x, dz = wz - s.z, dist = Math.hypot(dx, dz);
       if (dist > 2.5 * LAKE_RMAX) continue;
-      const rl = lakeLobe(r, dx, dz, seed), lv = riverLakeLevel(s, seed);
+      const rl = lakeLobe(r, dx, dz, seed, hash3(s.i, s.j, seed + 3510)), lv = riverLakeLevel(s, seed);
       LK_X[nLk] = dist; LK_R[nLk] = rl; LK_W[nLk] = lv; LK_D[nLk] = HYDRO.riverLakeD[0] + HYDRO.riverLakeD[1] * r;
       LK_NX[nLk] = dx / Math.max(dist, 1e-6); LK_NZ[nLk++] = dz / Math.max(dist, 1e-6);
       if (!lakes) continue;
@@ -678,34 +720,43 @@ export function riverField(wx: number, wz: number, seed: number, k: number, lake
       const t = along / len;
       // (the river widens as it goes: its head's drainage plus the share of the reach run)
       const w0 = riverHalfW(acc + Math.min(Math.max(t, 0), 1));
-      const w = w0 * (1 + HYDRO.widthVary * vnoise(along * F.meander * 2.3, 7.5, hash3(a.i, a.j, seed + 3302) & 0xffff));
+      const sw = hash3(a.i, a.j, seed + 3302) & 0xffff;
+      const w = w0 * (1 + HYDRO.widthVary * (0.62 * vnoise(along * F.meander * 2.3, 7.5, sw) + 0.38 * vnoise(along * F.meander * 6.1, 3.5, sw)));
       const vis = fedOf(a, seed) ? 1 : 0;
       // (a river whose water does not show cuts no channel: a dry wash, not a ditch)
       const depth = (HYDRO.depth[0] + HYDRO.depth[1] * Math.sqrt(acc)) * vis;
       const slope = (Wa - Wb) / len;
       const amp = meanderAmp((a.U - b.U) / len);
       // (a dry valley has no floodplain for a river to wander: a narrow floor, its walls a V)
-      const floor = (vis > 0 ? amp + w : 0) + HYDRO.floor[0] + HYDRO.floor[1] * Math.sqrt(acc);
+      // (the floor: its base width, of which each side keeps a share (floorSideAt) but not less than the channel and a margin: where a
+      // meander swings against a narrower side, the water cuts the bank under the wall, and the walls are not parallel lines)
+      const base = (vis > 0 ? amp + w : 0) + HYDRO.floor[0] + HYDRO.floor[1] * Math.sqrt(acc) + floorWobbleAt(along, t, hash3(a.i, a.j, seed + 3305) & 0xffff);
+      const least = vis > 0 ? w + 8 : HYDRO.floor[0];
+      let floor = base;
       let dd: number, ch: number;
       if (t <= 0) { dd = Math.hypot(rx, rz); ch = dd; }
       else if (t >= 1) { dd = Math.hypot(wx - b.x, wz - b.z); ch = dd; }
       else {
         const ds = -rx * uz + rz * ux;
         dd = Math.abs(ds);
+        floor = Math.max(base * floorSideAt(along, t, hash3(a.i, a.j, seed + 3309) & 0xffff, ds >= 0 ? 0 : 1), least);
         if (dd - floor > 400) { // far outside this valley's floor: only its wall can matter
           const x = dd - floor;
           const lv = reachLevel(Wa, p, Wb, t, false);
-          const cone = lv + wallRise(k, x, floor);
+          const cone = lv + wallRise(k, x * wk + lat, floor);
           if (cone < RF.R) RF.R = cone;
           const fill = lv + HYDRO.floorRise - HYDRO.riser * x;
           if (fill > RF.F) RF.F = fill;
           if (dd - floor < RF.xFloor) RF.xFloor = dd - floor;
-          S_AT[nR] = cone; S_LAT[nR] = wallSlope(k, x, floor); S_ALG[nR] = reachFall(Wa, p, Wb, t, false) / len;
+          S_AT[nR] = cone; S_LAT[nR] = wallSlope(k, x * wk + lat, floor) * wk; S_ALG[nR] = reachFall(Wa, p, Wb, t, false) / len;
           S_CURV[nR] = HYDRO.wallCurve; S_NX[nR] = -uz; S_NZ[nR] = ux; S_LOOSE[nR] = 0.1; S_WLO[nR] = lv;
           S_NA[nR] = key(a.i, a.j); S_NB[nR++] = key(b.i, b.j);
           continue;
         }
-        ch = Math.abs(ds - meanderAt(along, t, amp, (hash3(a.i, a.j, seed + 3301) & 0xffff)));
+        // (the banks of unequal reach: the channel's distance scaled so each bank stands where its own half width puts it)
+        const sd = ds - meanderAt(along, t, amp, (hash3(a.i, a.j, seed + 3301) & 0xffff));
+        const skew = HYDRO.bankSkew * vnoise(along * F.meander * 1.7, 13.1, hash3(a.i, a.j, seed + 3304) & 0xffff);
+        ch = Math.abs(sd) / (1 + (sd >= 0 ? skew : -skew));
       }
       // (a waterfall steps the channel and its floor; the walls follow the reach's smooth fall, or
       // every fall would draw a scarp across the land)
@@ -715,7 +766,8 @@ export function riverField(wx: number, wz: number, seed: number, k: number, lake
       // (a dry valley has no channel, only its floor's bowl and its walls: a channel's width with no depth
       // would stand a riser at its edge wherever the channel reaches past the narrow floor)
       const chV = vis > 0 ? ch : Infinity, wV = vis > 0 ? w : 0;
-      const cone = Wv + valleyShape(dd, chV, wV, depth, floor, k);
+      const ddS = dd > floor ? floor + (dd - floor) * wk + lat * smoothstep(0, 40, dd - floor) : dd, wkS = dd > floor ? wk : 1;
+      const cone = Wv + valleyShape(ddS, chV, wV, depth, floor, k);
       if (cone < RF.R) RF.R = cone;
       // the terrace: the floor at the river's level (where the land falls away beside a reach), then a riser
       const fill = Wv + (dd < floor ? 0.3 + (HYDRO.floorRise - 0.3) * (dd / floor) * (dd / floor) : HYDRO.floorRise - HYDRO.riser * (dd - floor));
@@ -730,7 +782,7 @@ export function riverField(wx: number, wz: number, seed: number, k: number, lake
       S_NX[nR] = nx; S_NZ[nR] = nz; S_WLO[nR] = Math.min(W, Wv); S_NA[nR] = key(a.i, a.j); S_NB[nR] = key(b.i, b.j);
       if (vis > 0 && ch < w + 0.3) { S_AT[nR] = Math.max(cone, W); S_LAT[nR] = 0; S_ALG[nR] = fallT; S_CURV[nR] = 0; S_LOOSE[nR] = 0.1; }
       else {
-        S_AT[nR] = cone; S_LAT[nR] = valleySlope(dd, chV, wV, depth, floor, k); S_ALG[nR] = fallT; S_CURV[nR] = HYDRO.wallCurve;
+        S_AT[nR] = cone; S_LAT[nR] = valleySlope(ddS, chV, wV, depth, floor, k) * wkS; S_ALG[nR] = fallT; S_CURV[nR] = HYDRO.wallCurve;
         S_LOOSE[nR] = dd < floor + 60 ? 0.35 : 0.1;
       }
       // (the nearest channel that shows: a dry valley beside a river never takes its water away)
@@ -753,17 +805,18 @@ export function riverField(wx: number, wz: number, seed: number, k: number, lake
   // the river lakes' bowls: below the water, a shore rising gently, then walls (they are valleys too)
   for (let q = 0; q < nLk; q++) {
     const dist = LK_X[q], rl = LK_R[q], fl = rl + HYDRO.floor[0] + 20;
-    const cone = LK_W[q] + valleyShape(dist, dist, rl, LK_D[q], fl, k);
+    const dS = dist > fl ? fl + (dist - fl) * wk + lat * smoothstep(0, 40, dist - fl) : dist;
+    const cone = LK_W[q] + valleyShape(dS, dist, rl, LK_D[q], fl, k);
     if (cone < RF.R) RF.R = cone;
     if (dist - fl < RF.xFloor) RF.xFloor = dist - fl;
     S_AT[nR] = Math.max(cone, dist < rl ? LK_W[q] : -Infinity);
-    S_LAT[nR] = dist < rl ? 0 : valleySlope(dist, dist, rl, LK_D[q], fl, k); S_ALG[nR] = 0; S_CURV[nR] = HYDRO.wallCurve;
+    S_LAT[nR] = dist < rl ? 0 : valleySlope(dS, dist, rl, LK_D[q], fl, k) * (dist > fl ? wk : 1); S_ALG[nR] = 0; S_CURV[nR] = HYDRO.wallCurve;
     S_NX[nR] = LK_NX[q]; S_NZ[nR] = LK_NZ[q]; S_LOOSE[nR] = 0.3; S_WLO[nR] = LK_W[q]; S_NA[nR] = -1; S_NB[nR++] = -2;
   }
   // the nearest channel's water stays under every other reach's surface out to its far bank (that
   // surface falls toward the bank by its slope along the line across the channel)
   if (best >= 0) {
-    const D = RF.w + RF.ch + 1;
+    const D = (RF.w + RF.ch) * (1 + HYDRO.bankSkew) + 1;
     let cap = Infinity;
     for (let r = 0; r < nR; r++) {
       if (r === best) continue;
@@ -828,7 +881,7 @@ function lakeClear(n: HydroNode, r: number, lw: number, seed: number): boolean {
       const dx = b.x - a.x, dz = b.z - a.z, len = Math.hypot(dx, dz);
       const t = Math.min(Math.max(((n.x - a.x) * dx + (n.z - a.z) * dz) / (len * len), 0), 1);
       const acc = accOf(a, seed);
-      const floor = meanderAmp((a.U - b.U) / len) + channelW(acc + t) + HYDRO.floor[0] + HYDRO.floor[1] * Math.sqrt(acc);
+      const floor = meanderAmp((a.U - b.U) / len) + channelW(acc + t) + HYDRO.floor[0] + HYDRO.floor[1] * Math.sqrt(acc) + HYDRO.floorWobble;
       if (Math.hypot(n.x - a.x - dx * t, n.z - a.z - dz * t) - floor > reach) continue;
       if (reachLevel(levelOf(a, seed), profileOf(a, seed)!, levelOf(b, seed), t, false) < lw + 0.3) return false;
     }
@@ -845,7 +898,7 @@ function lakeHeld(n: HydroNode, r: number, lw: number, seed: number): boolean {
   for (let k = 0; k < 24; k++) {
     const ux = Math.cos(k * Math.PI / 12), uz = Math.sin(k * Math.PI / 12);
     for (const f of [1, 1.28]) {
-      const rl = Math.max(lakeLobe(r, ux * r * f, uz * r * f, seed), r * f) * 1.06 + 4;
+      const rl = Math.max(lakeLobe(r, ux * r * f, uz * r * f, seed, hash3(n.i, n.j, seed + 3510)), r * f) * 1.06 + 4;
       if (upliftAt(n.x + ux * rl, n.z + uz * rl, seed) < lw + 0.3) return false;
     }
   }
@@ -927,9 +980,19 @@ export function riverLakeLevel(n: HydroNode, seed: number): number {
   return riverLakeOf(n, seed) > 0 ? n.lw : -Infinity;
 }
 
-/** A river lake's shore radius toward (dx, dz) from its node (m): lobed, so it is no circle. */
-function lakeLobe(r: number, dx: number, dz: number, seed: number): number {
-  return r * (1 + 0.28 * vnoise(dx / r * 1.3, dz / r * 1.3, seed + 3503));
+/**
+ * A river lake's shore radius toward (dx, dz) from its node (m): lobed, so it is no circle, and no two lakes' shores are alike
+ * (the noise's own place and a stretch of the shore along one axis, from the node's hash `id`).
+ */
+function lakeLobe(r: number, dx: number, dz: number, seed: number, id: number): number {
+  // (three scales, bays and headlands, within the same ± 0.28 the containment checks allow for)
+  const x = dx / r, z = dz / r;
+  const ns = id & 0xffff;
+  const d2 = dx * dx + dz * dz;
+  // (the stretch: 1 + e cos 2(θ − α) from the point's direction, without the angle)
+  const a2 = 2 * Math.PI * ((id >>> 24) / 255), e = 0.06 + 0.16 * ((id >>> 16) & 255) / 255;
+  const ell = 1 + (d2 > 1e-9 ? e * ((dx * dx - dz * dz) * Math.cos(a2) + 2 * dx * dz * Math.sin(a2)) / d2 : 0);
+  return r * ell * (1 + 0.28 * (0.5 * vnoise(x * 1.3, z * 1.3, seed + 3503 + ns) + 0.3 * vnoise(x * 3.1 + 9.2, z * 3.1 - 4.4, seed + 3504 + ns) + 0.2 * vnoise(x * 7.3 - 5.1, z * 7.3 + 2.7, seed + 3505 + ns)));
 }
 
 /**

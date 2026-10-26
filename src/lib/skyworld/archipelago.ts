@@ -16,12 +16,13 @@
  * Between Eyries, one candidate lone isle per SKY_REALM.isleCell square
  * (2,048 m; none inside an Eyrie's reach).
  *
- * Every island is high enough that its underside's tip clears
- * SKY_REALM.floor, above the highest peak, so the realm never touches the
- * land and its falls always have room to turn to mist.
+ * Every island is high enough that its underside's tip clears the highest
+ * ground under it by SKY_REALM.clearance (floorUnder), so the realm never
+ * touches the land: low over the lowlands, high over the mountains.
  */
 
 import { SKY_REALM as S } from '../constants';
+import { ISLAND_HEIGHTS, ISLAND_LOWER } from './heights';
 import { hashU, surfaceAt } from '../terrainMath';
 
 /** Scratch for the land under an island (its ground and its water). */
@@ -70,11 +71,28 @@ const cellU = (ix: number, iz: number, salt: number, seed: number) => cellHash(i
 const lerp = (r: readonly [number, number], f: number) => r[0] + (r[1] - r[0]) * f;
 
 /**
- * An island of `kind` with outline radius R, its top's base at least `y` (higher if its underside
- * needs it), shaped as its Eyrie wants (`shape`): terraces, a bowl, a tilt, extra hanging spikes
+ * The floor an island of radius R at (x, z) must keep its underside's tip over: the highest ground (or water)
+ * at its centre and on two rings out past its outline, plus SKY_REALM.clearance (the gap also covers a ridge
+ * between the samples).
+ */
+function floorUnder(x: number, z: number, R: number, seed: number): number {
+  if (ISLAND_HEIGHTS === 'original') return S.floor; // (the first heights: one floor over the highest peak)
+  let g = -Infinity;
+  for (const f of [0, 0.6, 1.2]) {
+    for (let k = 0; k < (f ? 8 : 1); k++) {
+      surfaceAt(x + f * R * Math.cos((k * Math.PI) / 4), z + f * R * Math.sin((k * Math.PI) / 4), seed, gw);
+      g = Math.max(g, gw[0], gw[1]);
+    }
+  }
+  return g + S.clearance;
+}
+
+/**
+ * An island of `kind` with outline radius R, its top's base at least `y` (higher if its underside's
+ * tip would come under `floor`: floorUnder), shaped as its Eyrie wants (`shape`): terraces, a bowl, a tilt, extra hanging spikes
  * (lobes: by default 0–2 on any island bigger than a rock), its underside, biome, relief.
  */
-function makeIsland(kind: IslandKind, cx: number, cz: number, R: number, y: number, trait: SkyTrait, rnd: () => number, shape: Shape = {}): SkyIsland {
+function makeIsland(kind: IslandKind, cx: number, cz: number, R: number, y: number, floor: number, trait: SkyTrait, rnd: () => number, shape: Shape = {}): SkyIsland {
   const cliff = Math.min(70, Math.max(2, 0.065 * R * (0.8 + 0.4 * rnd())));
   const depth = Math.min(600, Math.max(4, R * (0.5 + 0.35 * rnd()) * (shape.depthK ?? 1)));
   const nl = shape.lobes ?? (kind === 'debris' || R < 40 ? 0 : Math.floor(rnd() * 3));
@@ -85,7 +103,7 @@ function makeIsland(kind: IslandKind, cx: number, cz: number, R: number, y: numb
   }
   const tiltX = shape.tiltX ?? 0, tiltZ = shape.tiltZ ?? 0;
   const drop = maxDrop({ R, cliff, depth, lobes, tiltX, tiltZ });
-  const top = Math.min(S.topMax, Math.max(y, S.floor + drop));
+  const top = Math.min(S.topMax, Math.max(y, floor + drop));
   const biome = shape.biome ?? pickBiome(top, top - drop, R, trait, rnd());
   const info = SKY_BIOME_INFO[biome];
   const hill = info.relief.hill * Math.min(42, Math.max(0.6, 0.045 * R)) * (0.75 + 0.5 * rnd()) * (shape.hillK ?? 1);
@@ -194,7 +212,7 @@ function* layArchipelago(ix: number, iz: number, seed: number): Generator<void, 
   const width = BRIDGE_WIDTH[cls];
   const ctx: LayoutCtx = {
     cls, cx, cz, rnd, islands, roles, shapes, arches,
-    island: (kind, x, z, R, y, shape) => makeIsland(kind, x, z, R, y, trait, rnd, shape),
+    island: (kind, x, z, R, y, shape) => makeIsland(kind, x, z, R, y, floorUnder(x, z, R, seed), trait, rnd, shape),
     add(isl, role, shape, gap = 60) {
       if (Math.hypot(isl.cx - cx, isl.cz - cz) + isl.R * outlineMax(isl) > S.archReach) return -1;
       if (islands.some((o) => crowds(isl, o, gap))) return -1;
@@ -222,7 +240,8 @@ function* layArchipelago(ix: number, iz: number, seed: number): Generator<void, 
         const phi = rnd() * TAU;
         const R = lerp(r, rnd());
         const D = host.R * outline(host, phi) + 30 + R + rnd() * 90;
-        const rock = makeIsland('debris', host.cx + Math.cos(phi) * D, host.cz + Math.sin(phi) * D, R, host.y - 20 - rnd() * 140 + (cls === 'halo' ? 160 : 0), trait, rnd);
+        const rx = host.cx + Math.cos(phi) * D, rz = host.cz + Math.sin(phi) * D;
+        const rock = makeIsland('debris', rx, rz, R, host.y - 20 - rnd() * 140 + (cls === 'halo' ? 160 : 0), floorUnder(rx, rz, R, seed), trait, rnd);
         if (Math.hypot(rock.cx - cx, rock.cz - cz) + R * 1.2 <= S.archReach && islands.every((o) => !crowds(rock, o, 25)) && clearOfArches(rock.cx, rock.cz, R)) {
           islands.push(rock); roles.push('debris'); shapes.push({});
         }
@@ -258,7 +277,7 @@ function buildIsle(ix: number, iz: number, seed: number): SkyIsland | null {
   const arch = archipelagoInCell(Math.floor(cx / S.archCell), Math.floor(cz / S.archCell), seed);
   if (arch && Math.hypot(cx - arch.cx, cz - arch.cz) < arch.reach + R * 1.2 + 300) return null;
   const trait = SKY_TRAITS[Math.floor(rnd() * SKY_TRAITS.length)];
-  const isl = makeIsland('lone', cx, cz, R, 1650 + rnd() * 1000, trait, rnd, { lobes: 1 + Math.floor(rnd() * 3) });
+  const isl = makeIsland('lone', cx, cz, R, 1650 + rnd() * 1000 - ISLAND_LOWER, floorUnder(cx, cz, R, seed), trait, rnd, { lobes: 1 + Math.floor(rnd() * 3) });
   const ground = (x: number, z: number) => { surfaceAt(x, z, seed, gw); return Math.max(gw[0], gw[1]); };
   planWater(isl, rnd, [], ground, [isl]);
   return isl;

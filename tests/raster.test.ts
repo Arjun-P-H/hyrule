@@ -1,5 +1,8 @@
 import { describe, expect, test } from 'bun:test';
 import { boxInView, RING_BLOCK, ringBlockOrder, ringIndices, ringLayout } from '../src/lib/gpu/rings';
+import { worldWGSL } from '../src/lib/gpu/worldgen.wgsl';
+import { gameVariant } from '../src/lib/gpu/engineGpu';
+import { rasterShader } from '../src/lib/gpu/terrain.wgsl';
 
 function lcg(seed: number): () => number {
   let s = seed >>> 0;
@@ -112,5 +115,22 @@ describe('ring culling blocks', () => {
       const bx = 3 * tx * vz * F[0] + vz * F[8], by = 3 * tx * vz * F[1] + vz * F[9], bz = 3 * tx * vz * F[2] + vz * F[10];
       expect(boxInView(F, tx, ty, bx - 1, by - 1, bz - 1, bx + 1, by + 1, bz + 1)).toBe(false);
     }
+  });
+});
+
+describe('the world is compiled in', () => {
+  test('each world\'s shader says which it is; each world\'s renderer draws only its own things', () => {
+    expect(worldWGSL('clouds')).toContain('const CLOUD_WORLD: bool = true;');
+    expect(worldWGSL('land')).toContain('const CLOUD_WORLD: bool = false;');
+    expect(gameVariant('cycle', 'land')).toMatchObject({ islands: true, world: 'land', sky: 'cycle' });
+    expect(gameVariant('cycle', 'clouds')).toMatchObject({ islands: true, forest: null, grass: null, rocks: false, world: 'clouds' });
+  });
+
+  test('the cloud world draws its puffs; the land none', () => {
+    expect(gameVariant('cycle', 'clouds')).toMatchObject({ puffs: true });
+    expect((gameVariant('cycle', 'land') as { puffs?: boolean }).puffs).toBeFalsy();
+    const opts = { n: 512, levels: 12, blend: 0.25, k: 128, rings: 12, world: 'clouds' as const };
+    expect(rasterShader({ ...opts, puffs: true })).toContain('fn vsPuff');
+    expect(rasterShader(opts)).not.toContain('fn vsPuff');
   });
 });

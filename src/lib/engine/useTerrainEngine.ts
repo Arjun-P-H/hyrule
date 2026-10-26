@@ -2,9 +2,13 @@
 
 import { useEffect, useRef, useState, type RefObject } from 'react';
 import { createStatsStore, type CamMode } from './statsStore';
+import { createCombatHudStore } from '@/lib/combat/hud';
+import { createPouchStore, type PouchCommand } from '@/lib/combat/pouch';
+import { createMapHud } from '@/lib/map/mapHud';
 import type { ClockStart, EngineHandle, SpawnAt } from './engineCore';
 import type { SkyMode } from '@/lib/gpu/engineGpu';
 import type { NetLink } from '@/lib/net/link';
+import { DEFAULT_KEYMAP, type Keymap } from './keybinds';
 import { DEFAULT_SEED, CAMERA, type PresetId } from '@/lib/constants';
 
 export type { PresetId };
@@ -67,6 +71,14 @@ export type TerrainEngineOptions = {
   character?: number;
   /** Multiplayer session (src/lib/net/session.ts), when there is one. */
   net?: NetLink | null;
+  /** Foes in the world (default true; WebGPU draws them). */
+  foes?: boolean;
+  /** Start with a full pouch (read at start; ?kit=1): one of every weapon, shield and bow, and some of every food. */
+  kit?: boolean;
+  /** Which action each key presses (src/lib/engine/keybinds.ts); the default keys when omitted. */
+  keymap?: Keymap;
+  /** The inventory screen is open: the hero is left alone (and alone in the world, the world stands still). */
+  menuOpen?: boolean;
   onPointerLockChange?: (locked: boolean) => void;
 };
 
@@ -93,10 +105,20 @@ export function useTerrainEngine({
   inputBlocked = false,
   character = 0,
   net = null,
+  foes = true,
+  kit = false,
+  keymap = DEFAULT_KEYMAP,
+  menuOpen = false,
   onPointerLockChange,
   onToggleHud,
-}: TerrainEngineOptions & { onToggleHud?: () => void }) {
+  onHudStep,
+  onToggleInventory,
+  onToggleMap,
+}: TerrainEngineOptions & { onToggleHud?: () => void; onHudStep?: (delta: 1 | -1) => void; onToggleInventory?: () => void; onToggleMap?: () => void }) {
   const [statsStore] = useState(createStatsStore);
+  const [combatHud] = useState(createCombatHudStore);
+  const [pouch] = useState(createPouchStore);
+  const [mapHud] = useState(createMapHud);
   const [error, setError] = useState<string | null>(null);
 
   const seedRef = useRef(seed);
@@ -106,6 +128,7 @@ export function useTerrainEngine({
   const sensitivityRef = useRef(sensitivity);
   const speedMultiplierRef = useRef(speedMultiplier);
   const hudToggleRef = useRef(onToggleHud);
+  const hudStepRef = useRef(onHudStep);
   const onPointerLockChangeRef = useRef(onPointerLockChange);
   const skyRef = useRef(sky);
   const clockStartRef = useRef(clockStart);
@@ -113,6 +136,12 @@ export function useTerrainEngine({
   const inputBlockedRef = useRef(inputBlocked);
   const characterRef = useRef(character);
   const netRef = useRef(net);
+  const foesRef = useRef(foes);
+  const kitRef = useRef(kit);
+  const keymapRef = useRef(keymap);
+  const menuOpenRef = useRef(menuOpen);
+  const inventoryToggleRef = useRef(onToggleInventory);
+  const mapToggleRef = useRef(onToggleMap);
   const handleRef = useRef<EngineHandle | null>(null);
 
   seedRef.current = seed;
@@ -122,11 +151,17 @@ export function useTerrainEngine({
   sensitivityRef.current = sensitivity;
   speedMultiplierRef.current = speedMultiplier;
   hudToggleRef.current = onToggleHud;
+  hudStepRef.current = onHudStep;
   onPointerLockChangeRef.current = onPointerLockChange;
   skyRef.current = sky;
   inputBlockedRef.current = inputBlocked;
   characterRef.current = character;
   netRef.current = net;
+  foesRef.current = foes;
+  keymapRef.current = keymap;
+  menuOpenRef.current = menuOpen;
+  inventoryToggleRef.current = onToggleInventory;
+  mapToggleRef.current = onToggleMap;
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -152,11 +187,21 @@ export function useTerrainEngine({
           sensitivity: sensitivityRef,
           speedMultiplier: speedMultiplierRef,
           onToggleHud: hudToggleRef,
+          onHudStep: hudStepRef,
           onPointerLockChange: onPointerLockChangeRef,
           sky: skyRef,
           inputBlocked: inputBlockedRef,
           character: characterRef,
           net: netRef,
+          foes: foesRef,
+          kit: kitRef,
+          keymap: keymapRef,
+          menuOpen: menuOpenRef,
+          onToggleInventory: inventoryToggleRef,
+          onToggleMap: mapToggleRef,
+          combatHud,
+          pouch,
+          mapHud,
         }, enablePointerLock, initialMode, backend, clockStartRef.current, spawnAtRef.current);
       })
       .catch((e: unknown) => {
@@ -167,17 +212,22 @@ export function useTerrainEngine({
       handleRef.current?.dispose();
       handleRef.current = null;
     };
-  }, [canvasRef, enablePointerLock, initialMode, renderer, statsStore]);
+  }, [canvasRef, enablePointerLock, initialMode, renderer, statsStore, combatHud, pouch, mapHud]);
 
   return {
     statsStore,
+    combatHud,
+    pouch,
+    mapHud,
     error,
     respawn: () => handleRef.current?.respawn(),
+    travel: () => handleRef.current?.travel(),
     toggleMode: () => handleRef.current?.toggleMode(),
     toggleView: () => handleRef.current?.toggleView(),
     setHour: (hour: number) => handleRef.current?.setHour(hour),
     setTimePaused: (paused: boolean) => handleRef.current?.setTimePaused(paused),
     setDayMinutes: (minutes: number) => handleRef.current?.setDayMinutes(minutes),
     clock: () => handleRef.current?.clock() ?? null,
+    pouchCommand: (cmd: PouchCommand) => handleRef.current?.pouch(cmd) ?? false,
   };
 }

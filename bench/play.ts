@@ -63,6 +63,8 @@ export type PlayOptions = {
    * the rate the game would reach on a faster display.
    */
   uncapped?: boolean;
+  /** Play with the Bokoblin camps (combat/foes.ts) awake; default false: a peaceful world (?foes=0). */
+  foes?: boolean;
 };
 
 export type PlayResult = {
@@ -180,8 +182,9 @@ export async function runPlaySession(baseUrl: string, opts: PlayOptions): Promis
     await cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: INSTRUMENT(!!opts.fenceOff, !!opts.gpuTiming, !!opts.uncapped) });
     const loaded = new Promise<void>((r) => cdp.on('Page.loadEventFired', () => r()));
     const renderer = opts.renderer ?? 'webgl2';
-    // (solo: straight into the world, past the multiplayer lobby; revisions without it ignore it)
-    const params = ['solo=1', renderer === 'auto' ? '' : `renderer=${renderer}`, opts.query ?? ''].filter(Boolean).join('&');
+    // (solo: straight into the world, past the multiplayer lobby; foes=0: no Bokoblin camps, so the
+    // scripted walk measures the same world as before them; revisions without either ignore them)
+    const params = ['solo=1', opts.foes ? '' : 'foes=0', renderer === 'auto' ? '' : `renderer=${renderer}`, opts.query ?? ''].filter(Boolean).join('&');
     await cdp.send('Page.navigate', { url: `${baseUrl}/game${params ? `?${params}` : ''}` });
     await loaded;
     await Bun.sleep(1500);

@@ -23,6 +23,7 @@
 
 import { HydroBuffer, hydroBufferFor } from './hydroBuffer';
 import { ClipmapScheduler, levelSpacing, rectTexels, usableRadius, wrap, type ClipmapSpec, type UpdateRect } from './clipmap';
+import type { World } from '../world';
 import { GEN_BYTES, biomeShader, clipBytes, genShader, horizonShader, sunShader } from './terrain.wgsl';
 import { stamped } from './profile';
 
@@ -54,6 +55,8 @@ export class ClipmapCache {
   private origin: [number, number] = [0, 0];
   private seed: number | null = null;
   private sunOpts: SunLayer | null;
+  // the world whose surface the generator evaluates
+  private readonly world: World;
   sunTexture: GPUTexture | null = null;
   sunView: GPUTextureView | null = null;
   matTexture: GPUTexture | null = null;
@@ -68,8 +71,9 @@ export class ClipmapCache {
   private bioPipe: GPUComputePipeline | null = null;
   private bioBind: GPUBindGroup | null = null;
 
-  constructor(device: GPUDevice, spec: ClipmapSpec, genDpScale: number, sun: SunLayer | null = null) {
+  constructor(device: GPUDevice, spec: ClipmapSpec, genDpScale: number, sun: SunLayer | null = null, world: World = 'land') {
     this.device = device;
+    this.world = world;
     this.spec = spec;
     this.genDpScale = genDpScale;
     this.sunOpts = sun;
@@ -112,18 +116,18 @@ export class ClipmapCache {
     const [genPipe, sunPipe, bioPipe] = await Promise.all([
       d.createComputePipelineAsync({
         layout: d.createPipelineLayout({ bindGroupLayouts: [layout] }),
-        compute: { module: d.createShaderModule({ code: genShader(spec.n) }), entryPoint: 'main' },
+        compute: { module: d.createShaderModule({ code: genShader(spec.n, this.world) }), entryPoint: 'main' },
       }),
       sunLayout && this.sunOpts ? d.createComputePipelineAsync({
         layout: d.createPipelineLayout({ bindGroupLayouts: [sunLayout] }),
         compute: {
-          module: d.createShaderModule({ code: (this.sunOpts.mode === 'path' ? horizonShader : sunShader)({ n: spec.n, levels: spec.levels, blend: this.sunOpts.blend }) }),
+          module: d.createShaderModule({ code: (this.sunOpts.mode === 'path' ? horizonShader : sunShader)({ n: spec.n, levels: spec.levels, blend: this.sunOpts.blend, world: this.world }) }),
           entryPoint: 'main',
         },
       }) : Promise.resolve(null),
       bioLayout && this.sunOpts ? d.createComputePipelineAsync({
         layout: d.createPipelineLayout({ bindGroupLayouts: [bioLayout] }),
-        compute: { module: d.createShaderModule({ code: biomeShader({ n: spec.n, levels: spec.levels, blend: this.sunOpts.blend }) }), entryPoint: 'main' },
+        compute: { module: d.createShaderModule({ code: biomeShader({ n: spec.n, levels: spec.levels, blend: this.sunOpts.blend, world: this.world }) }), entryPoint: 'main' },
       }) : Promise.resolve(null),
     ]);
     this.genPipe = genPipe;

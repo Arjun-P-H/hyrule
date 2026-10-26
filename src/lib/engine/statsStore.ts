@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from 'react';
+import type { World } from '@/lib/world';
 import type { HeroAction } from '@/lib/hero/locomotion';
 import type { SkyMode } from '@/lib/gpu/engineGpu';
 
@@ -39,6 +40,8 @@ export type EngineStats = {
   dayMinutes: number;
   /** The land under the camera (sky/air.ts landName). */
   land: string;
+  /** The world the hero is in (world.ts): the land, or the cloud world. */
+  world: World;
 };
 
 export type StatsStore = {

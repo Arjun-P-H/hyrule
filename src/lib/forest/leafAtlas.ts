@@ -1,7 +1,9 @@
 /**
  * Leaf sprays, painted once at start-up (there are no image files): one layer
  * per leaf style, each a spray of overlapping leaves round its middle, with its
- * mipmaps. The leaf cards round near crowns draw them (forest.wgsl.ts).
+ * mipmaps. The leaf cards round near crowns draw them (forest.wgsl.ts). One
+ * style is not a spray: a conifer's bough, a feathered sheet (its sprigs, their
+ * needles) that the boughs of the pines are cut out of.
  * ---------------------------------------------------------------------------
  * Texel (RGBA8, every channel premultiplied by coverage, so mipmaps average
  * right): coverage; tone (the leaf's own shade, darker toward its base and
@@ -11,7 +13,7 @@
  */
 
 export const LEAF_SIZE = 256;
-export const LEAF_STYLES = ['lance', 'palmate', 'ovate', 'broad', 'pinnate', 'round'] as const;
+export const LEAF_STYLES = ['lance', 'palmate', 'ovate', 'broad', 'pinnate', 'round', 'fir'] as const;
 export type LeafStyle = (typeof LEAF_STYLES)[number];
 /** Mip levels per layer: 256² down to 1². */
 export const LEAF_MIPS = Math.log2(LEAF_SIZE) + 1;
@@ -44,7 +46,9 @@ type Style = {
 
 const sinPow = (t: number, p: number) => Math.pow(Math.max(0, Math.sin(Math.PI * t)), p);
 
-const STYLES: Record<LeafStyle, Style> = {
+type SprayStyle = Exclude<LeafStyle, 'fir'>;
+
+const STYLES: Record<SprayStyle, Style> = {
   // Long pointed leaves, like the lowland trees' (oak).
   lance: { count: 28, length: [0.3, 0.42], width: 0.27, profile: (t) => sinPow(Math.pow(t, 0.8), 0.75), spread: 0.31 },
   // Maple: lobed leaves (each leaf five lobes from one stalk, drawn as five leaves).
@@ -97,7 +101,7 @@ function paint(px: Float32Array, n: number, leaf: Leaf): void {
 }
 
 /** One spray: leaves over a disc, pointing outward from its middle, deeper ones (painted first) darker. */
-function spray(style: LeafStyle, seed: number): Float32Array {
+function spray(style: SprayStyle, seed: number): Float32Array {
   const n = LEAF_SIZE;
   const st = STYLES[style];
   const r = rng(seed);
@@ -148,6 +152,88 @@ function spray(style: LeafStyle, seed: number): Float32Array {
   return px;
 }
 
+/** A conifer bough's sheet is this wide (both sides) as a share of its length: models.ts sizes boughs by it, and the strokes of fir() are laid out for it. */
+export const BOUGH_ASPECT = 0.52;
+
+/**
+ * A conifer's bough, trunk to tip down the tile (x across it, the midrib at ½), painted the way the
+ * spruces of the Hyrule games are: a broad spade of a branch, narrow at the trunk, widest past the
+ * middle, rounded to a point at the tip; dense, a dark underlayer of needles under brushy tufts
+ * that all sweep toward the tip and out to the sides, so its rim is a fringe of needle points
+ * (the tufts out there are longer and some are missing). Dark toward the trunk and the midrib, pale
+ * at the rim and the tip, where the light catches the new growth.
+ * The sheet it is drawn on is BOUGH_ASPECT as wide as it is long, so the strokes are laid out in that
+ * space and squeezed into the tile.
+ */
+function fir(seed: number): Float32Array {
+  const n = LEAF_SIZE;
+  const px = new Float32Array(n * n * 4);
+  const A = BOUGH_ASPECT;
+  /** A stroke from tile point (x, y) at `angle` off the bough's axis (+: toward x > ½), `length` in bough lengths. */
+  const stroke = (x: number, y: number, angle: number, length: number, w: number, tone: number, tilt: [number, number], profile: (t: number) => number): Leaf => {
+    const vx = Math.sin(angle) / A, vy = Math.cos(angle);
+    const m = Math.hypot(vx, vy);
+    return { x, y, dx: vx / m, dy: vy / m, len: length * m, w, tone, tilt, profile, rib: 0 };
+  };
+  /** The bough's half-width (bough lengths) a fraction y of the way to its tip: the spade. */
+  // (broad from where it leaves the trunk, so the boughs round a trunk hide it; rounded to a point at the tip)
+  const half = (y: number) => (A / 2) * 0.8 * Math.max(
+    Math.pow(Math.max(0, Math.sin(Math.PI * Math.pow(Math.min(1, Math.max(0, y / 0.93)), 1.2))), 0.7) * (0.35 + 0.65 * Math.min(1, y / 0.3)),
+    0.8 * Math.min(1, 0.85 + 3 * y) * (1 - Math.min(1, Math.max(0, (y - 0.5) / 0.35))));
+  const tuft = (t: number) => Math.pow(1 - t, 0.6) * Math.min(1, 0.35 + 3 * t);
+  const sprigs = 17;
+  // The midrib, under everything.
+  paint(px, n, stroke(0.5, 0.015, 0, 0.8, 0.012, 0.3, [0, 0.2], (t) => 1 - 0.6 * t));
+  // Three passes: a dark underlayer (the depth between the tufts), the sprigs and their tufts, then a
+  // last scatter of pale tufts over the outer half (the lit tops of the needles).
+  for (const pass of [0, 1, 2]) {
+    const r = rng(seed + 977 * pass);
+    for (let k = 0; k < sprigs * 2; k++) {
+      const side = k % 2 ? -1 : 1;
+      const y = 0.03 + 0.8 * ((k >> 1) + (side > 0 ? 0.25 : 0.75)) / sprigs + r(-0.01, 0.01);
+      // Sprigs leave the midrib steeply near the trunk and sweep forward toward the tip.
+      const angle = side * (1.15 - 0.45 * y + r(-0.08, 0.08));
+      // Long enough to reach the spade's edge where the sprig ends (found by halving).
+      let lo = 0, hi = 1.5;
+      for (let it = 0; it < 24; it++) {
+        const mid = 0.5 * (lo + hi);
+        if (mid * Math.sin(Math.abs(angle)) < half(y + mid * Math.cos(angle))) lo = mid; else hi = mid;
+      }
+      const len = lo * (pass === 0 ? 0.82 : 0.9) * r(0.92, 1.04);
+      if (len < 0.02) continue;
+      const tone = pass === 0 ? r(0.18, 0.3) : Math.min(1, r(0.5, 0.75) * (0.75 + 0.4 * y));
+      const tilt: [number, number] = [side * r(0.15, 0.4), r(0.05, 0.3)];
+      const s = stroke(0.5, y, angle, len, 0.02, tone * 0.8, tilt, (t) => 1 - 0.5 * t);
+      if (pass < 2) paint(px, n, s);
+      // Tufts along the sprig, both sides of it, all sweeping forward; out at the rim they are
+      // longer, uneven and now and then missing: that is the fringe.
+      const count = [18, 40, 22][pass];
+      for (let m = 0; m < count; m++) {
+        const f = pass === 2 ? r(0.35, 1) : (m + r(0.1, 0.9)) / count;
+        const bx = 0.5 + s.dx * s.len * f, by = y + s.dy * s.len * f;
+        for (const sgn of [1, -1]) {
+          if (r() < (pass === 2 ? 0.45 : 0.06 + 0.3 * Math.max(0, f - 0.7) / 0.3)) continue;
+          // (off the sprig by ~30°, kept pointing forward: within 85° of the bough's axis)
+          const a2 = side * Math.min(1.48, Math.max(0.04, Math.abs(angle) + sgn * (0.5 + r(-0.15, 0.15)) - 0.12));
+          const rim = Math.max(0, f - 0.6) / 0.4;
+          const l2 = (0.038 + 0.045 * rim * r(0.3, 1.6)) * r(0.8, 1.2) * (1 - 0.3 * y) * (pass === 0 ? 1.3 : 1);
+          const t2 = pass === 0 ? tone * r(0.8, 1.2) : Math.min(1, tone * r(0.75, 1.1) * (0.8 + 0.45 * f) + (pass === 2 ? 0.12 : 0));
+          paint(px, n, stroke(bx, by, a2, l2, pass === 0 ? 0.2 : 0.12, t2, [tilt[0] + sgn * r(0.05, 0.3), tilt[1] + r(-0.1, 0.25)], tuft));
+        }
+      }
+    }
+  }
+  // The leader: a tuft straight down the axis at the tip.
+  const r = rng(seed + 31);
+  for (let m = 0; m < 9; m++) {
+    const y = 0.76 + 0.1 * m / 9;
+    for (const sgn of [1, -1]) paint(px, n, stroke(0.5, y, sgn * r(0.25, 0.55), r(0.04, 0.065), 0.15, r(0.7, 1), [sgn * 0.2, 0.2], tuft));
+  }
+  // (the odd fringe tuft reaches the tile's edge: clear a border, or the sheet would show a cut)
+  for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) if (i < 2 || j < 2 || i >= n - 2 || j >= n - 2) px.fill(0, 4 * (j * n + i), 4 * (j * n + i) + 4);
+  return px;
+}
+
 /** Premultiplied float texels to RGBA8, and their mip chain (box-filtered, which premultiplication makes exact). */
 function mips(px: Float32Array): Uint8Array<ArrayBuffer>[] {
   const out: Uint8Array<ArrayBuffer>[] = [];
@@ -176,5 +262,5 @@ function mips(px: Float32Array): Uint8Array<ArrayBuffer>[] {
 
 /** Every leaf style's spray, in LEAF_STYLES order, with mipmaps. */
 export function buildLeafAtlas(): LeafAtlas {
-  return LEAF_STYLES.map((style, k) => mips(spray(style, 0x1eaf + 7919 * k)));
+  return LEAF_STYLES.map((style, k) => mips(style === 'fir' ? fir(0x1eaf + 7919 * k) : spray(style, 0x1eaf + 7919 * k)));
 }

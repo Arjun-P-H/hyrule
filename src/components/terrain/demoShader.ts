@@ -22,7 +22,8 @@
  * yaw convention: forward = (sin yaw, 0, cos yaw), right = (cos yaw, 0, −sin yaw).
  */
 
-import { CLIMATE, VALLEY } from '../../lib/constants';
+import { CLIMATE, HERO_SHAPE, VALLEY } from '../../lib/constants';
+import { MODEL } from '../../lib/combat/weapons';
 import { LANDS_CONST_GLSL, landsGlsl } from './landsGlsl';
 
 /** A GLSL float literal for a JS number. */
@@ -62,6 +63,7 @@ uniform mat3  u_hero_torso;   // torso frame, columns right / up / forward
 uniform mat3  u_hero_head;    // head frame, columns right / up / forward
 uniform vec4  u_hero_misc;    // x glider open 0..1, y ground under the hero (camera-relative), zw sin/cos facing
 uniform vec3  u_hero_dress;   // the tunic's albedo (src/lib/hero/characters.ts); the cap is a shade darker
+uniform vec4  u_hero_gear[9]; // rig.ts GEAR: the weapon (grip, axis, flat), the shield (centre, right, up), the bow (grip, up, aim)
 
 out vec4 fragColor;
 
@@ -126,6 +128,22 @@ const vec3  HC_GLIDER  = vec3(0.28, 0.05, 0.02);
 const vec3  HC_GLIDER2 = vec3(0.40, 0.31, 0.19);
 const vec3  HC_WOOD    = vec3(0.14, 0.075, 0.035);
 const vec3  HC_EYE     = vec3(0.015, 0.05, 0.075);
+const vec3  HC_STEEL   = vec3(0.5, 0.53, 0.58);
+const vec3  HC_CLUB    = vec3(0.17, 0.095, 0.045);
+const vec3  HC_BONE    = vec3(0.5, 0.46, 0.37);
+const vec3  HC_BOW     = vec3(0.11, 0.05, 0.022);
+const vec3  HC_FLETCH  = vec3(0.36, 0.05, 0.03);
+const vec3  HC_GLOW    = vec3(0.55, 0.85, 1.6);
+const vec3  HC_PLANK   = vec3(0.20, 0.10, 0.04);
+const vec3  HC_PLANK_D = vec3(0.07, 0.032, 0.012);
+const vec3  HC_IRON    = vec3(0.12, 0.125, 0.14);
+const vec3  HC_TRAV    = vec3(0.15, 0.072, 0.03);
+const vec3  HC_LID     = vec3(0.22, 0.235, 0.26);
+const vec3  HC_HIDE    = vec3(0.30, 0.25, 0.16);
+// The gear (rig.ts GEAR, HERO_SHAPE in constants.ts, combat/weapons.ts MODEL)
+const float GEAR_SWORD_LEN = ${glf(HERO_SHAPE.swordLen)}, GEAR_CLUB_LEN = ${glf(HERO_SHAPE.clubLen)};
+const float GEAR_BOW_HALF = ${glf(HERO_SHAPE.bowHalf)}, GEAR_ARROW_LEN = ${glf(HERO_SHAPE.arrowLen)};
+const float MODEL_SWORD = ${glf(MODEL.sword)}, MODEL_CLUB = ${glf(MODEL.club)}, MODEL_SPIKED = ${glf(MODEL.spiked)};
 
 // ---------------------------------------------------------------------------
 // §4 — deterministic hashing (uint32, Murmur3 finalizer) — mirrors terrainMath
@@ -529,10 +547,79 @@ float smin(float a, float b, float k) {
   return min(a, b) - h * h * k * 0.25;
 }
 vec2 hU(vec2 a, float d, float id) { return d < a.x ? vec2(d, id) : a; }
-// Heater-shield outline in the torso's back plane: an ellipse cut flat at the
-// top (0.33 m wide), rounding to its point 0.49 m below.
-float heroShieldEdge(vec2 s) {
-  return max((length((s - vec2(0.0, 0.25)) / vec2(0.19, 0.33)) - 1.0) * 0.19, s.y - 0.41);
+// A shield's outline round its centre, by its model m (as gpu/hero.wgsl.ts): the Hylian
+// Shield's heater (an ellipse cut flat at the top, 0.33 m wide, rounding to its point
+// 0.33 m below the centre), the Boko shield's (narrower, longer), discs for the wooden
+// shield (0.27 m), the Traveler's (0.28) and the pot lid (0.22).
+float heroShieldEdge(vec2 s, float m) {
+  if (m > 1.5 && m < 4.5) return length(s) - (m > 3.5 ? 0.22 : m > 2.5 ? 0.28 : 0.27);
+  vec2 k = m > 4.5 ? vec2(0.17, 0.36) : vec2(0.19, 0.33);
+  return max((length(s / k) - 1.0) * k.x, s.y - 0.16);
+}
+
+// The gear (rig.ts GEAR, as gpu/hero.wgsl.ts): a weapon (g0 grip, model; g1
+// grip → tip, glow; g2 the blade's flat, sheathed), the shield (g3 centre,
+// carried; g4 / g5 its face's right and up), the bow (g6 grip, in hand; g7
+// along the limbs, draw; g8 toward the aim, an arrow on; nock: the string
+// hand). Material ids 16 steel, 17 club wood, 18 bone, 19 bow, 22 fletching.
+vec2 gearWeapon(vec3 p, vec4 g0, vec4 g1, vec4 g2, vec2 r) {
+  float m = g0.w;
+  float len = m < MODEL_SWORD + 0.5 ? GEAR_SWORD_LEN : GEAR_CLUB_LEN;
+  if (m < 0.5 || sdCapsule(p, g0.xyz - g1.xyz * 0.13, g0.xyz + g1.xyz * len, 0.09) > r.x) return r;
+  vec3 v = p - g0.xyz;
+  vec3 w = cross(g1.xyz, g2.xyz);
+  vec3 l = vec3(dot(v, w), dot(v, g2.xyz), dot(v, g1.xyz));
+  if (m < MODEL_SWORD + 0.5) {
+    r = hU(r, sdCapsule(l, vec3(0.0, 0.0, -0.09), vec3(0.0, 0.0, 0.07), 0.016), 8.0);
+    r = hU(r, min(length(l - vec3(0.0, 0.0, -0.112)) - 0.023, length(l - vec3(0.0, 0.0, 0.086)) - 0.018), 6.0);
+    r = hU(r, sdLimb(vec3(abs(l.x), l.yz), vec3(0.0, 0.0, 0.085), vec3(0.092, 0.0, 0.112), 0.019, 0.009), 8.0);
+    if (g2.w < 0.5) {
+      float taper = clamp((l.z - 0.76) / 0.19, 0.0, 1.0);
+      float hw = 0.024 * (1.0 - 0.94 * taper);
+      r = hU(r, sdBox3(vec3(l.x, l.y, l.z - 0.525), vec3(hw, 0.0035 * (1.0 - 0.5 * taper), 0.425)) - 0.0015, 16.0);
+    }
+    return r;
+  }
+  r = hU(r, sdCapsule(l, vec3(0.0, 0.0, -0.08), vec3(0.0, 0.0, 0.13), 0.021), 4.0);
+  float head = sdLimb(l, vec3(0.0, 0.0, 0.12), vec3(0.0, 0.0, 0.66), 0.03, 0.062) + 0.004 * sin(l.z * 41.0 + l.x * 37.0) * sin(l.y * 53.0);
+  r = hU(r, head, m > MODEL_SPIKED + 0.5 ? 18.0 : 17.0);
+  if (m > MODEL_CLUB + 0.5) {
+    vec3 a = vec3(abs(l.x), abs(l.y), l.z);
+    float s1 = sdLimb(a, vec3(0.035, 0.035, 0.5), vec3(0.075, 0.075, 0.53), 0.013, 0.002);
+    float s2 = sdLimb(a, vec3(0.045, 0.0, 0.36), vec3(0.098, 0.0, 0.38), 0.012, 0.002);
+    float s3 = sdLimb(a, vec3(0.0, 0.047, 0.6), vec3(0.0, 0.1, 0.63), 0.012, 0.002);
+    r = hU(r, min(s1, min(s2, s3)), m > MODEL_SPIKED + 0.5 ? 4.0 : 18.0);
+  }
+  return r;
+}
+
+vec2 gearShield(vec3 p, vec4 g3, vec4 g4, vec4 g5, vec2 r) {
+  if (g3.w < 0.5 || length(p - g3.xyz) - 0.37 > r.x) return r;
+  vec3 v = p - g3.xyz;
+  vec2 sw = vec2(heroShieldEdge(vec2(dot(v, g4.xyz), dot(v, g5.xyz)), g3.w), abs(dot(v, cross(g4.xyz, g5.xyz))) - 0.015);
+  return hU(r, min(max(sw.x, sw.y), 0.0) + length(max(sw, 0.0)), 7.0);
+}
+
+vec2 gearBow(vec3 p, vec4 g6, vec4 g7, vec4 g8, vec3 nock, vec2 r) {
+  if (g6.w < 0.5 || length(p - g6.xyz) - (GEAR_BOW_HALF + 0.12) > r.x) return r;
+  vec3 c = g6.xyz, up = g7.xyz, fw = g8.xyz;
+  float bend = 0.07 + 0.09 * g7.w;
+  vec3 m1 = c + up * 0.32 - fw * bend * 0.45, t1 = c + up * GEAR_BOW_HALF - fw * bend * 1.5;
+  vec3 m2 = c - up * 0.32 - fw * bend * 0.45, t2 = c - up * GEAR_BOW_HALF - fw * bend * 1.5;
+  float bow = sdCapsule(p, c - up * 0.075, c + up * 0.075, 0.019);
+  bow = min(bow, min(sdLimb(p, c + up * 0.06, m1, 0.016, 0.012), sdLimb(p, m1, t1, 0.012, 0.006)));
+  bow = min(bow, min(sdLimb(p, c - up * 0.06, m2, 0.016, 0.012), sdLimb(p, m2, t2, 0.012, 0.006)));
+  r = hU(r, bow, 19.0);
+  vec3 n = g7.w > 0.01 ? nock : c - fw * bend * 1.5;
+  r = hU(r, min(sdCapsule(p, t1, n, 0.0035), sdCapsule(p, n, t2, 0.0035)), 5.0);
+  if (g8.w > 0.5) {
+    vec3 ad = normalize(c + fw * 0.05 - n);
+    vec3 tip = n + ad * GEAR_ARROW_LEN;
+    r = hU(r, sdCapsule(p, n, tip - ad * 0.05, 0.0048), 11.0);
+    r = hU(r, sdLimb(p, tip - ad * 0.065, tip, 0.012, 0.0015), 16.0);
+    r = hU(r, sdLimb(p, n + ad * 0.025, n + ad * 0.13, 0.013, 0.0065), 22.0);
+  }
+  return r;
 }
 
 // Distance to the hero (x) and the material id of the nearest part (y), at a
@@ -548,12 +635,11 @@ vec2 heroMap(vec3 p) {
   vec2 bw = vec2(length(q.xz) - 0.142, abs(q.y - 0.07) - 0.026);
   r = hU(r, min(max(bw.x, bw.y), 0.0) + length(max(bw, 0.0)), 4.0);
   r = hU(r, sdBox3(q - vec3(0.0, 0.07, 0.143), vec3(0.032, 0.026, 0.01)), 6.0);
+  // the sheath on the back (the sword, the shield and the bow are the gear: on the back or in hand)
   r = hU(r, sdCapsule(q, vec3(-0.15, -0.14, -0.175), vec3(0.1, 0.34, -0.175), 0.028), 9.0);
-  r = hU(r, sdCapsule(q, vec3(0.1, 0.34, -0.175), vec3(0.155, 0.46, -0.175), 0.018), 8.0);
-  r = hU(r, min(sdCapsule(q, vec3(0.038, 0.372, -0.175), vec3(0.162, 0.308, -0.175), 0.016),
-                length(q - vec3(0.164, 0.478, -0.175)) - 0.024), 6.0);
-  vec2 sw = vec2(heroShieldEdge(q.xy), abs(q.z + 0.222) - 0.015);
-  r = hU(r, min(max(sw.x, sw.y), 0.0) + length(max(sw, 0.0)), 7.0);
+  r = gearWeapon(p, u_hero_gear[0], u_hero_gear[1], u_hero_gear[2], r);
+  r = gearShield(p, u_hero_gear[3], u_hero_gear[4], u_hero_gear[5], r);
+  r = gearBow(p, u_hero_gear[6], u_hero_gear[7], u_hero_gear[8], u_hero_j[8], r);
 
   // head: face, hair, cap, ears (head frame)
   if (length(p - hd) - HERO_HEAD_REACH < r.x) {
@@ -670,15 +756,58 @@ vec3 heroAlbedo(int id, vec3 pr, out float spec) {
   if (id == 5) return HC_CREAM;
   if (id == 6) { spec = 1.0; return HC_GOLD; }
   if (id == 7) {
-    // shield face: silver rim, Triforce, red chevron crest
-    vec2 s = ((pr - u_hero_j[0]) * u_hero_torso).xy;
-    if (heroShieldEdge(s) > -0.022) { spec = 0.8; return HC_SILVER; }
-    float tri = min(sdTri(s - vec2(0.0, 0.33), 0.034),
-                    min(sdTri(s - vec2(-0.034, 0.271), 0.034), sdTri(s - vec2(0.034, 0.271), 0.034)));
+    // shield face (its frame from the gear), by model: the Hylian Shield's silver rim, Triforce and red
+    // chevron crest; planks and iron straps (wooden), a leather face in a steel rim with a boss
+    // (Traveler's), dull steel (pot lid), hide and bone (Boko)
+    vec3 v = pr - u_hero_gear[3].xyz;
+    vec2 s = vec2(dot(v, u_hero_gear[4].xyz), dot(v, u_hero_gear[5].xyz));
+    float m = u_hero_gear[3].w;
+    float e = heroShieldEdge(s, m);
+    if (m > 1.5) {
+      float rr = length(s);
+      if (m < 2.5) {
+        if (e > -0.02 || abs(abs(s.y) - 0.12) < 0.022) { spec = 0.6; return HC_IRON; }
+        return abs(fract((s.x + 0.27) / 0.108) - 0.5) > 0.455 ? HC_PLANK_D : HC_PLANK;
+      }
+      if (m < 3.5) {
+        if (e > -0.025 || rr < 0.065) { spec = 0.8; return HC_STEEL; }
+        if (abs(rr - 0.19) < 0.008) return HC_PLANK_D;
+        return HC_TRAV;
+      }
+      if (m < 4.5) {
+        if (rr < 0.04) { spec = 1.0; return HC_STEEL; }
+        if (e > -0.02) { spec = 0.9; return HC_STEEL; }
+        if (abs(rr - 0.135) < 0.006) { spec = 0.5; return HC_IRON; }
+        spec = 0.7;
+        return HC_LID;
+      }
+      if (e > -0.025 || abs(s.x) < 0.018) { spec = 0.3; return HC_BONE; }
+      if (abs(fract(s.y * 7.5) - 0.5) > 0.42) return HC_PLANK_D;
+      return HC_HIDE;
+    }
+    if (e > -0.022) { spec = 0.8; return HC_SILVER; }
+    float tri = min(sdTri(s - vec2(0.0, 0.08), 0.034),
+                    min(sdTri(s - vec2(-0.034, 0.021), 0.034), sdTri(s - vec2(0.034, 0.021), 0.034)));
     if (tri < 0.0) { spec = 0.9; return HC_GOLD; }
-    if (abs(s.y - 0.15 + 0.55 * abs(s.x)) < 0.018 && abs(s.x) < 0.14) return HC_RED;
+    if (abs(s.y + 0.1 + 0.55 * abs(s.x)) < 0.018 && abs(s.x) < 0.14) return HC_RED;
     return HC_SHIELD;
   }
+  if (id == 16) { spec = 1.0; return HC_STEEL; }
+  if (id == 17) return HC_CLUB;
+  if (id == 18) { spec = 0.3; return HC_BONE; }
+  if (id == 19) {
+    // the bow's wood by model (as gpu/hero.wgsl.ts bowAlbedo)
+    float m = u_hero_gear[6].w;
+    if (m < 1.5) { spec = 0.25; return HC_BOW; }
+    float along = abs(dot(pr - u_hero_gear[6].xyz, u_hero_gear[7].xyz));
+    bool tip = along > GEAR_BOW_HALF - 0.12;
+    if (m < 2.5) { spec = tip ? 0.3 : 0.1; return tip ? HC_BONE : vec3(0.19, 0.12, 0.065); }
+    if (tip) { spec = 1.0; return HC_STEEL; }
+    if (along < 0.09) { spec = 0.9; return HC_GOLD; }
+    spec = 0.5;
+    return vec3(0.04, 0.022, 0.016);
+  }
+  if (id == 22) return HC_FLETCH;
   if (id == 8) return HC_HILT;
   if (id == 9) return HC_SHEATH;
   if (id == 10) {
@@ -714,7 +843,8 @@ vec3 heroNormal(vec3 pr, float tH) {
 vec3 heroShade(vec3 rd, float tH, vec3 n, float sh) {
   vec3 pr = rd * tH;
   float spec;
-  vec3 alb = heroAlbedo(int(heroMap(pr).y + 0.5), pr, spec);
+  int id = int(heroMap(pr).y + 0.5);
+  vec3 alb = heroAlbedo(id, pr, spec);
   float ndl = dot(n, SUN);
   float occ = 0.0;
   for (int i = 1; i <= 3; i++) {
@@ -734,6 +864,8 @@ vec3 heroShade(vec3 rd, float tH, vec3 n, float sh) {
     sp *= sp; sp *= sp; sp *= sp; sp *= sp; sp *= sp;
     col += SUN_COL * (0.5 * spec * sp * sh);
   }
+  // a charged blade glows
+  if (id == 16) col += HC_GLOW * u_hero_gear[1].w;
   return applyFog(col, tH, u_cam_pos.y + pr.y, rd);
 }
 #endif // HERO

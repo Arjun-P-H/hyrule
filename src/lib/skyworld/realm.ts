@@ -1,21 +1,26 @@
 /**
  * The sky realm's public face: what lies at a point, what to draw near the
- * camera, and what the hero stands on or swims in up there.
+ * camera, and what the hero stands on or swims in up there. The realm is the
+ * cloud world's (world.ts): on the land's seeds every answer is "nothing".
  * ---------------------------------------------------------------------------
  * A point needs at most two lookups: the archipelago of its archCell square
  * and the lone isle of its isleCell square (each never leaves its cell);
  * both are cached, so the hero's questions every tick allocate nothing.
  * The floor under a point is an island's top (a frozen lake's ice counts as
- * floor) or an arch's deck; the water is a lake's or a stream's surface.
+ * floor), an arch's deck or a puff's top (puffs.ts); the water is a lake's or
+ * a stream's surface. The land has floors up here too: its model isles' (skymodels.ts).
  */
 
 import { SKY_REALM as S } from '../constants';
 import { archGround, type Arch } from './arches';
 import { archipelagoInCell, archipelagoStep, cellBuilt, isleInCell, type Archipelago } from './archipelago';
 import { islandRho, lakeDist, nearWater, outline, outlineMax, topAt, waterAt, type SkyIsland } from './island';
+import { puffTop, puffUnder, type Puff } from './puffs';
+import { worldOf } from '../world';
+import { modelIsleUnder, modelTop, type ModelIsle } from '../skymodels';
 
 /** Something to stand on up here. */
-type SkyFloor = SkyIsland | Arch;
+type SkyFloor = SkyIsland | Arch | Puff | ModelIsle;
 
 /** The island whose outline holds world (x, z), or null. */
 export function islandAt(x: number, z: number, seed: number): SkyIsland | null {
@@ -30,8 +35,10 @@ export function islandAt(x: number, z: number, seed: number): SkyIsland | null {
   return isle && islandRho(isle, x, z) <= 1 ? isle : null;
 }
 
-/** The floor's height at world (x, z): an island's top (a frozen lake as ice) or an arch's deck; NaN off it. */
+/** The floor's height at world (x, z): an island's top (a frozen lake as ice), an arch's deck, a puff's top or a model isle's floor; NaN off it. */
 export function floorHeight(f: SkyFloor, x: number, z: number): number {
+  if ('spring' in f) return puffTop(f, x, z);
+  if ('qy' in f) return modelTop(f, x, z, f.qy); // (the layer the query found, or the next one down)
   if ('ax' in f) return archGround(f, x, z); // an arch's or a bridge's deck
   if (islandRho(f, x, z) > 1) return NaN;
   const t = topAt(f, x, z);
@@ -40,8 +47,8 @@ export function floorHeight(f: SkyFloor, x: number, z: number): number {
 }
 
 /**
- * What a point at height y stands over up here: the highest island top or
- * arch deck under (x, z) that the point is above, or less than `reach` below
+ * What a point at height y stands over up here: the highest island top,
+ * arch deck or puff (puffs.ts) under (x, z) that the point is above, or less than `reach` below
  * (a step onto it holds). Null over open sky.
  */
 export function skyFloorUnder(x: number, y: number, z: number, seed: number, reach = 1.5): SkyFloor | null {
@@ -61,7 +68,10 @@ export function skyFloorUnder(x: number, y: number, z: number, seed: number, rea
       if (t === t && y >= t - reach && t > bestY) { best = A; bestY = t; }
     }
   }
-  return best;
+  // (puffs are the cloud world's: the land's every tick skips them)
+  const p = worldOf(seed) === 'clouds' ? puffUnder(x, y, z, seed, reach) : null;
+  if (p && puffTop(p, x, z) > bestY) best = p;
+  return best ?? modelIsleUnder(x, y, z, seed, reach);
 }
 
 /** Height of the floor under (x, y, z) (see skyFloorUnder), else NaN. */

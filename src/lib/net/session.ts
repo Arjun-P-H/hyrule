@@ -2,8 +2,9 @@
  * The browser's side of multiplayer: a WebSocket to the game server's relay
  * (server.mjs, path /mp) — who is in the world and which character each
  * plays (for the lobby), entering the world as a character, and the stream
- * of hero snapshots and clock / seed changes the engine and the page trade
- * through it (link.ts). Reconnects on its own and enters the world again.
+ * of hero snapshots, the blows and shots players trade (combat/pvp.ts), and
+ * clock / seed changes the engine and the page trade through it (link.ts).
+ * Reconnects on its own and enters the world again.
  * Without the server (plain `next dev`) it stays offline: one player.
  */
 
@@ -45,6 +46,7 @@ export class NetSession implements NetLink {
   private view: NetView = { status: 'connecting', selfId: null, inWorld: false, players: [], max: 5, denied: null, share: null, notice: null };
   private listeners = new Set<() => void>();
   private inbox: Array<{ id: string; at: number; d: number[] }> = [];
+  private combatInbox: Array<{ id: string; at: number; d: number[] }> = [];
   private clockIn: ClockState | null = null;
   private peerChars = new Map<string, number>();
   private wish: { name: string; char: number } | null = null;
@@ -108,6 +110,7 @@ export class NetSession implements NetLink {
       this.ws = null;
       this.peerChars = new Map();
       this.inbox.length = 0;
+      this.combatInbox.length = 0;
       // Lost after being online: reconnecting (the world is entered again); never reached: offline.
       this.set({ status: this.everOnline ? 'connecting' : 'offline', selfId: null, inWorld: false, players: [] });
       this.retry();
@@ -170,6 +173,12 @@ export class NetSession implements NetLink {
           this.inbox.push({ id: m.id, at: performance.now(), d: m.d as number[] });
         }
         break;
+      case 'c': // a blow, a shot, or what came of one (combat/pvp.ts)
+        if (this.view.inWorld && typeof m.id === 'string' && Array.isArray(m.d)) {
+          if (this.combatInbox.length >= INBOX_MAX) this.combatInbox.splice(0, INBOX_MAX / 2);
+          this.combatInbox.push({ id: m.id, at: performance.now(), d: m.d as number[] });
+        }
+        break;
       case 'seed':
         if (this.view.inWorld && typeof m.seed === 'number') {
           this.seed = m.seed;
@@ -230,6 +239,17 @@ export class NetSession implements NetLink {
     const ws = this.ws;
     if (!this.view.inWorld || !ws || ws.readyState !== WebSocket.OPEN || ws.bufferedAmount > SEND_BACKLOG) return;
     ws.send(JSON.stringify({ t: 's', d: snap }));
+  }
+  drainCombat(take: (id: string, at: number, msg: readonly number[]) => void): void {
+    for (const m of this.combatInbox) take(m.id, m.at, m.d);
+    this.combatInbox.length = 0;
+  }
+  sendCombat(msg: readonly number[], to: string | null): void {
+    // (not dropped for a backlog as snapshots are: the next snapshot replaces a lost one, a lost blow is gone)
+    if (this.view.inWorld) this.send(to === null ? { t: 'c', d: msg } : { t: 'c', to, d: msg });
+  }
+  peerName(id: string): string {
+    return this.view.players.find((p) => p.id === id)?.name ?? 'Someone';
   }
   takeClock(): ClockState | null {
     const c = this.clockIn;

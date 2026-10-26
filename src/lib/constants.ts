@@ -54,6 +54,9 @@ export const F = {
   cliffs: 420 / 1048576,    // n = 420   (2497 m)   cliffed vs beached coast
   // ---- landforms ----
   tower: 3495 / 1048576,    // n = 3495  (300.0 m)  karst tower lattice
+  towerwarp: 12288 / 1048576, // n = 12288 (85.3 m)  …the wander of their outlines
+  towercrown: 6144 / 1048576, // n = 6144  (170.7 m) …the swell of their crowns
+  towerbump: 40960 / 1048576, // n = 40960 (25.6 m)  …and the lumps on them
   mesa: 874 / 1048576,      // n = 874   (1199.8 m) mesa tiers
   mesafine: 2185 / 1048576, // n = 2185  (479.9 m)  …their finer outline
   dune: 4369 / 1048576,     // n = 4369  (240.0 m)  crescent dune spacing (phase, see dunesE)
@@ -75,8 +78,16 @@ export const F = {
   massif: 150 / 1048576,    // n = 150   (6991 m)   lone massifs and landmark peaks
   platfine: 420 / 1048576,  // n = 420   (2497 m)   tablelands' ragged outlines
   platcoarse: 80 / 1048576, // n = 80    (13107 m)  where tablelands stand
+  platbay: 1748 / 1048576,  // n = 1748  (600 m)    tablelands' (and mesas') bays and spurs
+  platnotch: 6990 / 1048576,// n = 6990  (150 m)    …their notches
+  platwidth: 583 / 1048576, // n = 583   (1799 m)   where a wall is a sheer cliff and where a ramp
+  cragbig: 19661 / 1048576, // n = 19661 (53.3 m)   rock faces' buttresses and gullies
+  crag: 40960 / 1048576,    // n = 40960 (25.6 m)   …their knobs and ribs
+  cragfine: 98304 / 1048576,// n = 98304 (10.7 m)   …their finer octave
+  cragstrata: 17476 / 1048576, // n = 17476 (60.0 m) how the strata tilt and break
   // ---- water ----
   meander: 2497 / 1048576,  // n = 2497  (419.9 m)  river meanders (along a reach)
+  floorwob: 1498 / 1048576, // n = 1498  (700.0 m)  how a valley floor's width wanders (along a reach)
   pond: 4096 / 1048576,     // n = 4096  (256.0 m)  pond lattice
 } as const;
 
@@ -95,15 +106,30 @@ export const GEO = {
   /** The two chain directions (rad) and the bend of the chains (m). */
   rangeDir: [0.45, 1.75],
   rangeWarp: 3200,
+  /** …and bent again, at three finer scales (F.peaks, F.floorwob, F.tower) by up to these (m): a crest between the 9 km bends ran straight for kilometres. */
+  rangeBend: [380, 130, 45],
   rangeH: 520,
   pass: 0.42,
   /** Massifs: lone mountains and landmark peaks off the ranges (F.massif): band, height (m). */
   massif: [0.8, 0.95],
   massifH: 340,
-  /** Tablelands (F.plateau): edge (noise level), cliff band width (noise units), height (m). */
+  /**
+   * Tablelands (hydro.ts plateauAt): edge (noise level); the wall's narrowest band (noise units) and the width it
+   * may add where it is a ramp; the warp that bends the outline (m: bays and spurs, notches: F.platbay, platnotch;
+   * the outline of a smooth field ran straight for kilometres) and the most it can move the field (noise units: the
+   * warp's reach × the field's steepest slope, so far from the edge the plateau is wholly there or not); height (m).
+   */
   plat: 0.72,
-  platEdge: 0.01,
+  platEdge: 0.018,
+  platRamp: 0.12,
+  platWarp: [210, 60],
+  platBand: 0.07,
   platH: 190,
+  /** Mesas (terrainMath.ts mesasE): the same warp of their outline (m), and how much wider than a sheer face a wall may be (× its band). */
+  mesaWarp: [200, 55],
+  mesaRamp: 3,
+  /** …and how far the mesa region's weight (1 in its heart) lowers the field the tiers stand on where it is less (a smooth region edge was a straight wall of the mesas' full height). */
+  mesaFade: 0.4,
   /** Sea cliffs: their height range where a cliffed coast meets the sea (m). */
   cliffH: [45, 95],
   /** Lake basins: cell (m), chance, radius (m), depth (m). */
@@ -111,6 +137,41 @@ export const GEO = {
   basinP: 0.55,
   basinR: [450, 900],
   basinD: [14, 34],
+} as const;
+
+/**
+ * Karst towers (terrainMath.ts karstTowers). Every tower's outline wanders (`warp`, m) and is an ellipse that may be
+ * longer than wide (`stretch`: the share its long axis' square adds); the flutes down its walls are two octaves of
+ * ridged noise round it (`flute`: how deep, shares of its radius; `rho`: how many round it); its wall rises over `wall`
+ * of its radius (the rest is the crown), with ledges (`ledge`) and a dome (`dome`: the share of its height the rim is under
+ * the summit); the crowns swell by `crown` (share of the height) and are lumpy by `bump` (m); `absent` of the lattice's
+ * cells have none; `reach` the longest reach of an outline (× the radius, squared).
+ */
+export const TOWER = {
+  reach: 2.31,
+  warp: 26,
+  stretch: 0.9,
+  flute: [0.16, 0.07],
+  rho: [2.3, 5.2],
+  wall: 0.7,
+  ledge: 0.5,
+  dome: 0.4,
+  crown: 0.14,
+  bump: 7,
+  absent: 2 / 16,
+} as const;
+
+/**
+ * Crags (terrainMath.ts cragDelta, mesasE): rock faces break into buttresses, knobs, ribs and ledges. `rough`: the three octaves'
+ * depth (m per unit of slope on a face; field units on a mesa's wall), `period`: the strata's thickness (m), `ledge`: how far a ledge
+ * flattens the face (share), `face`: the slope (rise per run) from which ground counts as a rock face, fully so by the second.
+ */
+export const CRAG = {
+  rough: [6.5, 4.0, 1.6],
+  mesa: [0.012, 0.007, 0.003],
+  period: 24,
+  ledge: 0.55,
+  face: [0.7, 1.6],
 } as const;
 
 /** The rivers (hydro.ts): the drainage lattice, incision, widths, meanders, lakes, falls. */
@@ -130,11 +191,19 @@ export const HYDRO = {
    */
   width: [14, 20, 0.9],
   widthMax: 180,
-  widthVary: 0.2,
+  widthVary: 0.3,
   depth: [3.0, 1.0],
   /** Meanders inside the valley floor: amplitude (m) by the floor's flatness, along-reach frequency F.meander. */
+  /** Banks of unequal slope: the one bank's reach beyond the channel's half width, the other's short of it, by up to this share. */
+  bankSkew: 0.25,
+  /** A valley floor's width wanders, widening it by up to this (m) along the reach (nothing at the nodes): walls that run straight for kilometres are not valleys. */
+  floorWobble: 70,
+  /** A wall's run beyond its floor's rim is stretched (by up to these shares either way: three scales, F.floorwob, F.tower and F.platnotch), so the far walls of a valley, whose contours are as smooth as the channel's meanders are not, bend and bay. */
+  wallVary: [0.22, 0.16, 0.10],
+  /** …and shifted sideways, past 40 m from the rim, by noise (F.tower, F.platnotch) of up to this (m): bays and spurs along the walls of a canyon whose floor edges ran in parallel lines. */
+  wallLat: 110,
   meander: 120,
-  meanderMin: 35,
+  meanderMin: 55,
   /** The valley floor beyond the meander belt (m, + per √acc), the floor's rise to its edge (m). */
   floor: [10, 5],
   floorRise: 1.4,
@@ -260,6 +329,8 @@ export const LANDS = {
   /** The continent field (F.cont, F.coast): sea below `level`; the land ramps down over `inland`
    *  (beaches), except along cliffed coasts (F.cliffs above `cliffs`); the shelf deepens to `shelf` m. */
   coast: { level: 0.27, inland: 0.07, cliffs: [0.55, 0.7], shelf: 120, beach: 2.5 },
+  /** Where the regions' fields are read, the plane is shifted by two scales of noise (F.tower, F.platnotch) by up to these (m): a region's edge was a contour of a field kilometres across, as smooth as it. */
+  edge: [170, 56],
   /** Geology (the ranges, tablelands and basins are hydro.ts GEO): rugged country, lake districts, karst, marsh. */
   rugged: [0.7, 0.78],
   lakedist: [0.74, 0.8],
@@ -377,7 +448,6 @@ export const HERO = {
   climbExitSlope: 0.85,   // hysteresis: a climb ends once the wall eases below this
   fallSlope: 2.2,         // ground falling away faster than this per metre → airborne
   slideAccel: 16.0,
-  climbSpeed: 1.6,        // along the surface
   climbJump: 1.4,         // metres surged uphill per climb jump
   climbJumpSpeed: 5.0,
   glideMinHeight: 2.5,    // clearance needed to open the paraglider
@@ -400,6 +470,73 @@ export const HERO = {
   staminaRegenExhausted: 0.25,
   staminaRegenSwim: 0.1,
   staminaRegenDelay: 0.6,
+  apexBand: 1.8,          // |vy| under this at a jump's top…
+  apexGravity: 0.55,      // … falls at this share of gravity (hang time)
+} as const;
+
+/**
+ * Skydiving (locomotion.ts updateHero 'air', rig.ts poseSkydive, camera.ts): a fall from high enough
+ * spreads into a belly-to-earth glide; the sprint key tucks into a head-first nosedive, letting go
+ * (or pulling back) at speed flares. Quadratic drag k = g / Vt² holds each posture's terminal speed;
+ * landing hard rolls on, landing harder squats.
+ */
+export const SKYDIVE = {
+  minAltitude: 8.0,       // m of air under the feet…
+  enterSpeed: 8.5,        // … and falling faster than this: spread into a skydive
+  glideTerminal: 16.5,    // m/s spread-eagle
+  diveTerminal: 42.0,     // m/s nosedive
+  flareTerminal: 8.5,     // m/s while flaring…
+  flareDecel: 52.0,       // … braking no harder than this (m/s², ≈ 2.4 g of the land's 22)
+  flareFrom: 20.0,        // m/s: letting the dive go faster than this flares…
+  flareUntil: 18.0,       // … until slower than this…
+  flareTime: 0.38,        // … or this long (s)
+  diveRate: 8.0,          // the posture eases toward the key at this rate (1/s)
+  glideMaxXZ: 14.5, diveMaxXZ: 2.5,   // m/s across the ground, spread and tucked
+  glideAccelXZ: 22.0, diveAccelXZ: 5.0, // m/s² steering toward that
+  glideTurn: 4.2, diveTurn: 1.5,      // the facing's approach rate to the stick's way, spread and tucked (1/s)
+  liftK: 0.28,            // forward glide from the spread body's pitch: liftK · |vy| · sin 2θ
+  liftMinFall: 6.0,       // m/s of fall before the spread body glides forward
+  landTTI: 0.42,          // s to impact: the body comes upright to land
+  // (the spec's 8 and 22 m/s at 9.81 m/s², as the same drop heights — 3.3 m, 25 m — under the land's 22)
+  rollMin: 12.0,          // m/s impact or more, moving: roll on…
+  squatMin: 33.0,         // … this or more: a heavy squat
+  rollMove: 2.5,          // m/s across the ground (or the stick held) to roll
+  rollTime: 0.55, rollSpeed: 6.8,
+  squatTime: 0.68, squatBrake: 28.0,
+} as const;
+
+/**
+ * Climbing (src/lib/hero/locomotion.ts climbSurface, rig.ts climbGait / poseClimb), one way on
+ * everything climbable: tree trunks (round their profiled cylinder, forest/collision.ts trunkSection),
+ * and the walls of the land, the sky islands' hills and the rocks (round the contour of their solid at
+ * the hips' height), after Tears of the Kingdom and Assassin's Creed III. Speeds in m/s (up and down
+ * along the surface); lengths in m; the gait's step in seconds.
+ */
+export const CLIMB = {
+  upSpeed: 0.95,          // up the surface
+  downSpeed: 1.1,         // down it
+  wrapSpeed: 0.8,         // across it (round a trunk), at the hips (ω = v / (R + clearance))
+  accel: 6.0,             // the climb's speed eases toward the stick's at this rate (≈ 0.4 s to start or stop)
+  wrapMax: 2.44,          // rad/s round a thin pole (140°/s)
+  grab: 0.5,              // pushing within 60° of the trunk's centre grabs it
+  minTop: 2.0,            // shorter trunks (stumps, saplings) are stepped round, not climbed
+  latchSpeed: 14.0,       // faster than this a body glances off a trunk instead of grabbing it
+  latchTime: 0.18,        // a mid-air grab slides down the bark for this long…
+  latchDecel: 18.0,       // … braking at this rate: v² / 2a, held to latchSlip
+  latchSlip: [0.05, 0.5],
+  slideSpeed: 3.8,        // the sneak key (or a dry wheel) slides down the bark
+  leapAway: 0.42,         // a jump with the stick > 65° off the trunk leaps away from it…
+  leapSpeed: 5.5,         // … this fast, the way the stick points…
+  leapUp: 2.4,            // … and up
+  mantleTime: 0.65,       // the vault onto a trunk's top
+  perch: 0.45,            // a trunk's top bears a body this close to its axis
+  // the pelvis' clearance from the bark: hugging a thin pole, held off a wide trunk
+  clearPole: 0.22, clearWide: 0.38, poleR: 0.15, wideR: 0.8,
+  poleWrap: 0.35,         // thinner trunks are hugged: hands round past the sides, feet clamping
+  // the gait (rig.ts): diagonal pairs, a limb steps once this far from its socket (MaxLimbStretch) to `lead`
+  // past it, over stepTime; the swing's arc off the bark and the slip down it at contact
+  handStretch: 0.52, footStretch: 0.56, lead: 0.26, stepTime: 0.28, stepArc: 0.14, slip: 0.018,
+  sway: 0.075, bob: 0.035,
 } as const;
 
 /**
@@ -427,6 +564,14 @@ export const HERO_SHAPE = {
   headReach: 0.46,
   backReach: 0.52,
   gliderReach: 1.3,
+  // the gear (rig.ts heroGear): the sword from its grip to the tip, a club's head, the shield
+  // round its centre, the bow's limbs and the arrow on its string
+  swordLen: 0.95,
+  clubLen: 0.74,
+  gearPad: 0.09,
+  shieldReach: 0.37,
+  bowHalf: 0.6,
+  arrowLen: 0.8,
 } as const;
 
 /** Third-person camera (src/lib/hero/camera.ts). */
@@ -443,6 +588,109 @@ export const HERO_CAMERA = {
   followY: 7.0,
   maxLag: 0.6,            // metres the look-at point may trail the hero
   boomOut: 3.0,           // boom regrowth rate after an obstruction clears
+  aimDistance: 2.5,       // drawing the bow or winding up a throw: over the right shoulder
+  aimShoulder: 0.62,      //   (m to the right of the hero)
+  aimTargetH: 1.68,
+  aimRate: 10.0,          // blend rate into and out of the over-the-shoulder view
+  lockRate: 5.0,          // the orbit turns toward a locked-on foe at this rate
+} as const;
+
+/**
+ * Combat (src/lib/combat/), after Tears of the Kingdom: hearts in quarters; a four-hit sword
+ * combo, a charged spin, jump and dash attacks, sneakstrikes; the shield guards and, raised
+ * just as a blow lands, parries (a Perfect Guard); side hops and backflips that slip a blow
+ * at the last moment open a Flurry Rush; the bow, with bullet time in the air; throwing the
+ * weapon in hand; shield surfing. Times in s, speeds in m/s, damage in hit points.
+ */
+export const COMBAT = {
+  hearts: 5,              // heart containers at the start (4 quarters each)
+  hurtTime: 0.42,         // stagger after taking a blow
+  invulnerable: 0.85,     // no further damage this long after one
+  regenDelay: 9,          // s out of a fight before hearts come back
+  regenRate: 0.6,         // quarters per second then
+  comboWindow: 0.3,       // s after a swing ends in which the next press still chains
+  chargeAfter: 0.3,       // s of attack held (nothing chained) before a spin starts to charge
+  chargeFull: 0.85,       // s to a full charge
+  staminaSpin: 0.22,      // a spin's cost
+  staminaCharge: 0.1,     // per second of charging
+  parryWindow: 0.24,      // s after raising the shield in which a blow is parried
+  parryLockout: 0.3,      // s after a window closes unused before the next can open
+  guardSpeed: 0.5,        // speed factor with the shield up
+  aimSpeed: 0.42,         // speed factor while drawing the bow or winding up a throw
+  drawTime: 0.38,         // s to a full draw
+  nockTime: 0.28,         // s to nock the next arrow
+  arrowSpeed: 55,
+  arrowGravity: 9.0,
+  arrowDamage: 15,
+  arrowLife: 12,          // s an arrow stays stuck where it hit
+  headshot: 2,            // × an arrow's damage on the head (and a stun)
+  bulletTime: 0.25,       // the world's pace while drawing the bow in the air
+  staminaBulletTime: 0.18,
+  throwSpeed: 21,
+  throwGravity: 13,
+  throwDamage: 2,         // × the weapon's damage
+  dodgeWindow: 0.26,      // s into a dodge in which a blow slipped is perfect
+  flurryWait: 1.2,        // s a perfect dodge leaves to start a Flurry Rush (the world slowed)
+  flurrySlow: 0.12,       // the world's pace through the rush
+  flurryHits: 6,
+  dodgeSlow: 0.3,         // the world's pace while a rush can start
+  sideHop: [6.6, 4.4],    // m/s sideways, up
+  backflip: [6.2, 6.0],   // m/s back, up
+  sneakstrike: 8,         // × damage on a foe unaware of the hero, struck while sneaking
+  hitStop: 0.05,          // s the world all but stops on a hit (twice that on a heavy one)
+  surfFriction: 0.03,     // shield surfing: kinetic friction coefficient (it glides a while on the flat)
+  surfDrag: 0.0035,       // quadratic drag (1/m)
+  surfSteer: 2.4,         // rad/s turn at full input
+  surfPush: 4.0,          // m/s: stepping onto the shield from a stand pushes off at this
+  surfMinSpeed: 0.6,      // slower than this on gentle ground: step off the shield
+  surfMaxSpeed: 26,
+  surfJump: 5.8,
+  arrows: 30,             // in the quiver at the start
+  maxArrows: 99,
+  lockRange: 28,          // m: the shield locks onto the foe nearest the view within this
+  sheatheAfter: 7,        // s of peace before the weapons go back onto the back
+  weaponSlots: 8,         // melee weapons carried (the sword among them)
+  shieldSlots: 6,         // shields carried (the Hylian Shield among them)
+  bowSlots: 5,            // bows carried (the Traveler's Bow among them)
+  maxFood: 999,           // of one kind in the pouch
+  startApples: 3,         // in the pouch at the start
+  surfWear: 4,            // s of shield surfing that cost the shield one blow's worth of wear
+  swordReturn: 9,         // s a thrown sword lies before it finds its way back to its sheath
+  // other players (multiplayer, combat/pvp.ts): their blows and shots cost quarter hearts by damage
+  pvpQuarters: 1 / 3,     // quarters per point of damage (the Master Sword's slash: a heart)
+  pvpMax: 12,             // quarters at most from one blow or shot (three hearts)
+  parriedStun: 0.9,       // s dazed when another player's Perfect Guard turns the hero's blow
+} as const;
+
+/**
+ * Foes (src/lib/combat/foes.ts): Bokoblin camps placed by hash, a few to a camp, waking when the
+ * hero comes near. Senses, pacing and the camps' life cycle; each kind's own numbers sit with it.
+ */
+export const FOE = {
+  campCell: 224,          // m: one candidate camp per cell
+  campProbability: 0.32,
+  campRadius: 6,          // m: where its foes stand round the fire
+  wakeRange: 120,         // m: a camp's foes come to life within this of the hero
+  sleepRange: 175,        // … and are put away beyond this
+  respawn: 300,           // s before a cleared camp is manned again
+  max: 12,                // foes awake at once
+  sight: 32,              // m they see the hero in their view cone
+  sightSneak: 13,         // … when it sneaks
+  hearing: 6,             // m they notice it at any angle (twice that while it sprints)
+  cone: 1.2,              // half-angle of the view cone (rad)
+  notice: 0.75,           // s in sight before a foe is roused (2.5 × as long when the hero sneaks)
+  forget: 8,              // s without the hero before a roused foe calms down
+  attackers: 1,           // foes swinging at the hero at once (the others circle, waiting their turn)
+  rest: [1.3, 2.8],       // s a foe waits after its swing before it may swing again
+  keepAway: [2.3, 3.6],   // m a foe waiting its turn keeps round the hero
+  strikeRange: 2.1,       // m at which a foe starts its swing
+  chaseSpeed: 0.82,       // × HERO.runSpeed
+  archerRange: [9, 26],   // m an archer keeps from its target
+  arrowSpeed: 30,
+  arrowDamage: 2,         // quarters of a heart
+  stun: 1.1,              // s a parried or headshot foe is dazed
+  knockdown: 1.5,         // s a foe lies after a heavy blow
+  corpse: 0.9,            // s before a beaten foe vanishes in smoke
 } as const;
 
 export type QualityPreset = {
@@ -517,19 +765,65 @@ export const SKY_REALM = {
   isleCell: 2048,           // m — lone isles between archipelagos, one candidate per cell
   isleProbability: 0.12,
   loneRadius: [80, 280],
-  floor: 1400,              // m — no island reaches lower (the terrain tops out at MAX_WORLD_H)
+  clearance: 150,           // m — every underside's tip at least this far over the highest ground under its island
+  floor: 1400,              // m — the original heights (skyworld/heights.ts): no underside lower (the terrain tops out at MAX_WORLD_H)
   topMax: 2900,             // m
+  lower: 1150,              // m — the low heights (skyworld/heights.ts): every island pulled this far down from its class's (and lone isles') height, as low as the ground under it lets it
   rimDrop: 2.5,             // m — the top rounds down this far at the rim
   outline: [0.07, 0.15],    // radial wobble of an outline
   linkSlope: 0.3,           // steepest arch deck (rise per metre)
 } as const;
 
 /**
+ * The land's model isles (src/lib/skymodels.ts): sky islands baked from models
+ * (scripts/bake-sky-model.py, public/models/), floating over the land in the
+ * WebGPU renderer, one candidate per cell. Ranges are [min, max].
+ */
+export const SKY_MODELS = {
+  names: ['sky-castle', 'sky-rotunda'], // public/models/<name>.bin (and .webp if textured); a cell picks one by hash
+  cell: 6144,               // m — one candidate model isle per cell
+  probability: 0.5,         // so one every ~9 km
+  margin: 1150,             // m — an isle's middle keeps this far inside its cell (the 1.6 km castles at any turn)
+  plaza: [2600, 3000],      // m — its plaza's height (its hanging rock, ~1.25 km with its pendant, clears MAX_WORLD_H)
+  range: 40000,             // m — drawn out to here (the haze has hidden it by then)
+} as const;
+
+/**
+ * The cloud world's ground (src/lib/skyworld/clouds.ts): a sea of cumulus,
+ * heaped domes on a broad swell, all under MAX_WORLD_H (so under every
+ * island's underside, SKY_REALM.floor). Puffs climb the islands and drawn lobes
+ * heap its crests and wreathe the islands (skyworld/puffs.ts). Ranges are [min, max].
+ */
+export const CLOUDS = {
+  base: [880, 980],         // m — the broad swell under the domes
+  domes: [260, 90, 30, 8],  // m — the domes' heights at 1100, 380, 120 and 36 m across
+  ceiling: 1280,            // m — no cloud higher (under MAX_WORLD_H)
+  puffRise: 1.0,            // m — the most a plain puff's top rises over the last
+  puffGap: 2.5,             // m — the widest gap between two puffs' edges
+  springLift: [10, 20],     // m — how high a springy puff throws the hero
+  albedo: [0.46, 0.48, 0.52],      // a little over snow's (biomes.ts SNOW_ALBEDO): any brighter clips to flat white
+} as const;
+
+/**
+ * The portal between the worlds (src/lib/portal.ts): a ring of shrine-stone
+ * blocks (the bottom three left out: the way through), the fade either side
+ * of a trip, and how long after one before the ring takes the hero again.
+ */
+export const PORTAL = {
+  radius: 3.5,              // m — the blocks' circle
+  segments: 12,             // blocks round the full circle
+  centre: 2.3,              // m — the circle's centre over the ground
+  fade: 0.45,               // s — out, and again in
+  cooldown: 2.0,            // s
+} as const;
+
+/**
  * Fly mode's ceiling (m): the WebGL2 ray-march keeps its camera under its
  * early-exit height (MAX_WORLD_H, and draws no sky realm); WebGPU flies up
- * past the sky realm's highest tops, so every island can be reached.
+ * past the sky realm's highest tops and the land's sky castles' spires (SKY_MODELS:
+ * a plaza up to 3 km, a spire 1.15 km over it), so every island can be reached.
  */
-export const FLY_CEILING = { webgl2: 1150, webgpu: SKY_REALM.topMax + 600 } as const;
+export const FLY_CEILING = { webgl2: 1150, webgpu: 4600 } as const;
 
 /**
  * Ruins and shrines (Zonai-style), placed by hash: src/lib/ruins.ts builds
@@ -569,7 +863,7 @@ export const WORKED_EXAMPLE = {
   aimBelowSummit: 25.0,
   yaw: 3.32,
   pitch: 0.01,
-  expectedT: 1968.8,
+  expectedT: 1912.9,
   resY: 540, // half-res render target — the real pixel footprint
 };
 

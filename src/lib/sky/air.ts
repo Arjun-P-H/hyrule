@@ -8,6 +8,7 @@
  * haze by `haze`, adds `mist` to the morning's mist and tints the haze.
  */
 
+import { worldOf } from '../world';
 import { AIR, BIOMES, BIOME_COUNT, BIOME_LABEL } from '../biomes';
 import { LANDS } from '../constants';
 import { landRegions, lastClimate, lastRegions, surfaceAt } from '../terrainMath';
@@ -59,6 +60,7 @@ export function biomeAir(x: number, y: number, z: number, seed: number, out: Bio
  * offshore, the coast in the band where the land ramps down to the sea.
  */
 export function landName(x: number, z: number, seed: number): string {
+  if (worldOf(seed) === 'clouds') return 'The Hollow Sky';
   surfaceAt(x, z, seed, gw);
   const { C } = lastClimate();
   const K = LANDS.coast;

@@ -34,7 +34,8 @@ import { loadShader, WORKTREE, loadTerrainMath } from './lib/revision';
 import { fmt, pairedRatio, summarize } from './lib/stats';
 import { analyzeParity, probeSpecs } from './parity';
 import type { CameraFrame } from './spline';
-import { CAMERA, CHUNK_SIZE, DEFAULT_SEED, type QualityPreset } from '../src/lib/constants';
+import { CAMERA, CHUNK_SIZE, DEFAULT_SEED, SPAWN, type QualityPreset } from '../src/lib/constants';
+import { worldSeed, type World } from '../src/lib/world';
 import type { TerrainVariant } from '../src/lib/gpu/terrainRenderer';
 import { GAME_VARIANT } from '../src/lib/gpu/engineGpu';
 
@@ -44,6 +45,9 @@ import { SPECIES } from '../src/lib/forest/species';
 import { ruinSiteAt } from '../src/lib/ruins';
 import { skyPlantInCell } from '../src/lib/skyworld/flora';
 import { elevation, surfaceAt } from '../src/lib/terrainMath';
+import { rocksNear, type RockCircle } from '../src/lib/rocks/collision';
+import { ROCK_BLOCKING_FROM, ROCK_BUCKETS, ROCK_CAP, ROCK_EXTENT, ROCK_INSTANCE_BYTES, ROCK_MESHES, ROCK_TIERS } from '../src/lib/rocks/tiers';
+import { ROCK_KINDS, ROCK_LODS } from '../src/lib/rocks/models';
 import { PATH_N, SKY } from '../src/lib/sky/celestial';
 
 const ROOT = path.resolve(import.meta.dir, '..');
@@ -111,6 +115,29 @@ const VARIANTS: Record<string, TerrainVariant> = {
   'game-high-nofogall': { ...GAME, sky: 'cycle', renderScale: 0.75, stubAll: ['STUB_FOGALL'] } as TerrainVariant,
   // The sky's blades made afresh every frame (as before the blade cache).
   'game-high-nocache': { ...GAME, sky: 'cycle', renderScale: 0.75, stubAll: ['NO_BLADE_CACHE'] } as TerrainVariant,
+  // The ground's detail textures left out (terrain.wgsl.ts STUB_DETAIL): the ground as it was, for paired timing and stills.
+  'game-high-nodetail': { ...GAME, sky: 'cycle', renderScale: 0.75, stub: { STUB_DETAIL: 1 } } as TerrainVariant,
+  // The rocks left out (the stones, boulders and landmarks the scatter places): their cost.
+  'game-high-norocks': { ...GAME, sky: 'cycle', renderScale: 0.75, rocks: false } as TerrainVariant,
+  'game-med-norocks': { ...GAME_VARIANT, sky: 'cycle', renderScale: 0.5, rocks: false } as TerrainVariant,
+  // Without the hero and the foes (the other work in the same pass: for timing the terrain, its grass, trees and rocks alone).
+  'game-high-nohc': { ...GAME, sky: 'cycle', renderScale: 0.75, skip: ['hero', 'combat'] } as TerrainVariant,
+  'game-high-nohc-nodetail': { ...GAME, sky: 'cycle', renderScale: 0.75, skip: ['hero', 'combat'], stub: { STUB_DETAIL: 1 } } as TerrainVariant,
+  'game-high-nohc-norocks': { ...GAME, sky: 'cycle', renderScale: 0.75, skip: ['hero', 'combat'], rocks: false } as TerrainVariant,
+  'game-high-nohc-detail1': { ...GAME, sky: 'cycle', renderScale: 0.75, skip: ['hero', 'combat'], stub: { DETAIL_LEVEL: 1 } } as TerrainVariant,
+  'game-high-nohc-detail2': { ...GAME, sky: 'cycle', renderScale: 0.75, skip: ['hero', 'combat'], stub: { DETAIL_LEVEL: 2 } } as TerrainVariant,
+  'game-high-nohc-skiprocks': { ...GAME, sky: 'cycle', renderScale: 0.75, skip: ['hero', 'combat', 'rocks'] } as TerrainVariant,
+  'game-high-nohc-dormant': { ...GAME, sky: 'cycle', renderScale: 0.75, skip: ['hero', 'combat'], stub: { DETAIL_DORMANT: 1 } } as TerrainVariant,
+  'game-high-nohc-lite': { ...GAME, sky: 'cycle', renderScale: 0.75, skip: ['hero', 'combat'], rocks: false, stub: { STUB_DETAIL: 1 } } as TerrainVariant,
+  'game-high-nohc-skipgrass': { ...GAME, sky: 'cycle', renderScale: 0.75, skip: ['hero', 'combat', 'grass'] } as TerrainVariant,
+  'game-high-nohc-lite-skipgrass': { ...GAME, sky: 'cycle', renderScale: 0.75, skip: ['hero', 'combat', 'grass'], rocks: false, stub: { STUB_DETAIL: 1 } } as TerrainVariant,
+  // Neither (the ground as it was, but for its colours and its grass), and that without the grass too: what is left of the new code's cost.
+  'game-high-lite': { ...GAME, sky: 'cycle', renderScale: 0.75, rocks: false, stub: { STUB_DETAIL: 1 } } as TerrainVariant,
+  'game-high-lite-skipgrass': { ...GAME, sky: 'cycle', renderScale: 0.75, rocks: false, stub: { STUB_DETAIL: 1 }, skip: ['grass'] } as TerrainVariant,
+  // …and only the turf (1), the turf, soil and sand (2).
+  'game-high-detail1': { ...GAME, sky: 'cycle', renderScale: 0.75, stub: { DETAIL_LEVEL: 1 } } as TerrainVariant,
+  'game-high-detail2': { ...GAME, sky: 'cycle', renderScale: 0.75, stub: { DETAIL_LEVEL: 2 } } as TerrainVariant,
+  'game-med-nodetail': { ...GAME_VARIANT, sky: 'cycle', renderScale: 0.5, stub: { STUB_DETAIL: 1 } } as TerrainVariant,
   'game-high-notreeshadow': { ...GAME, sky: 'cycle', renderScale: 0.75, forest: { ...GAME.forest!, shadowRes: 0 } } as TerrainVariant,
   // The surfaces' colour arithmetic in f32 (TAA in f16 as the game), against f16.
   'game-high-shade32': { ...GAME, sky: 'cycle', renderScale: 0.75, shadeF32: true } as TerrainVariant,
@@ -718,6 +745,79 @@ async function parity(): Promise<void> {
 }
 
 /**
+ * The big rocks' placement: the GPU's instances of the tiers that block (read back after a shot) against the CPU twin
+ * (rocks/collision.ts rocksNear), instance by instance: the GPU's rock must have its circle. (The CPU leaves out a rock
+ * lower than it can stop a body; the GPU draws every one in view, and the CPU's rocks out of view are not asked.)
+ */
+async function rockparity(): Promise<void> {
+  const config = opt('config', 'ground');
+  const framed: CameraFrame[] = JSON.parse(readFileSync(path.join(OUT, '.cache', `framed-${config}.json`), 'utf8'));
+  const frames = (opt('frames', 'all') === 'all' ? framed.map((_, i) => i) : opt('frames', 'all').split(',').map(Number));
+  const gpu = await runWebGPU({ modes: ['shots'], variants: pickVariants('game-high'), frames: framed, shotFrames: frames, rockDump: true, converge: 3 });
+  const seed = DEFAULT_SEED;
+  let total = 0, matched = 0, lowSkipped = 0, missing = 0, worst = 0, seenCpu = 0, invisible = 0;
+  console.log('big rocks, GPU instances vs the CPU twin: frame, instances (tiers that block), matched, low (walked over), missing from the CPU; and the CPU\'s circles in view with no rock drawn');
+  for (const b of gpu.blobs.filter((x) => x.query.kind === 'rocks')) {
+    const f = Number(b.query.frame), argBytes = Number(b.query.argBytes);
+    const buf = b.data.buffer.slice(b.data.byteOffset, b.data.byteOffset + b.data.byteLength);
+    const args = new Uint32Array(buf, 0, argBytes / 4);
+    const inst = new Float32Array(buf, argBytes);
+    const cam = framed[f];
+    const ox = Math.floor(cam.x / CHUNK_SIZE) * CHUNK_SIZE, oz = Math.floor(cam.z / CHUNK_SIZE) * CHUNK_SIZE;
+    let n = 0, m = 0, low = 0, miss = 0;
+    const gpuAt: Array<[number, number]> = [];
+    const stride = ROCK_INSTANCE_BYTES / 4;
+    const minSize = ROCK_TIERS[ROCK_BLOCKING_FROM].size[0] - 1e-3;
+    for (let bk = 0; bk < ROCK_BUCKETS; bk++) {
+      const kind = Math.floor((bk % ROCK_MESHES) / ROCK_LODS);
+      const count = Math.min(args[bk * 4 + 1], ROCK_CAP);
+      for (let k = 0; k < count; k++) {
+        const o = (bk * ROCK_CAP + k) * stride;
+        const size = inst[o + 3];
+        if (size < minSize) continue;
+        n++;
+        const x = inst[o] + ox, z = inst[o + 2] + oz;
+        gpuAt.push([x, z]);
+        const ay = inst[o + 9];
+        const top = (ROCK_EXTENT[kind].top - ROCK_EXTENT[kind].bottom) * size * ay;
+        const near: RockCircle[] = rocksNear(x, z, seed, []);
+        let best = Infinity;
+        for (const c of near) best = Math.min(best, Math.hypot(c.x - x, c.z - z));
+        if (best < 0.05) { m++; worst = Math.max(worst, best); } else if (top < 0.45) low++; else { miss++; if (opt('dump', '')) console.log(`    missing: kind ${ROCK_KINDS[kind]} size ${size.toFixed(2)} at ${x.toFixed(2)} ${z.toFixed(2)} (nearest circle ${best.toFixed(2)} m)`); }
+      }
+    }
+    // (what the GPU drew: instances and triangles over all buckets, the second set the casters)
+    let drawn = 0, tris = 0, casters = 0;
+    for (let bk = 0; bk < ROCK_BUCKETS; bk++) {
+      const count = Math.min(args[bk * 4 + 1], ROCK_CAP);
+      drawn += count; tris += count * (args[bk * 4] / 3);
+      if (bk >= ROCK_MESHES) casters += count;
+    }
+    // (the other way: every circle of the CPU twin in view and near enough to be drawn must have its rock, or the hero is stopped by what is not there)
+    const ty = Math.tan(CAMERA.fov * Math.PI / 360), tx = ty * (W / H);
+    const cp = Math.cos(cam.pitch), sp = Math.sin(cam.pitch);
+    const fwd = [Math.sin(cam.yaw) * cp, sp, Math.cos(cam.yaw) * cp];
+    const rgt = [Math.cos(cam.yaw), 0, -Math.sin(cam.yaw)];
+    const upv = [rgt[1] * fwd[2] - rgt[2] * fwd[1], rgt[2] * fwd[0] - rgt[0] * fwd[2], rgt[0] * fwd[1] - rgt[1] * fwd[0]];
+    const circles = new Map<string, RockCircle>();
+    for (let gx = -100; gx <= 100; gx += 10) for (let gz = -100; gz <= 100; gz += 10) for (const c of rocksNear<RockCircle>(cam.x + gx, cam.z + gz, seed, [])) circles.set(`${c.x.toFixed(3)},${c.z.toFixed(3)}`, c);
+    let cpuInView = 0, inv = 0;
+    for (const c of circles.values()) {
+      const rx = c.x - cam.x, ry = c.y + 0.5 * c.top - cam.y, rz = c.z - cam.z;
+      const vx = rx * rgt[0] + ry * rgt[1] + rz * rgt[2], vy = rx * upv[0] + ry * upv[1] + rz * upv[2], vz = rx * fwd[0] + ry * fwd[1] + rz * fwd[2];
+      const rad = c.r + 2;
+      if (vz < rad || Math.hypot(rx, rz) > 100) continue;
+      if (Math.abs(vx) > 0.8 * tx * vz - rad || Math.abs(vy) > 0.8 * ty * vz - rad) continue;
+      cpuInView++;
+      if (!gpuAt.some(([x, z]) => Math.hypot(x - c.x, z - c.z) < 0.05)) { inv++; if (opt('dump', '')) console.log(`    invisible: circle r ${c.r.toFixed(2)} top ${c.top.toFixed(2)} at ${c.x.toFixed(2)} ${c.z.toFixed(2)}, ${Math.hypot(rx, rz).toFixed(0)} m away`); }
+    }
+    console.log(`  f${String(f).padStart(2)}: ${String(n).padStart(4)} big instances, ${String(m).padStart(4)} matched, ${String(low).padStart(3)} low, ${String(miss).padStart(3)} missing | CPU circles in view ${String(cpuInView).padStart(3)}, none drawn ${String(inv).padStart(2)} | drawn ${drawn} rocks (${casters} cast), ${(tris / 1000).toFixed(0)}k triangles`);
+    total += n; matched += m; lowSkipped += low; missing += miss; seenCpu += cpuInView; invisible += inv;
+  }
+  console.log(`  all: ${total} instances, ${matched} matched (to within ${(worst * 100).toFixed(1)} cm), ${lowSkipped} walked over, ${missing} missing; ${seenCpu} CPU circles in view, ${invisible} with no rock drawn`);
+}
+
+/**
  * The horizons the GPU baked along the sun's path (horizonShader) against a
  * brute-force march of the CPU twin in the same tilted plane: every 1 % of
  * the distance (the GPU steps ~9 %), the land's top found by a damped fixed
@@ -832,18 +932,22 @@ async function shimmer(): Promise<void> {
 }
 
 /**
- * The lands' elevation on the GPU (PROBE_WGSL: worldgen.wgsl.ts elevation) against the CPU twin at
+ * The lands' elevation on the GPU (probeWGSL: worldgen.wgsl.ts elevation) against the CPU twin at
  * every camera of a framed config (default: lands), on a 64 × 64 grid round each (--step=4 m).
+ * --world=clouds probes the cloud world's ground instead, round the stacks near the spawn.
  */
 async function landprobe(): Promise<void> {
-  const config = opt('config', 'lands');
-  const framed: CameraFrame[] = JSON.parse(readFileSync(path.join(OUT, '.cache', `framed-${config}.json`), 'utf8'));
+  const world = opt('world', 'land') as World;
+  const seed = worldSeed(DEFAULT_SEED, world);
   const step = Number(opt('step', '4')), n = 64;
+  const framed: Array<{ frame: number | string; scene: string; x: number; z: number }> = world === 'clouds'
+    ? cloudProbeSpots()
+    : JSON.parse(readFileSync(path.join(OUT, '.cache', `framed-${opt('config', 'lands')}.json`), 'utf8'));
   const probes = framed.map((fr) => {
     const ox = Math.floor(fr.x / CHUNK_SIZE) * CHUNK_SIZE, oz = Math.floor(fr.z / CHUNK_SIZE) * CHUNK_SIZE;
     return { id: `f${fr.frame}-${fr.scene}`, origin: [ox, oz] as [number, number], local0: [fr.x - ox - (n / 2) * step, fr.z - oz - (n / 2) * step] as [number, number], step, w: n, h: n, dp: 1e-4 };
   });
-  const gpu = await runWebGPU({ modes: ['probe'], variants: pickVariants('direct'), probes });
+  const gpu = await runWebGPU({ modes: ['probe'], variants: pickVariants('direct'), probes, probeWorld: world });
   console.log('  probe                        max |E_gpu − E_cpu|   p99      cells > 0.1 m   max |W_gpu − W_cpu| (wet)');
   for (const s of probes) {
     const b = gpu.blobs.find((x) => x.query.kind === 'probe' && x.query.id === s.id);
@@ -855,7 +959,7 @@ async function landprobe(): Promise<void> {
     for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) {
       const k = j * n + i;
       const x = s.origin[0] + s.local0[0] + i * step, z = s.origin[1] + s.local0[1] + j * step;
-      surfaceAt(x, z, DEFAULT_SEED, sw, 1e-4);
+      surfaceAt(x, z, seed, sw, 1e-4);
       d.push(Math.abs(buf[k * 4] - sw[0]));
       if (sw[1] > sw[0] || buf[k * 4 + 3] > buf[k * 4]) dw = Math.max(dw, Math.abs(buf[k * 4 + 3] - sw[1]));
     }
@@ -864,6 +968,13 @@ async function landprobe(): Promise<void> {
   }
 }
 
-const modes: Record<string, () => Promise<void>> = { port, cost, gen, fidelity, hero, aa, stills, parity, horizons, shimmer, taa, landprobe };
+/** The cloud world's probe spots: the spawn and a 5 × 5 grid 600 m apart round it (domes and creases alike). */
+function cloudProbeSpots(): Array<{ frame: string; scene: string; x: number; z: number }> {
+  const out = [{ frame: 'spawn', scene: 'sea', x: SPAWN.x, z: SPAWN.z }];
+  for (let j = -2; j <= 2; j++) for (let i = -2; i <= 2; i++) out.push({ frame: `${i},${j}`, scene: 'sea', x: SPAWN.x + 600 * i + 137, z: SPAWN.z + 600 * j - 91 });
+  return out;
+}
+
+const modes: Record<string, () => Promise<void>> = { port, cost, gen, fidelity, hero, aa, stills, parity, rockparity, horizons, shimmer, taa, landprobe };
 if (!modes[mode]) throw new Error(`unknown mode ${mode}; one of ${Object.keys(modes).join(', ')}`);
 await modes[mode]();

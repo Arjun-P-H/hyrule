@@ -13,7 +13,10 @@
  */
 
 import { HydroBuffer, hydroBufferFor } from './hydroBuffer';
+import { GroundTextures, groundTexturesFor } from './groundTex';
 import { CAMERA, LIGHT, MAX_WORLD_H, RUINS } from '../constants';
+import { CombatGpu } from './combatGpu';
+import { cornersScissor, sphereScissor } from './scissor';
 import { HERO_UNIFORM } from '../hero/rig';
 import { ClipmapCache, type PassTimestamps } from './clipmapCache';
 import { FRAME_BYTES, meshBytes, rasterShader } from './terrain.wgsl';
@@ -26,11 +29,15 @@ import { Motes } from './motes';
 import { LanternMap } from './lanterns';
 import { MAX_RUIN_BOXES, MAX_RUIN_SITES, RUIN_BOX_BYTES, RUIN_SITES_BYTES } from './ruins.wgsl';
 import { ruinSitesNear } from '../ruins';
+import { MAX_PUFFS, PUFF_BYTES, PUFF_VERTS } from './puffs.wgsl';
+import { billowsNear, puffChainsNear, type Puff, type PuffChain } from '../skyworld/puffs';
 import { hash01 } from '../terrainMath';
 import { DEFAULT_DAYS, MAX_REMOTE_HEROES, floatingOrigin, packFrame, type FrameParams, type TerrainRendererLike, type TerrainVariant } from './frame';
 import { boxInView, RING_BLOCK, ringBlockOrder, ringIndices, ringLayout } from './rings';
 import { SCENE_FORMAT, TemporalResolve } from './taa';
 import { Forest } from './forest';
+import { Rocks } from './rocks';
+import { ModelIsles } from './modelIsles';
 import { SkyCycle, type SkyBindings } from './sky';
 import { biomeAir, createBiomeAir } from '../sky/air';
 import { stamped } from './profile';
@@ -47,6 +54,13 @@ const CLASSIC_SUN = (() => {
   return [x / l, y / l, z / l];
 })();
 
+
+/** How far from the camera puffs are drawn (m): past it they are under a pixel or two. */
+const PUFF_RANGE = 1500;
+/** How far the cloud sea's lobes are drawn (m): past it the sea's own domes stand alone. */
+const BILLOW_RANGE = 2000;
+/** How far the islands' banks of cloud are drawn (m): a few lobes each, so far out. */
+const BANK_RANGE = 6000;
 export class RasterTerrainRenderer implements TerrainRendererLike {
   readonly device: GPUDevice;
   readonly format: GPUTextureFormat;
@@ -140,7 +154,10 @@ export class RasterTerrainRenderer implements TerrainRendererLike {
   private motes: Motes | null = null;
   // the lanterns' light round the camera (with the realm)
   private lanterns: LanternMap | null = null;
+  // combat (variant.combat): the foes, what flies and flares
+  private combat: CombatGpu | null = null;
   private seenDistricts = 0;
+  private seenPlants = 0;
   // ruins (variant.ruins): boxes of the sites near the camera, and the site list for the scatters
   private ruinBoxBuf: GPUBuffer | null = null;
   private ruinSitesBuf: GPUBuffer | null = null;
@@ -149,8 +166,20 @@ export class RasterTerrainRenderer implements TerrainRendererLike {
   private ruinBoxCount = 0;
   private ruinPipe: GPURenderPipeline | null = null;
   private ruinsAt: [number, number, number, number, number] = [NaN, NaN, NaN, NaN, NaN];
+  // puffs (variant.puffs): the cloud world's stepping clouds near the camera
+  private puffBuf: GPUBuffer | null = null;
+  private puffData = new ArrayBuffer(MAX_PUFFS * PUFF_BYTES);
+  private puffCount = 0;
+  private puffPipe: GPURenderPipeline | null = null;
+  private puffsAt: [number, number, number, number, number] = [NaN, NaN, NaN, NaN, NaN];
+  private puffChains: PuffChain[] = [];
+  private billows: Puff[] = [];
   // trees (variant.forest): placement cache, culling, draws, shadow map
   private forest: Forest | null = null;
+  // rocks (variant.rocks): the scatter and the draws
+  private rocks: Rocks | null = null;
+  // the land's model isles (variant.modelIsles)
+  private modelIsles: ModelIsles | null = null;
   // the day–night sky (variant.sky = 'cycle'): its LUTs, the frame's light rig and the probe of the sky
   private sky: SkyCycle | null = null;
   // the lands' air round the camera (sky/air.ts), for the day–night sky's haze
@@ -164,7 +193,7 @@ export class RasterTerrainRenderer implements TerrainRendererLike {
     this.format = format;
     this.variant = variant;
     this.rings = clip.levels;
-    this.cache = new ClipmapCache(device, clip, variant.genDpScale, { blend: variant.blend, mode: variant.sky === 'cycle' ? 'path' : 'classic' });
+    this.cache = new ClipmapCache(device, clip, variant.genDpScale, { blend: variant.blend, mode: variant.sky === 'cycle' ? 'path' : 'classic' }, variant.world);
     this.frameBuf = device.createBuffer({ size: FRAME_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.heroBuf = device.createBuffer({ size: HERO_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     for (let k = 0; k < MAX_REMOTE_HEROES; k++) {
@@ -180,9 +209,14 @@ export class RasterTerrainRenderer implements TerrainRendererLike {
     const v = this.variant;
     const grass = v.grass ?? null;
     if (v.forest) this.forest = new Forest(d, v.forest);
+    if (v.rocks) this.rocks = new Rocks(d);
+    if (v.modelIsles) this.modelIsles = new ModelIsles(d);
     const cycle = v.sky === 'cycle';
     if (cycle) this.sky = new SkyCycle(d);
     const skyReady = this.sky?.init();
+    // The ground's textures: painted once per device (the other pipelines are built while it is).
+    const ground = groundTexturesFor(d);
+    const groundReady = ground.init();
     const islands = !!v.islands;
     // Clip distances cut the sky islands' tops along their outlines (without them: discard).
     const clip = d.features.has('clip-distances');
@@ -191,7 +225,9 @@ export class RasterTerrainRenderer implements TerrainRendererLike {
     if (islands) this.fauna = new Fauna(d);
     if (islands) this.motes = new Motes(d);
     if (islands) this.lanterns = new LanternMap(d);
+    if (v.combat) this.combat = new CombatGpu(d);
     const ruins = !!v.ruins;
+    const puffs = !!v.puffs;
     const t0 = performance.now();
     const VFC = GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT | GPUShaderStage.COMPUTE;
     const shared: GPUBindGroupLayoutEntry[] = [
@@ -207,9 +243,13 @@ export class RasterTerrainRenderer implements TerrainRendererLike {
       { binding: 25, visibility: VFC, texture: { sampleType: 'float', viewDimension: '2d-array' } },
       // the ground's biome layers (clipmapCache.ts bioViews): soil + cover, grass + blade, rock + strata
       ...[38, 39, 40].map((binding) => ({ binding, visibility: VFC, texture: { sampleType: 'float' as const, viewDimension: '2d-array' as const } })),
+      // the ground's detail textures (groundTex.ts), read by the surfaces' fragment shaders
+      ...GroundTextures.layoutEntries(),
       ...(this.forest ? Forest.layoutEntries() : []),
       ...(islands ? SkyRealm.layoutEntries() : []),
       ...(islands ? LanternMap.layoutEntries() : []),
+      // the plants of the land's model isles, for the forest's sky layer
+      ...(this.modelIsles && this.forest ? [ModelIsles.plantsLayoutEntry()] : []),
       ...(ruins ? [{ binding: 13, visibility: VFC, buffer: { type: 'uniform' as const } }] : []),
       ...(cycle ? SkyCycle.layoutEntries(SKY_BINDINGS) : []),
       // the rivers' node table (the forest's placement evaluates the land)
@@ -219,12 +259,13 @@ export class RasterTerrainRenderer implements TerrainRendererLike {
     const computeLayout = d.createBindGroupLayout({ entries: shared });
     const renderOnly: GPUBindGroupLayoutEntry[] = [
       ...(ruins ? [{ binding: 12, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' as const } }] : []),
+      ...(puffs ? [{ binding: 30, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' as const } }] : []),
     ];
     const layout = renderOnly.length ? d.createBindGroupLayout({ entries: [...shared, ...renderOnly] }) : computeLayout;
     const pl = d.createPipelineLayout({ bindGroupLayouts: [layout] });
     const f16 = d.features.has('shader-f16') && !v.shadeF32;
-    let code = rasterShader({ n: v.clip.n, levels: v.clip.levels, blend: v.blend, k: v.k, rings: this.rings, grass, islands, clip, ruins, diag: !!v.diag, f16,
-      forest: this.forest ? { spec: this.forest.spec, bounds: this.forest.models.bounds } : null, sky: cycle ? 'cycle' : 'classic' });
+    let code = rasterShader({ n: v.clip.n, levels: v.clip.levels, blend: v.blend, world: v.world, k: v.k, rings: this.rings, grass, islands, clip, ruins, puffs, diag: !!v.diag, f16,
+      forest: this.forest ? { spec: this.forest.spec, bounds: this.forest.models.bounds } : null, sky: cycle ? 'cycle' : 'classic', combat: !!v.combat, rocks: !!v.rocks, modelIsles: !!v.modelIsles });
     if (v.privateTables) code = code.replace(/^const ([A-Za-z_0-9]+): array</gm, 'var<private> $1: array<');
     for (const k of v.stubAll ?? []) code = code.replace(`override ${k}: bool = false;`, `override ${k}: bool = true;`);
     const shaders = d.createShaderModule({ code });
@@ -252,6 +293,10 @@ export class RasterTerrainRenderer implements TerrainRendererLike {
     }) : null;
     const ruinPipeP = ruins ? d.createRenderPipelineAsync({
       layout: pl, vertex: { module: shaders, entryPoint: 'vsRuin' }, fragment: { module: shaders, entryPoint: 'fsRuin', targets: target },
+      primitive: { topology: 'triangle-list', cullMode: 'none' }, depthStencil: depthState(true, 'greater'), multisample,
+    }) : Promise.resolve(null);
+    const puffPipeP = puffs ? d.createRenderPipelineAsync({
+      layout: pl, vertex: { module: shaders, entryPoint: 'vsPuff' }, fragment: { module: shaders, entryPoint: 'fsPuff', targets: target },
       primitive: { topology: 'triangle-list', cullMode: 'none' }, depthStencil: depthState(true, 'greater'), multisample,
     }) : Promise.resolve(null);
     const realmP = this.realm?.init(shaders, computeLayout, layout, target, depthState(true, 'greater'), multisample);
@@ -317,12 +362,17 @@ export class RasterTerrainRenderer implements TerrainRendererLike {
     this.grassFarPipe = grassFarP;
     await realmP;
     this.ruinPipe = await ruinPipeP;
+    this.puffPipe = await puffPipeP;
     this.diagPipe = await diagPipeP;
     await skyReady;
+    await groundReady;
     if (this.forest) await this.forest.init(shaders, computeLayout, layout, this.frameBuf, target, depthState(true, 'greater'), multisample);
     await this.structures?.init(shaders, layout, target, depthState(true, 'greater'), multisample, this.forest?.shadowLayout);
     await this.fauna?.init(shaders, layout, target, depthState(true, 'greater'), multisample);
     await this.motes?.init(shaders, layout, target, depthState(true, 'greater'), multisample);
+    await this.combat?.init(shaders, layout, target, depthState(true, 'greater'), multisample);
+    await this.rocks?.init(shaders, computeLayout, layout, target, depthState(true, 'greater'), multisample, this.forest?.shadowLayout ?? null);
+    await this.modelIsles?.init(shaders, layout, target, depthState(true, 'greater'), multisample, !!this.forest);
     if (ringJobLayout && waterLayout) {
       const k = v.k;
       this.blockOrder = ringBlockOrder(k).order;
@@ -355,6 +405,7 @@ export class RasterTerrainRenderer implements TerrainRendererLike {
       this.ruinBoxBuf = d.createBuffer({ size: MAX_RUIN_BOXES * RUIN_BOX_BYTES, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
       this.ruinSitesBuf = d.createBuffer({ size: RUIN_SITES_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     }
+    if (puffs) this.puffBuf = d.createBuffer({ size: MAX_PUFFS * PUFF_BYTES, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     this.realm?.setFrameBuffer(this.frameBuf);
     this.compileMs = performance.now() - t0;
 
@@ -408,11 +459,14 @@ export class RasterTerrainRenderer implements TerrainRendererLike {
       { binding: 28, resource: this.cache.matView! },
       { binding: 25, resource: this.cache.canopyView! },
       ...this.cache.bioViews.map((v, i) => ({ binding: 38 + i, resource: v })),
+      ...ground.bindEntries(),
       ...(this.ruinSitesBuf ? [{ binding: 13, resource: { buffer: this.ruinSitesBuf } }] : []),
       hydroBufferFor(d).entry(),
+      ...(this.modelIsles && this.forest ? [this.modelIsles.plantsEntry()] : []),
     ];
     const renderEntries: GPUBindGroupEntry[] = [
       ...(this.ruinBoxBuf ? [{ binding: 12, resource: { buffer: this.ruinBoxBuf } }] : []),
+      ...(this.puffBuf ? [{ binding: 30, resource: { buffer: this.puffBuf } }] : []),
     ];
     // Version which = (forest map sampled) + 2 × (sky set sampled) + 4 × (realm map sampled).
     for (let which = 0; which < 8; which++) {
@@ -535,8 +589,10 @@ export class RasterTerrainRenderer implements TerrainRendererLike {
     } else {
       H[99] = 0;
     }
-    packHeroOthers(fp.remotes, H); // (their shadows fall in view even when they don't)
+    // (their shadows fall in view even when they don't; the foes' after the other players')
+    packHeroOthers(fp.remotes, H, fp.combat?.shadows, fp.combat?.nShadows ?? 0);
     this.device.queue.writeBuffer(this.heroBuf, 0, H);
+    this.combat?.setFrame(fp.combat, F, f0 / aspect, f0, W, Hh);
     // Other players: the same, a block each.
     for (let k = 0; k < MAX_REMOTE_HEROES; k++) {
       const src = fp.remotes?.[k];
@@ -571,6 +627,7 @@ export class RasterTerrainRenderer implements TerrainRendererLike {
     }
 
     if (this.ruinBoxBuf) this.uploadRuins(fp, ox, oz);
+    if (this.puffBuf) this.uploadPuffs(fp, ox, oz);
     if (this.sky) this.sky.setFrame(fp.days ?? DEFAULT_DAYS, fp.y, fp.time, biomeAir(fp.x, fp.y, fp.z, fp.seed, this.air));
     // bloom by the hour: lamps, windows and the Thread glow most by night
     if (this.taa) this.taa.bloomStrength = this.sky ? 0.06 + 0.5 * this.sky.rig.night + 0.15 * this.sky.rig.twilight : 0.06;
@@ -578,7 +635,12 @@ export class RasterTerrainRenderer implements TerrainRendererLike {
     // (keyed on the maps the realm has put on the GPU, so the trees are made again once they are there)
     const districts = this.realm?.districts ?? 0;
     if (this.forest && districts !== this.seenDistricts) { this.seenDistricts = districts; this.forest.invalidate(); }
+    // (likewise when the model isles whose plants the forest grows change)
+    const plants = this.modelIsles?.plantsVersion ?? 0;
+    if (this.forest && plants !== this.seenPlants) { this.seenPlants = plants; this.forest.invalidate(); }
     if (this.forest) this.forest.setFrame(fp, this.sky?.rig.key);
+    this.rocks?.setFrame(fp);
+    this.modelIsles?.setFrame(fp, ox, oz);
     if (this.realm) this.realm.setFrame(fp, ox, oz, this.sky?.rig.key ?? CLASSIC_SUN);
     this.structures?.setFrame(fp, ox, oz);
     if (this.structures && this.lanterns) {
@@ -680,6 +742,31 @@ export class RasterTerrainRenderer implements TerrainRendererLike {
     this.ringDirty[r] = true;
   }
 
+  /** The puffs (within PUFF_RANGE) and the stacks' billows (within BILLOW_RANGE) near the camera (re-picked every 50 m), nearest first, chunk-local. */
+  private uploadPuffs(fp: FrameParams, ox: number, oz: number): void {
+    const [lx, lz, ls, lox, loz] = this.puffsAt;
+    if (Math.hypot(fp.x - lx, fp.z - lz) < 50 && ls === fp.seed && lox === ox && loz === oz) return;
+    this.puffsAt = [fp.x, fp.z, fp.seed, ox, oz];
+    const near: Array<{ p: Puff; d: number; billow: boolean }> = [];
+    for (const c of puffChainsNear(fp.x, fp.z, PUFF_RANGE, fp.seed, this.puffChains)) {
+      for (const p of c.puffs) {
+        const d = Math.hypot(p.x - fp.x, p.z - fp.z);
+        if (d < PUFF_RANGE) near.push({ p, d, billow: false });
+      }
+    }
+    for (const p of billowsNear(fp.x, fp.z, BILLOW_RANGE, fp.seed, this.billows, BANK_RANGE)) near.push({ p, d: Math.hypot(p.x - fp.x, p.z - fp.z), billow: true });
+    if (near.length > MAX_PUFFS) near.sort((a, b) => a.d - b.d);
+    const bf = new Float32Array(this.puffData);
+    const n = Math.min(near.length, MAX_PUFFS);
+    for (let k = 0; k < n; k++) {
+      const p = near[k].p, o = k * 8;
+      bf[o] = p.x - ox; bf[o + 1] = p.y; bf[o + 2] = p.z - oz; bf[o + 3] = near[k].billow ? -1 : p.spring;
+      bf[o + 4] = p.rx; bf[o + 5] = p.ry; bf[o + 6] = p.rz; bf[o + 7] = hash01(k, Math.floor(p.x), Math.floor(p.z));
+    }
+    this.puffCount = n;
+    if (n) this.device.queue.writeBuffer(this.puffBuf!, 0, this.puffData, 0, n * PUFF_BYTES);
+  }
+
   /** The ruin sites near the camera (re-picked every 100 m), their boxes chunk-local. */
   private uploadRuins(fp: FrameParams, ox: number, oz: number): void {
     const [lx, lz, ls, lox, loz] = this.ruinsAt;
@@ -722,9 +809,15 @@ export class RasterTerrainRenderer implements TerrainRendererLike {
     // The sky realm's shadow map (its undersides and arches seen from the sun), and its rings' caches.
     this.realm?.encodeShadow(enc);
     this.realm?.encodeRings(enc, this.computeBind);
-    // Trees next: their shadow map is read by the grass scatter and every surface.
+    // The rocks' scatter first (they cast into the trees' shadow map), then the trees: their shadow map is read by the
+    // grass scatter and every surface.
+    this.rocks?.encode(enc, this.computeBind);
     const casters = this.structures && (!this.variant.skip || !this.variant.skip.includes('structures'));
-    this.forest?.encode(enc, this.computeBind, casters ? (sp) => this.structures!.drawShadow(sp) : undefined);
+    const rockCasts = this.rocks && (!this.variant.skip || !this.variant.skip.includes('rocks'));
+    this.forest?.encode(enc, this.computeBind, casters || rockCasts ? (sp) => {
+      if (rockCasts) this.rocks!.drawShadow(sp);
+      if (casters) this.structures!.drawShadow(sp);
+    } : undefined);
     const grass = this.variant.grass;
     if (grass && this.scatterPipe && this.argsBuf && this.scatterBind) {
       enc.clearBuffer(this.argsBuf, 4, 4); // instance counts, near and far
@@ -769,16 +862,25 @@ export class RasterTerrainRenderer implements TerrainRendererLike {
     // The hero next: it writes its own depth from its shader, so whatever lies behind it, drawn after,
     // is hidden before it is shaded (drawn later it would have every tile under it shaded first).
     if (!this.variant.heroLate) this.drawHero(pass, drawn('hero'));
+    // (the foes likewise: traced bodies that write their own depth)
+    if (drawn('combat')) this.combat?.drawFoes(pass);
     pass.setPipeline(this.terrainPipe);
     if (drawn('terrain')) this.drawRings(pass);
     if (this.ruinPipe && this.ruinBoxCount && drawn('ruins')) {
       pass.setPipeline(this.ruinPipe);
       pass.draw(36, this.ruinBoxCount);
     }
+    if (this.puffPipe && this.puffCount && drawn('puffs')) {
+      pass.setPipeline(this.puffPipe);
+      pass.draw(PUFF_VERTS, this.puffCount);
+    }
     if (drawn('realm')) this.realm?.draw(pass);
     if (drawn('structures')) this.structures?.draw(pass);
+    if (drawn('modelIsles')) this.modelIsles?.draw(pass);
     if (drawn('fauna')) this.fauna?.draw(pass);
+    if (drawn('combat')) this.combat?.drawParts(pass);
     if (drawn('forest')) this.forest?.draw(pass);
+    if (drawn('rocks')) this.rocks?.draw(pass);
     if (this.grassPipe && this.grassFarPipe && this.drawBind && this.drawFarBind && this.argsBuf && drawn('grass')) {
       pass.setPipeline(this.grassPipe);
       pass.setBindGroup(1, this.drawBind);
@@ -809,9 +911,15 @@ export class RasterTerrainRenderer implements TerrainRendererLike {
       this.realm?.drawWater(pass);
       this.realm?.drawFalls(pass);
     }
+    if (drawn('modelIsles')) {
+      this.modelIsles?.drawWater(pass);
+      this.modelIsles?.drawFalls(pass);
+    }
     // the Eyries' light and air: the Gyre's Eye, forge smoke, the Thread
     if (drawn('structures')) this.structures?.drawEffects(pass);
     if (drawn('fauna')) this.motes?.draw(pass);
+    // combat's sparks, smoke, trails and flames
+    if (drawn('combat')) this.combat?.drawSprites(pass);
     pass.end();
     if (this.taa) {
       const c = this.cam;
@@ -852,6 +960,11 @@ export class RasterTerrainRenderer implements TerrainRendererLike {
   }
 
   /** Blades the last scatter kept (debug readback; waits for the GPU). */
+  /** The rocks' buckets as of the last frame (debug readback; null without rocks). */
+  async rockDump(): Promise<{ args: Uint32Array; inst: Float32Array } | null> {
+    return this.rocks ? this.rocks.dump() : null;
+  }
+
   async grassCount(): Promise<number> {
     if (!this.argsBuf) return 0;
     const rb = this.device.createBuffer({ size: 32, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
@@ -875,12 +988,13 @@ export class RasterTerrainRenderer implements TerrainRendererLike {
     this.bladeFarBuf?.destroy();
     this.bladeCacheBuf?.destroy();
     this.argsBuf?.destroy();
-    for (const b of [this.ruinBoxBuf, this.ruinSitesBuf]) b?.destroy();
+    for (const b of [this.ruinBoxBuf, this.ruinSitesBuf, this.puffBuf]) b?.destroy();
     this.realm?.destroy();
     this.structures?.destroy();
     this.fauna?.destroy();
     this.motes?.destroy();
     this.lanterns?.destroy();
+    this.combat?.destroy();
     this.meshBuf?.destroy();
     this.fullIdx?.destroy();
     for (const b of this.holeIdx) b.destroy();
@@ -891,6 +1005,8 @@ export class RasterTerrainRenderer implements TerrainRendererLike {
     this.msaaColor?.destroy();
     this.taa?.destroy();
     this.forest?.destroy();
+    this.rocks?.destroy();
+    this.modelIsles?.destroy();
     this.sky?.destroy();
     this.cache.destroy();
   }
@@ -898,55 +1014,11 @@ export class RasterTerrainRenderer implements TerrainRendererLike {
 
 /**
  * The part of framebuffer rectangle `r` ([x, y, w, h], updated in place) the
- * hero's box (packHeroWgsl: min and max corners at HERO_BOX) can cover, from
- * its eight corners projected (sx, sy as for sphereScissor) and a pixel of
- * margin for the TAA's jitter; `r` as it is when a corner reaches the near
- * plane, null when nothing of it is left.
+ * hero's box (packHeroWgsl: min and max corners at HERO_BOX) can cover
+ * (scissor.ts cornersScissor).
  */
 function boxScissor(
   F: Float32Array, H: Float32Array, sx: number, sy: number, w: number, h: number, r: [number, number, number, number],
 ): [number, number, number, number] | null {
-  let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
-  for (let k = 0; k < 8; k++) {
-    const cx = H[HERO_BOX + (k & 1 ? 4 : 0)], cy = H[HERO_BOX + 1 + (k & 2 ? 4 : 0)], cz = H[HERO_BOX + 2 + (k & 4 ? 4 : 0)];
-    const vz = cx * F[8] + cy * F[9] + cz * F[10];
-    if (vz <= CAMERA.near) return r;
-    const px = ((cx * F[0] + cy * F[1] + cz * F[2]) / vz) * sx, py = ((cx * F[4] + cy * F[5] + cz * F[6]) / vz) * sy;
-    if (px < x0) x0 = px; if (px > x1) x1 = px;
-    if (py < y0) y0 = py; if (py > y1) y1 = py;
-  }
-  const px0 = Math.max(r[0], Math.floor((x0 * 0.5 + 0.5) * w) - 1);
-  const px1 = Math.min(r[0] + r[2], Math.ceil((x1 * 0.5 + 0.5) * w) + 1);
-  const py0 = Math.max(r[1], Math.floor((0.5 - y1 * 0.5) * h) - 1);
-  const py1 = Math.min(r[1] + r[3], Math.ceil((0.5 - y0 * 0.5) * h) + 1);
-  if (px1 <= px0 || py1 <= py0) return null;
-  r[0] = px0; r[1] = py0; r[2] = px1 - px0; r[3] = py1 - py0;
-  return r;
-}
-
-/**
- * Framebuffer rectangle [x, y, w, h] covering a camera-relative sphere, from
- * the frame's basis (F[0..2] right, F[4..6] up, F[8..10] forward) and the
- * projection scales sx = f/aspect, sy = f; null when it is off screen, the
- * whole framebuffer when the sphere reaches the near plane.
- */
-function sphereScissor(
-  F: Float32Array, cx: number, cy: number, cz: number, r: number, sx: number, sy: number, w: number, h: number,
-): [number, number, number, number] | null {
-  const vx = cx * F[0] + cy * F[1] + cz * F[2];
-  const vy = cx * F[4] + cy * F[5] + cz * F[6];
-  const vz = cx * F[8] + cy * F[9] + cz * F[10];
-  if (vz + r <= CAMERA.near) return null;
-  if (vz - r <= CAMERA.near) return [0, 0, w, h];
-  // Extremes of X/Z over the view-space box around the sphere (conservative).
-  const x0 = Math.min((vx - r) / (vz - r), (vx - r) / (vz + r)) * sx;
-  const x1 = Math.max((vx + r) / (vz - r), (vx + r) / (vz + r)) * sx;
-  const y0 = Math.min((vy - r) / (vz - r), (vy - r) / (vz + r)) * sy;
-  const y1 = Math.max((vy + r) / (vz - r), (vy + r) / (vz + r)) * sy;
-  const px0 = Math.max(0, Math.floor((x0 * 0.5 + 0.5) * w));
-  const px1 = Math.min(w, Math.ceil((x1 * 0.5 + 0.5) * w));
-  const py0 = Math.max(0, Math.floor((0.5 - y1 * 0.5) * h));
-  const py1 = Math.min(h, Math.ceil((0.5 - y0 * 0.5) * h));
-  if (px1 <= px0 || py1 <= py0) return null;
-  return [px0, py0, px1 - px0, py1 - py0];
+  return cornersScissor(F, H[HERO_BOX], H[HERO_BOX + 1], H[HERO_BOX + 2], H[HERO_BOX + 4], H[HERO_BOX + 5], H[HERO_BOX + 6], sx, sy, w, h, r);
 }

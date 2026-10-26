@@ -574,12 +574,13 @@ fn fogOd(t: f32, rd: vec3f) -> f32 {
 fn surfaceFog(col: vec3f, t: f32, h: f32, rd: vec3f) -> vec3f { return surfaceFogOd(col, t, h, rd, fogOd(t, rd)); }
 fn surfaceFogOd(col: vec3f, t: f32, h: f32, rd: vec3f, od: f32) -> vec3f {
   if (STUB_FOGALL) { return col; }
-  if (od < 0.0005) { return cloudVeil(col, t, h, rd); }
+  // (and over it all the cloud world's warm haze: terrain.wgsl.ts worldHaze)
+  if (od < 0.0005) { return worldHaze(cloudVeil(col, t, h, rd), t, rd); }
   let ins = fogInscatter(rd);
-  if (od > FOG_OPAQUE) { return cloudVeil(ins, t, h, rd); }
+  if (od > FOG_OPAQUE) { return worldHaze(cloudVeil(ins, t, h, rd), t, rd); }
   let T = exp(hv3(-0.58, -0.72, -0.95) * hf(od));
   // (the deck veils the fogged surface as it veils the sky round it)
-  return cloudVeil(vec3f(hv3(col) * T + hv3(ins) * (1.0 - T)), t, h, rd);
+  return worldHaze(cloudVeil(vec3f(hv3(col) * T + hv3(ins) * (1.0 - T)), t, h, rd), t, rd);
 }
 
 // The water's sky: the dome without its discs (the key light's glint stands in).

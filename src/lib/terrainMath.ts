@@ -28,8 +28,10 @@ import {
 } from "./constants";
 import { BI, BIOMES, BIOME_COUNT, LANDFORM, LANDFORM_KEYS, LOOK } from "./biomes";
 import { CRATER_RIM, RF, UP, VOL, continentAt, riverField, upliftAt } from "./hydro";
-import { HYDRO } from "./constants";
+import { CRAG, GEO, HYDRO, TOWER } from "./constants";
 import { erosionDelta } from "./erosion";
+import { cloudSurface } from './skyworld/clouds';
+import { worldOf } from './world';
 import { n01, smoothstep } from "./noise";
 
 export { hashU, hash3, hash01, cellPoint, cellType, quintic, vnoise } from './noise';
@@ -343,7 +345,7 @@ const K_ERO = LANDFORM_KEYS.indexOf('erosion'), K_POND = LANDFORM_KEYS.indexOf('
  * What filtered-out landforms fade to (the WGSL twin reads these): E[(1 − |n|)²] for the value noise
  * (a ridged octave), the karst towers' and the dunes' mean heights (m, per unit of their weight).
  */
-export const LAND_MEANS = { ridge: 0.4466, tower: 21.0, dune: 9.0 } as const;
+export const LAND_MEANS = { ridge: 0.4466, tower: 19.5, dune: 9.0 } as const;
 const RIDGE_MEAN = LAND_MEANS.ridge;
 const TOWER_MEAN = LAND_MEANS.tower;
 const DUNE_MEAN = LAND_MEANS.dune;
@@ -380,11 +382,14 @@ function warpInto(x: number, z: number, seed: number): void {
  * jungle or wetland); volcanoes and sacred groves are laid over whatever was there.
  */
 function regionsInto(x: number, z: number, wx: number, wz: number, seed: number, w: Float64Array): void {
-  const T0 = CLIMATE.tBase + CLIMATE.tAmp * (vnoise(wx * F.temp, wz * F.temp, seed + 1201) + CLIMATE.tFine * vnoise(wx * F.tempfine, wz * F.tempfine, seed + 1202))
+  // (the regions' edges wander: the fields are read in a plane shifted by two scales of noise; the lattices of volcanoes and groves, and the uplift, keep the warped plane)
+  const rx = wx + LANDS.edge[0] * vnoise(wx * F.tower, wz * F.tower, seed + 1211) + LANDS.edge[1] * vnoise(wx * F.platnotch, wz * F.platnotch, seed + 1212);
+  const rz = wz + LANDS.edge[0] * vnoise(wx * F.tower, wz * F.tower, seed + 1213) + LANDS.edge[1] * vnoise(wx * F.platnotch, wz * F.platnotch, seed + 1214);
+  const T0 = CLIMATE.tBase + CLIMATE.tAmp * (vnoise(rx * F.temp, rz * F.temp, seed + 1201) + CLIMATE.tFine * vnoise(rx * F.tempfine, rz * F.tempfine, seed + 1202))
     - CLIMATE.lambdaLat * Math.abs(z);
   const C = UP.C;
   const S = LANDS.coast.level;
-  const M = CLIMATE.mBase + CLIMATE.mNoiseAmp * (vnoise(wx * F.moistr, wz * F.moistr, seed + 1301) + CLIMATE.mFine * vnoise(wx * F.moistfine, wz * F.moistfine, seed + 1302))
+  const M = CLIMATE.mBase + CLIMATE.mNoiseAmp * (vnoise(rx * F.moistr, rz * F.moistr, seed + 1301) + CLIMATE.mFine * vnoise(rx * F.moistfine, rz * F.moistfine, seed + 1302))
     + CLIMATE.mOceanLambda * (1 - smoothstep(S, S + 0.12, C));
   _T0 = T0; _M = M; _C = C; _U = UP.range;
 
@@ -397,10 +402,10 @@ function regionsInto(x: number, z: number, wx: number, wz: number, seed: number,
   const hdry = 1 - smoothstep(LANDS.hotDry[0], LANDS.hotDry[1], M);
   const arid = 1 - smoothstep(LANDS.arid[0], LANDS.arid[1], M);
   const wet = smoothstep(LANDS.wet[0], LANDS.wet[1], M);
-  const bad = smoothstep(LANDS.rugged[0], LANDS.rugged[1], n01(wx, wz, F.rugged, seed + 1501));
-  const lake = smoothstep(LANDS.lakedist[0], LANDS.lakedist[1], n01(wx, wz, F.lakedist, seed + 1601));
-  const karst = smoothstep(LANDS.karst[0], LANDS.karst[1], n01(wx, wz, F.karst, seed + 1701));
-  const marsh = wet * smoothstep(LANDS.marsh[0], LANDS.marsh[1], n01(wx, wz, F.marsh, seed + 1801));
+  const bad = smoothstep(LANDS.rugged[0], LANDS.rugged[1], n01(rx, rz, F.rugged, seed + 1501));
+  const lake = smoothstep(LANDS.lakedist[0], LANDS.lakedist[1], n01(rx, rz, F.lakedist, seed + 1601));
+  const karst = smoothstep(LANDS.karst[0], LANDS.karst[1], n01(rx, rz, F.karst, seed + 1701));
+  const marsh = wet * smoothstep(LANDS.marsh[0], LANDS.marsh[1], n01(rx, rz, F.marsh, seed + 1801));
   w.fill(0);
   // the lowland
   w[BI.tundra] += low * cold;
@@ -522,24 +527,58 @@ export function lastSeaTemperature(): number { return _T0; }
 export function lastMoisture(): number { return _M; }
 
 /* ---- §6/§11 landforms ------------------------------------------------- */
-/** Karst towers: the highest of the steep-sided cones of the 3 × 3 cells of a 300 m lattice round the point (m). */
-function karstTowers(x: number, z: number, seed: number): number {
+/**
+ * Karst towers: the highest of the towers of the 3 × 3 cells of a 300 m lattice round the point (m). A tower is an
+ * ellipse (long across the district's grain, give or take), its outline wandering and its walls fluted into buttresses
+ * and gullies; it rises from a skirt through a ledged wall to a domed, lumpy crown, and some cells have none: a
+ * district of towers is not a grid of cylinders. `x`, `z` the warped plane, `dp` the pixel footprint (the finer
+ * wanderings fade out).
+ */
+export function karstTowers(x: number, z: number, seed: number, dp: number): number {
+  const wW = nyqW(F.towerwarp, dp), wB = nyqW(F.towerbump, dp), wC = nyqW(F.towercrown, dp);
+  const w1 = clamp(2 - dp / 15, 0, 1), w2 = clamp(2 - dp / 7, 0, 1);
+  // (the outline's wander is one displacement of the point, the crown's swell and lumps one value each: all three smooth in the world)
+  const aw = TOWER.warp * wW;
+  const qx = x + aw * vnoise(x * F.towerwarp, z * F.towerwarp, seed + 2311);
+  const qz = z + aw * vnoise(x * F.towerwarp, z * F.towerwarp, seed + 2312);
+  const crown = 1 + TOWER.crown * wC * vnoise(x * F.towercrown, z * F.towercrown, seed + 2313);
+  const bump = wB > 0 ? TOWER.bump * wB * vnoise(x * F.towerbump, z * F.towerbump, seed + 2314) : 0;
   const f = F.tower;
-  const px = x * f, pz = z * f;
+  const px = qx * f, pz = qz * f;
   const ipx = Math.floor(px), ipz = Math.floor(pz);
   let best = 0;
   for (let j = -1; j <= 1; j++) {
     for (let i = -1; i <= 1; i++) {
-      const h = hash3(ipx + i, ipz + j, seed + 2301);
-      const cx = ipx + i + 0.2 + 0.6 * (h & 0xfff) * INV_4095, cz = ipz + j + 0.2 + 0.6 * ((h >>> 12) & 0xfff) * INV_4095;
-      const dx = px - cx, dz = pz - cz;
+      const ci = ipx + i, cj = ipz + j;
+      const h = hash3(ci, cj, seed + 2301);
+      const dx = px - (ci + 0.2 + 0.6 * (h & 0xfff) * INV_4095), dz = pz - (cj + 0.2 + 0.6 * ((h >>> 12) & 0xfff) * INV_4095);
       const r = (75 + 70 * ((h >>> 24) & 15) / 15) * f; // in cells
-      const d2 = dx * dx + dz * dz;
-      if (d2 >= r * r) continue;
-      const q = 1 - Math.sqrt(d2) / r;
-      const H = 50 + 170 * ((h >>> 28) & 15) / 15;
-      const q1 = 1 - q, q2 = q1 * q1;
-      const t = H * (1 - q2 * q1 * Math.sqrt(q1)); // 1 − (1 − q)^3.5: sheer sides, a rounded top
+      if (dx * dx + dz * dz >= TOWER.reach * r * r) continue;
+      // (a second hash: bits 0–5 the long axis' bearing, 6–9 its stretch, 10–15 and 16–21 where on the noise this tower reads, 22–23 its ledges, 24–27 their phase, 28–31 whether it stands)
+      const g = hash3(ci, cj, seed + 2302);
+      if ((g >>> 28) < TOWER.absent * 16) continue;
+      const al = 0.5 + 1.6 * ((g & 63) / 63 - 0.5), ca = Math.cos(al), sa = Math.sin(al);
+      const sq = Math.sqrt(1 + TOWER.stretch * ((g >>> 6) & 15) / 15);
+      const u = (dx * ca + dz * sa) / (r * sq), v = (dz * ca - dx * sa) * sq / r;
+      const q0 = Math.sqrt(u * u + v * v);
+      let q = q0, n1 = 0;
+      if (w1 > 0 && q0 > 0.3) {
+        // (flutes: the noise read round a circle, so they run down the walls and need no seam; the first octave drifts with the height, so gullies wander and join)
+        const cx = u / q0, cz = v / q0, ox = (g >>> 10) & 63, oz = (g >>> 16) & 63;
+        n1 = vnoise(TOWER.rho[0] * cx + ox + 0.9 * q0, TOWER.rho[0] * cz + oz - 0.6 * q0, seed + 2321);
+        let D = TOWER.flute[0] * w1 * (Math.abs(n1) - 0.38);
+        if (w2 > 0) D += TOWER.flute[1] * w2 * (Math.abs(vnoise(TOWER.rho[1] * cx + ox, TOWER.rho[1] * cz + oz, seed + 2322)) - 0.38);
+        q = q0 * (1 + D * smoothstep(0.3, 0.65, q0));
+      }
+      if (q >= 1) continue;
+      const sx = Math.min((1 - q) / TOWER.wall, 1);
+      let y = sx * sx * sx * (sx * (sx * 6 - 15) + 10); // a skirt, then a steep wall, then the crown
+      // (ledges: the strata, tilted round the tower by the flutes' noise; none at the foot)
+      const ns = 5 + 1.5 * ((g >>> 22) & 3);
+      const ph = y * ns + ((g >>> 24) & 15) / 15 + 1.2 * n1, fl = Math.floor(ph);
+      y += TOWER.ledge * (fl + smoothstep(0.3, 0.7, ph - fl) - ph) / ns * smoothstep(0, 0.12, y);
+      const H = (50 + 170 * ((h >>> 28) & 15) / 15) * crown;
+      const t = (H * (1 - TOWER.dome * q * q) + bump) * y;
       if (t > best) best = t;
     }
   }
@@ -558,7 +597,9 @@ export function dunesE(x: number, z: number, seed: number, dp: number): number {
   if (wMain <= 0) return DUNE_MEAN * amp;
   const ang = 0.6 + 0.9 * vnoise(x * F.dunefield, z * F.dunefield, seed + 2401);
   const ca = Math.cos(ang), sa = Math.sin(ang);
-  const u = (x * ca + z * sa) * F.dune + 0.9 * vnoise(x * F.warp, z * F.warp, seed + 2402) + 0.35 * vnoise(x * F.dunebend, z * F.dunebend, seed + 2405);
+  // (the crests' bends at three scales: at one or two, a field's crests ran as parallel lines for a kilometre; the finest fades out where the footprint would alias it)
+  const u = (x * ca + z * sa) * F.dune + 0.9 * vnoise(x * F.warp, z * F.warp, seed + 2402) + 0.55 * vnoise(x * F.dunebend, z * F.dunebend, seed + 2405)
+    + 0.16 * nyqW(F.platnotch, dp) * vnoise(x * F.platnotch, z * F.platnotch, seed + 2406);
   const s = u - Math.floor(u);
   const prof = s < 0.86 ? Math.pow(smoothstep(0, 0.86, s), 1.3) : 1 - smoothstep(0.86, 1.0, s);
   let d = 30 * prof;
@@ -571,12 +612,34 @@ export function dunesE(x: number, z: number, seed: number, dp: number): number {
 }
 
 /** Mesas: three tiers of flat-topped buttes, each a cliff over a talus skirt (m). Cliffs soften as dp grows. */
-function mesasE(wx: number, wz: number, seed: number, dp: number): number {
-  const n = 0.7 * n01(wx, wz, F.mesa, seed + 2501) + 0.3 * n01(wx, wz, F.mesafine, seed + 2502);
-  const cw = Math.max(0.011, 0.0012 * dp);
-  return 80 * (0.82 * smoothstep(0, cw, n - 0.42) + 0.18 * smoothstep(-0.07, 0, n - 0.42))
-    + 70 * (0.82 * smoothstep(0, cw, n - 0.52) + 0.18 * smoothstep(-0.07, 0, n - 0.52))
-    + 60 * (0.82 * smoothstep(0, cw, n - 0.61) + 0.18 * smoothstep(-0.07, 0, n - 0.61));
+function mesasE(wx: number, wz: number, seed: number, dp: number, region0: number): number {
+  // the region's edge wanders (two scales of noise act on its weight where it is part way, none where it is 0 or 1): the walls run along
+  // its contour, which is smooth for kilometres, and now meander a hundred metres or so each way
+  const region = clamp(region0 + 4 * region0 * (1 - region0) * (0.45 * nyqW(F.tower, dp) * vnoise(wx * F.tower, wz * F.tower, seed + 2541)
+    + 0.25 * nyqW(F.platnotch, dp) * vnoise(wx * F.platnotch, wz * F.platnotch, seed + 2542)), 0, 1);
+  // the outline bent (as the tablelands': bays and spurs, notches), the finer scale fading out where the footprint would alias it
+  const kb = clamp(2 - 4 * dp * F.platbay, 0, 1), kn = clamp(2 - 4 * dp * F.platnotch, 0, 1);
+  const A = GEO.mesaWarp[0] * kb, B = GEO.mesaWarp[1] * kn;
+  const mx = wx + A * vnoise(wx * F.platbay, wz * F.platbay, seed + 2511) + B * vnoise(wx * F.platnotch, wz * F.platnotch, seed + 2512);
+  const mz = wz + A * vnoise(wx * F.platbay + 5.3, wz * F.platbay - 2.1, seed + 2513) + B * vnoise(wx * F.platnotch + 3.7, wz * F.platnotch - 9.1, seed + 2514);
+  // (toward the region's edge the field is lowered, so fewer and fewer of its heights reach a tier: buttes out on its fringe,
+  // one plateau in its heart, and no wall along the region's own smooth edge)
+  // (…by an amount that wanders along the edge, so the walls meander a hundred metres or so each way instead of following the region's contour)
+  let n = 0.7 * n01(mx, mz, F.mesa, seed + 2501) + 0.3 * n01(mx, mz, F.mesafine, seed + 2502) - (1 - region) * GEO.mesaFade * (0.6 + 0.8 * n01(wx, wz, F.platbay, seed + 2531));
+  // (the crags: ridged knobs in the field, which only the walls, where the field is steep in height, show)
+  const c0 = nyqW(F.cragbig, dp), c1 = nyqW(F.crag, dp), c2 = nyqW(F.cragfine, dp);
+  if (c0 > 0) { const a = 1 - Math.abs(vnoise(wx * F.cragbig, wz * F.cragbig, seed + 2523)); n += CRAG.mesa[0] * c0 * (a * a - RIDGE_MEAN); }
+  if (c1 > 0) { const a = 1 - Math.abs(vnoise(wx * F.crag, wz * F.crag, seed + 2521)); n += CRAG.mesa[1] * c1 * (a * a - RIDGE_MEAN); }
+  if (c2 > 0) { const a = 1 - Math.abs(vnoise(wx * F.cragfine, wz * F.cragfine, seed + 2522)); n += CRAG.mesa[2] * c2 * (a * a - RIDGE_MEAN); }
+  // the walls: sheer, or a slope where the field says so
+  const ramp = smoothstep(0.45, 0.78, n01(wx, wz, F.platwidth, seed + 2515));
+  // (a wall is at least ~5 texels wide at every level of detail: sharper than that, a grid draws it in rectangular steps; the field's steepest gradient, along a region's edge, is ~0.004 a metre)
+  const cw = Math.max(0.025, 0.02 * dp) * (1 + GEO.mesaRamp * ramp);
+  // (scaled in over the region's first quarter: landDetail calls this only where the region's weight is above 0, and the lowest
+  // apron stood a few tens of metres high where it began, a cliff along the region's whole outer edge)
+  return smoothstep(0, 0.25, region) * (80 * (0.62 * smoothstep(0, cw, n - 0.42) + 0.38 * smoothstep(-0.2, 0, n - 0.42))
+    + 70 * (0.62 * smoothstep(0, cw, n - 0.52) + 0.38 * smoothstep(-0.2, 0, n - 0.52))
+    + 60 * (0.62 * smoothstep(0, cw, n - 0.61) + 0.38 * smoothstep(-0.2, 0, n - 0.61)));
 }
 
 
@@ -658,6 +721,31 @@ const ceilH = (h: number) => (h > CEIL_START ? CEIL_START + CEIL_SPAN * Math.tan
  *     DRY_TABLE under the ground. A volcano's crater and its rivers carry lava.
  */
 /**
+ * The crags (m): where the land falls steeply (`slope`, rise per run, of the land under the gullies) it is a rock face, and
+ * breaks into knobs and ribs (three octaves of ridged noise, deeper on the steeper faces) and into ledges (the strata, flat
+ * benches between risers, by the height `e` of the ground, their phase tilted by a slow noise; each fades out where the
+ * footprint dp would not resolve its thickness along the slope). Nothing where the ground is walkable.
+ */
+function cragDelta(x: number, z: number, e: number, slope: number, seed: number, dp: number): number {
+  const s = smoothstep(CRAG.face[0], CRAG.face[1], slope);
+  if (s <= 0) return 0;
+  const sl = Math.min(slope, 3.2);
+  const w0 = nyqW(F.cragbig, dp), w1 = nyqW(F.crag, dp), w2 = nyqW(F.cragfine, dp);
+  let d = 0;
+  if (w0 > 0) { const a = 1 - Math.abs(vnoise(x * F.cragbig, z * F.cragbig, seed + 5124)); d += CRAG.rough[0] * w0 * (a * a - RIDGE_MEAN); }
+  if (w1 > 0) { const a = 1 - Math.abs(vnoise(x * F.crag, z * F.crag, seed + 5121)); d += CRAG.rough[1] * w1 * (a * a - RIDGE_MEAN); }
+  if (w2 > 0) { const a = 1 - Math.abs(vnoise(x * F.cragfine, z * F.cragfine, seed + 5122)); d += CRAG.rough[2] * w2 * (a * a - RIDGE_MEAN); }
+  const wl = clamp(2 - 2 * dp * sl / CRAG.period, 0, 1);
+  let led = 0;
+  if (wl > 0) {
+    const ph = e / CRAG.period + 1.6 * vnoise(x * F.cragstrata, z * F.cragstrata, seed + 5123);
+    const fl = Math.floor(ph);
+    led = CRAG.ledge * (fl + smoothstep(0.3, 0.7, ph - fl) - ph) * CRAG.period * wl;
+  }
+  return s * (sl * d + led);
+}
+
+/**
  * The regions' detail over the uplift U at world (x, z), warped (wx, wz), before any mask (m): rolling
  * hills, mountain ridges, karst towers, dunes and mesas where their regions rule, and the gullies
  * over them all. `lf` is the blended landform there.
@@ -667,13 +755,15 @@ function landDetail(x: number, z: number, wx: number, wz: number, seed: number, 
   const rs = Math.min(1, 2 * range + 1.6 * massif);
   if (lf[K_RIDGE] > 0) detail += lf[K_RIDGE] * (0.3 + 0.7 * rs) * ridgesAt(wx, wz, seed, dp);
   // (karst, dunes and mesas only where their region rules: a few tiers in a meadow would be cliffs)
-  const kw = smoothstep(0.35, 0.75, lf[K_KARST]), dw = smoothstep(0.35, 0.75, lf[K_DUNE]), mw = smoothstep(0.35, 0.75, lf[K_MESA]);
+  // (karst and mesas rise over the whole of their region's edge, not its middle half: a tower's or a tier's height ruled by a weight that
+  // swung from 0 to 1 over fifty metres was a wall along the edge, as straight as the region's contour)
+  const kw = smoothstep(0.1, 0.9, lf[K_KARST]), dw = smoothstep(0.35, 0.75, lf[K_DUNE]), mw = smoothstep(0.05, 0.95, lf[K_MESA]);
   if (kw > 0.001) {
     const wK = clamp(2 - 2 * dp / 150, 0, 1);
-    detail += kw * (wK > 0 ? wK * karstTowers(wx, wz, seed) + (1 - wK) * TOWER_MEAN : TOWER_MEAN);
+    detail += kw * (wK > 0 ? wK * karstTowers(wx, wz, seed, dp) + (1 - wK) * TOWER_MEAN : TOWER_MEAN);
   }
   if (dw > 0.001) detail += dw * dunesE(x, z, seed, dp);
-  if (mw > 0.001) detail += mw * mesasE(wx, wz, seed, dp);
+  if (mw > 0.001) detail += mesasE(wx, wz, seed, dp, mw);
   if (lf[K_ERO] > 0.01) {
     // (the gullies run down the land itself, its hills and ridges, and are laid out in the world: laid
     // out in the warped plane and down the uplift alone, they ran side by side for kilometres, a comb
@@ -686,7 +776,9 @@ function landDetail(x: number, z: number, wx: number, wz: number, seed: number, 
     // (fade target 0: the filter carves gullies only. A target set by height, +1 on peaks and −1 in
     // valleys, lifted every gentle crest by up to ~150 m but not its steep flanks: walls along the
     // ridges, their tops cut into teeth by the gullies)
-    detail += lf[K_ERO] * erosionDelta(x, z, U + detail, gx, gz, 0, dp);
+    // (the gullies' strength wanders, so their flutes are not evenly spaced for kilometres; the crags break every steep face)
+    detail += lf[K_ERO] * (0.55 + 0.9 * n01(x, z, F.platnotch, seed + 5101)) * erosionDelta(x, z, U + detail, gx, gz, 0, dp);
+    detail += smoothstep(0.05, 0.4, lf[K_ERO]) * cragDelta(x, z, U + detail, Math.hypot(gx, gz), seed, dp);
   }
   return detail;
 }
@@ -708,6 +800,12 @@ const POND_DP = 4;
 const POND_RING = [[1, 0], [-0.5, 0.8660254037844386], [-0.5, -0.8660254037844386]] as const;
 
 function landSurface(x: number, z: number, seed: number, dp: number): void {
+  if (worldOf(seed) === 'clouds') {
+    // the cloud world's ground: dry, still, no shore
+    _e = cloudSurface(x, z, seed, dp); _wt = -1e9; _land = 1;
+    _riverK = 0; _lakeK = 0; _fx = 0; _fz = 0; _speed = 0; _lava = 0; _shore = -Infinity;
+    return;
+  }
   // a pond first (pondAt evaluates the land at the pond's centre, overwriting the scratch)
   pondAt(x, z, seed);
   landCore(x, z, seed, dp, POND.L, POND.d, POND.D);
@@ -882,10 +980,16 @@ function pondAt(x: number, z: number, seed: number): void {
   const h = hash3(ix, iz, seed + 3401);
   const u = (h >>> 24) / 255;
   const R = HYDRO.pondR[0] + (HYDRO.pondR[1] - HYDRO.pondR[0]) * u * u * u;
-  const inset = HYDRO.pondReach * 1.3 * R / cell; // (the lobed reach: pondReach radii of up to 1.3 R)
+  const inset = HYDRO.pondReach * 1.6 * R / cell; // (the lobed and stretched reach: pondReach radii of up to 1.6 R)
   const cx = (ix + inset + (1 - 2 * inset) * (h & 0xfff) / 4095) * cell, cz = (iz + inset + (1 - 2 * inset) * ((h >>> 12) & 0xfff) / 4095) * cell;
   // (a lobed shore: the radius breathes with a noise over the pond's own scale)
-  const d = Math.hypot(x - cx, z - cz) / (R * (1 + 0.3 * vnoise((x - cx) / R * 1.2, (z - cz) / R * 1.2, seed + 3403)));
+  // (…at a place in the noise of its own, and stretched along one axis, as the river lakes' shores: hydro.ts lakeLobe)
+  const qx = (x - cx) / R, qz = (z - cz) / R;
+  const g3 = hash3(ix, iz, seed + 3406), ns = g3 & 0xffff;
+  const dx = x - cx, dz = z - cz, d2 = dx * dx + dz * dz;
+  const pa2 = 2 * Math.PI * (g3 >>> 24) / 255, pe = 0.06 + 0.16 * ((g3 >>> 16) & 255) / 255;
+  const ell = 1 + (d2 > 1e-9 ? pe * ((dx * dx - dz * dz) * Math.cos(pa2) + 2 * dx * dz * Math.sin(pa2)) / d2 : 0);
+  const d = Math.sqrt(d2) / (R * ell * (1 + 0.3 * (0.6 * vnoise(qx * 1.2, qz * 1.2, seed + 3403 + ns) + 0.4 * vnoise(qx * 3.3 + 7.7, qz * 3.3 - 2.9, seed + 3404 + ns))));
   if (d >= HYDRO.pondReach) return;
   if (ix === PCELL.ix && iz === PCELL.iz && seed === PCELL.seed) {
     if (PCELL.L > -Infinity) { POND.L = PCELL.L; POND.d = d; POND.R = R; POND.D = PCELL.D; }

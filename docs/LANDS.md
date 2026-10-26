@@ -47,6 +47,10 @@ breaks off in 45–95 m cliffs where the cliff field is high, over a shelf that 
 - **Geology:** rugged country, lake districts, karst and marsh. Each is a low-frequency field put
   through a smoothstep (`LANDS.*`).
 
+The climate and geology fields are read in a plane shifted by two scales of noise (`LANDS.edge`:
+170 m at 300 m, 56 m at 150 m), so a region's edge, the snow line's included, bays and spurs
+instead of running a smooth curve for kilometres.
+
 A smooth decision tree turns these into weights that sum to 1 (`LANDS.cold/cool/hot`,
 `dry/hotDry/arid/wet`):
 
@@ -89,14 +93,21 @@ dunes thin out into the savanna. `landSurface` builds the height in steps:
 1. **The uplift** U: the geography, warped.
 2. **The detail:**
    - rolling hills and mountain ridges;
-   - karst towers;
-   - dunes (crescent ridges with 240 m spacing, bent and crossed, plus ripples);
-   - mesas (tiers with cliff walls and talus);
+   - karst towers (`TOWER`: elliptical, their outlines wandering, their walls fluted and ledged,
+     their crowns domed and lumpy, a lattice cell now and then without one);
+   - dunes (crescent ridges with 240 m spacing, bent at three scales and crossed, plus ripples);
+   - mesas (tiers with cliff walls and talus; walls at least ~5 texels wide at every level of
+     detail, faded in over their region's first quarter, their edge wandering);
    - gully erosion (`erosion.ts`, MPL-2.0) on hills and mountains: the gullies run down the land's
      own slope (its uplift, hills and ridges, sampled 128 m apart) and are laid out in the world, so
      they branch down each flank instead of lying side by side.
 
-   Karst, mesas and dunes appear only where their region dominates. The detail fades out on
+   - crags (`CRAG`): on every steep face three octaves of ridged noise (53, 26, 11 m) and the
+     strata's ledges (24 m thick) break the smooth wall into buttresses, knobs and benches;
+
+   Karst, mesas and dunes appear only where their region dominates (karst and mesas rise over the
+   whole of their region's edge, not its middle half: a height ruled by a weight that swung from 0
+   to 1 over fifty metres was a wall along the edge). The detail fades out on
    valley floors, in lakes, in the crater and toward the coast. Beside rivers and marshes it may
    only rise: a hollow at their edge would spill the water or leave a river standing over it.
 3. **The valleys:** the land is clamped between the river terraces and the valleys,
@@ -162,6 +173,10 @@ update) writes four layers per lattice point:
 
 The colours come from the region-blended `LOOK` table. The pass is separate because WebGPU's
 default limit is four storage textures per stage.
+
+Their colours are patchy (the bake multiplies the rock's by a noise of tens of metres, warmer and
+cooler, lighter and darker, so a cliff is not one flat tone), and the ground has textures, cover
+(roads, patches, long and short grass) and rocks: [`GROUND.md`](GROUND.md).
 
 The pixel shader's `groundLook` finishes the look:
 - grass over soil by cover and slope;
@@ -256,14 +271,17 @@ tints the in-scatter; the mist's height is measured from the local water.
 
 ## Cost
 
-GPU time per frame at 1600×900 over the 40 `totk` views (every biome from the ground and from the
-air, plus a river, a lake on a river, a lake at a sink, a waterfall, a beach and a cliffed coast, a
-volcano and its crater, a pond and a marsh), fastest of 4 repetitions per view: Medium 1.5–6.6 ms
-(median 2.9), High 2.4–5.5 ms (median 3.8). Single views vary by ±1–2 ms between runs. On the CPU
-one world evaluation takes 7.4 µs, and the rivers' node table ~320 ms the first time and 32 ms per
-re-centre (measured with the machine loaded). The clipmap's streaming costs 0.44 ms a frame walking and 2.2 ms at 200 m/s; a full
-rebuild takes ~200 ms of generation and adds ~385 ms to its frame. The WebGL2 fallback, which
-ray-marches the world per pixel, is much slower.
+GPU time per frame at 1600×900 (High, the hero and the foes left out) over the 40 `totk` views (every
+biome from the ground and from the air, plus a river, a lake on a river, a lake at a sink, a
+waterfall, a beach and a cliffed coast, a volcano and its crater, a pond and a marsh), fastest of 4
+repetitions per view: 2.1–5.9 ms (median 3.9; 1.9–7.1, median 3.5, before the ground's textures,
+rocks and new grass: [`GROUND.md`](GROUND.md) has the costs). Single views vary by ±1–2 ms between
+runs. On the CPU one world evaluation takes 10.9 µs (8.8 before the karst towers, crags, valley
+sides, shores and range bends), and the rivers' node table ~320 ms the first time and 32 ms per
+re-centre (measured with the machine loaded). The clipmap's streaming costs 0.59 ms a frame walking
+(0.45 before) and 3.0 ms at 200 m/s (2.6); a full rebuild takes ~335 ms of generation (258 before the
+land's new terms) and adds ~555 ms to its frame. The WebGL2 fallback, which ray-marches the world per
+pixel, is much slower.
 
 `bun bench/webgpu.ts stills --config=totk --frames=all --variants=game-med,game-high --timing=1
 --noshots=1 --warmup=1 --perframe=1 --res=1600x900 --reps=4`

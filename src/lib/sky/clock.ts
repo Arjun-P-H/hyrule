@@ -89,3 +89,9 @@ export function clockText(hour: number): string {
   const m = Math.floor(hour * 60) % 1440;
   return `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
 }
+
+/** "HH:MM" as the HUD's clock shows it: in steps of five minutes (the time of day the sky has reached, rounded down). */
+export function clockText5(hour: number): string {
+  const m = Math.floor((hour * 60) / 5) * 5 % 1440;
+  return `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+}

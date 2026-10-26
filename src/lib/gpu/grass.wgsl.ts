@@ -117,6 +117,27 @@ fn grassHash(ix: i32, iz: i32, s: i32) -> vec4f {
   return vec4f(h >> vec4u(8u)) * (1.0 / 16777216.0);
 }
 
+// The tuft a point belongs to: the nearest root of a 1 m lattice (global, so the tufts stay put in the world):
+// x the distance to it (cells), y its own random 0 … 1, zw the vector from the point to the root (cells).
+fn tuftAt(g: vec2f, seed: i32) -> vec4f {
+  let ip = floor(g);
+  let fr = g - ip;
+  let i0 = vec2i(ip);
+  var m = 64.0;
+  var dn = vec2f(0.0);
+  var hn = 0u;
+  for (var j = -1; j <= 1; j++) {
+    for (var i = -1; i <= 1; i++) {
+      let h = hash3(i0.x + i, i0.y + j, seed);
+      let o = vec2f(f32(h & 0xfffu), f32((h >> 12u) & 0xfffu)) * INV_4095;
+      let d = vec2f(f32(i), f32(j)) + o - fr;
+      let dd = dot(d, d);
+      if (dd < m) { m = dd; dn = d; hn = h; }
+    }
+  }
+  return vec4f(sqrt(m), f32(hashU(hn ^ 0x68bc21ebu) >> 8u) * (1.0 / 16777216.0), dn);
+}
+
 // Frustum test of a sphere at camera-relative c.
 fn inFrustum(c: vec3f, r: f32) -> bool {
   let v = c * u.basis;
@@ -203,21 +224,37 @@ fn grassScatter(@builtin(global_invocation_id) id: vec3u) {
   if (skyAloft()) { rec = skyBlade(id, ix, iz, xz, hs); }
   let onIsland = skyGrassNear(bitcast<f32>(rec.y), land);
   let e = select(land, bitcast<f32>(rec.y), onIsland);
+  // The cheap tests first: what the camera cannot see, and the gaps between the tufts, are dropped before the
+  // ground's biome layers (a dozen fetches) are read; most candidates are behind the camera or in a gap.
+  let hMax = GRASS_H1 * (1.0 + 0.35 * f32(r));
+  let rel = vec3f(relXZ.x, e - u.camPos.y, relXZ.y);
+  if (!inFrustum(rel + vec3f(0.0, 0.5 * hMax, 0.0), hMax)) { return; }
+  // Tufts (the near rings; out in the far ones the blades are single and the lawn is level): blades gather
+  // round roots with bare ground between, some roots sparse, some tall; they lean away from their root.
+  let tk = 1.0 - smoothstep(1.0, 3.0, f32(r));
+  var tuft = vec4f(1.0, 0.5, 0.0, 0.0);
+  var tuftK = 1.0;
+  if (!onIsland && tk > 0.0) {
+    tuft = tuftAt(xz + u.origin, u.seed + 7211);
+    let tuftRoot = smoothstep(0.78, 0.12, tuft.x) * (0.45 + 1.1 * tuft.y);
+    tuftK = mix(1.0, clamp(2.4 * tuftRoot, 0.0, 1.35), tk);
+    // (the cover is at most 1, so a candidate over this grows nothing whatever the ground is)
+    if (hs.z > grass.params.y * tuftK) { return; }
+  }
   // The ground's biome layers at the root (terrain.wgsl.ts groundCacheAt): its water, cover, grass,
   // blade height and flowers. Reeds (tall blades) stand in the shallows; other grass stays on land.
   var gc: GroundCache;
   if (!onIsland) {
     gc = groundCacheAt(xz);
-    let reeds = gc.bioB.a * BLADE_SCALE > 1.6;
+    // (reeds: tall blades in a wet land: long grass in a meadow is not one, and keeps off the water)
+    let reeds = gc.bioB.a * BLADE_SCALE > 1.6 && gc.mat.y > 0.55;
     if (e < gc.wt - select(-0.05, 0.6, reeds)) { return; }
   }
-  let hMax = GRASS_H1 * (1.0 + 0.35 * f32(r));
-  let rel = vec3f(relXZ.x, e - u.camPos.y, relXZ.y);
-  if (!inFrustum(rel + vec3f(0.0, 0.5 * hMax, 0.0), hMax)) { return; }
 
   var height: f32;
   var packedCol: vec4f;
   var flower = false;
+  var tuftV = vec4f(0.0);
   if (onIsland) {
     let hd = unpack2x16float(rec.w);
     if (hd.x <= 0.0) { return; }
@@ -226,17 +263,24 @@ fn grassScatter(@builtin(global_invocation_id) id: vec3u) {
     flower = packedCol.a > 0.5;
   } else {
     // The biome's grass: its cover broken into meadows, none on steep rock, under snow or on lava.
-    let g = xz + u.origin;
+    tuftV = tuft;
+    // (the most the density can be, level ground, no snow, beach or lava: a candidate over it grows nothing,
+    // and the slope, the snow and the beach, which are dear, are not asked: bare earth, roads, the gaps between tufts)
+    if (hs.z > grassDensityFrom(gc.bioA.a, 0.0, gc.mat.z) * grass.params.y * tuftK) { return; }
     let slope = length(gradientAt(xz, max(RF.z, 0.25), RF.z));
     if (slope > 1.1) { return; }
     let p = vec3f(xz.x, e, xz.y);
-    let dens = grassDensityFrom(gc.bioA.a, slope, gc.mat.z) * (1.0 - snowAt(gc, p, slope)) * (1.0 - beachAt(gc, p, slope)) * select(1.0, 0.0, gc.mat.y < -0.05) * grass.params.y;
+    var dens = grassDensityFrom(gc.bioA.a, slope, gc.mat.z) * (1.0 - snowAt(gc, p, slope)) * (1.0 - beachAt(gc, p, slope)) * select(1.0, 0.0, gc.mat.y < -0.05) * grass.params.y;
+    dens = dens * tuftK;
     if (hs.z > dens) { return; }
     let blade = gc.bioB.a * BLADE_SCALE;
-    height = mix(GRASS_H0, hMax, hs.w) * blade * (0.55 + 0.45 * smoothstep(0.2, 0.9, dens)) * w;
-    // Blade colour: the biome's grass here, varied per blade; a share flowering where the biome blooms.
+    // (a blade is within a third of its tuft's height: the height varies from tuft to tuft, and with the ground's
+    // long and short grass (blade), not blade by blade)
+    let tuftH = mix(1.0, 0.7 + 0.6 * fract(tuft.y * 17.31), tk);
+    height = mix(GRASS_H0, hMax, mix(hs.w, 0.35 + 0.65 * hs.w, tk)) * blade * tuftH * (0.55 + 0.45 * smoothstep(0.2, 0.9, dens)) * w;
+    // Blade colour: the biome's grass here, varied per blade (and by tuft); a share flowering where the biome blooms.
     let vary = fract(hs.x * 7.13 + hs.y * 3.7);
-    var col = clamp(gc.bioB.rgb * gc.bioB.rgb * (0.8 + 0.4 * vary) * (0.85 + 0.3 * fract(hs.y * 5.3)), vec3f(0.0), vec3f(1.0));
+    var col = clamp(gc.bioB.rgb * gc.bioB.rgb * (0.8 + 0.4 * vary) * (0.85 + 0.3 * fract(hs.y * 5.3)) * mix(1.0, 0.88 + 0.24 * tuft.y, tk), vec3f(0.0), vec3f(1.0));
     flower = fract(hs.x * 91.7 + hs.w * 13.3) < gc.mat.w;
     if (flower) {
       let fv = fract(hs.y * 41.3 + hs.z * 7.7);
@@ -254,7 +298,15 @@ fn grassScatter(@builtin(global_invocation_id) id: vec3u) {
   var b: Blade;
   b.p = vec4f(root, height * select(1.0, 1.15, flower));
   b.dir = vec2f(cos(a), sin(a));
-  b.width = GRASS_W0 * exp2(0.8 * f32(r)) * (0.8 + 0.4 * fract(hs.x * 13.1)) * select(1.0, -1.3, flower);
+  var narrow = 1.0;
+  if (!onIsland) {
+    // away from its tuft's root (near rings), and tall grass thin, short grass broad
+    let tk2 = 1.0 - smoothstep(1.0, 3.0, f32(r));
+    let out = -tuftV.zw;
+    b.dir = normalize(mix(b.dir, out / max(length(out), 1e-3), 0.65 * tk2) + vec2f(1e-4, 0.0));
+    narrow = clamp(1.0 / sqrt(max(gc.bioB.a * BLADE_SCALE, 0.25)), 0.7, 1.35);
+  }
+  b.width = GRASS_W0 * exp2(0.8 * f32(r)) * narrow * (0.8 + 0.4 * fract(hs.x * 13.1)) * select(1.0, -1.3, flower);
   b.packed = pack4x8unorm(vec4f(packedCol.rgb, sun));
   if (far) { bladesOutFar[idx] = b; } else { bladesOut[idx] = b; }
 }

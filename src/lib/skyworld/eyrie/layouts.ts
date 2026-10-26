@@ -24,6 +24,7 @@ import type { SkyBiome } from '../biomes';
 import { outlineMax, type IslandKind, type SkyIsland, type Underside } from '../island';
 import type { Arch } from '../arches';
 import { SKY_REALM as S } from '../../constants';
+import { ISLAND_LOWER } from '../heights';
 
 /** What an island is for in its Eyrie's plan (the grammars, eyrie.ts, build by it). */
 export type IslandRole =
@@ -59,7 +60,8 @@ export type LayoutCtx = {
 
 const TAU = Math.PI * 2;
 const lerp = (r: readonly [number, number], f: number) => r[0] + (r[1] - r[0]) * f;
-const classTop = (c: LayoutCtx) => lerp(CLASS_INFO[c.cls].top, c.rnd());
+// (pulled down by the heights in use, heights.ts: makeIsland lifts back any underside its floor would not clear)
+const classTop = (c: LayoutCtx) => lerp(CLASS_INFO[c.cls].top, c.rnd()) - ISLAND_LOWER;
 
 /**
  * A point `gap` m of open sky beyond island isl toward bearing phi, for an island of radius r (both

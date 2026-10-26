@@ -1522,6 +1522,53 @@ pass: `docs/TOTK_TERRAIN.md`, items 19–25.
 
 **Tests:** 279 pass.
 
+### Conifers: feathered boughs cut out of a painted spray, in place of cone skirts
+
+The pine was seven stacked cone skirts under a tuft shader: tiers of round scales, a trunk hidden to
+the knee, nothing like a spruce. The aim, from reference pictures of Tears of the Kingdom's conifers
+and of a spruce model (a tall bare trunk, whorls of separate boughs that rise from it and droop at the
+tip, their edges ragged with needles, a conical crown with sky between its layers, a thin spire, snow
+lying along the boughs' tops), was that look in a painted, soft style: a first version with geometric
+teeth on opaque sheets and stripes in the shader read as toon, and the boughs' feathering and the
+trunk's bark are now texture. Same species and placement.
+
+- **Skeleton** (`pine` in `models.ts`): a straight trunk, leaning and bowing a little, its foot swelling
+  into roots, bare for the lowest 27–32 %; then 14–15 whorls, 5–7 boughs each (fewer and shorter toward
+  the top, staggered by the golden angle so the layers show through each other, the odd bough missing
+  low down), and a spire of six short upright sprigs. A bough is a midrib (`boughPath`): out of the
+  trunk at 10° (up to 42° near the top), bending down by up to 100° along its length. The lowest reach
+  4.4 m (the model is 17 m); the crown narrows to a cone.
+- **The bough** (`fir()` in `leafAtlas.ts`, the 'fir' layer of the leaf atlas, painted at start-up
+  with its mipmaps, ~0.13 s): a rachis, 30 sprigs a side slanting toward the tip, each hung with 22
+  needle clusters that point forward and shorten toward its tip, some missing and the rest of uneven
+  length out toward the edge, over a dark underlayer of needles that shows in the gaps; darker toward
+  the trunk, paler at the tips; texels hold coverage, tone and tilt like the sprays of leaves. Drawn on
+  a sheet 0.55 as wide as long (`BOUGH_ASPECT`), the strokes laid out for that.
+- **The sheet** (`emitBoughs`): a roofed strip along the midrib, 3 to 6 rows near and 2 or 3 in the
+  middle, 16–24 triangles a bough. They are the mesh's *cards* (its second index range), drawn by the
+  cards' two steps (depth cut out, then colour where that depth is equal, so hidden-surface removal
+  holds); `cardCorner` leaves a conifer's sheet where it stands instead of turning it to the camera.
+  Near, the cut is at the texture's edge (a dither over the whole feathering showed as a stipple
+  against snow); far, where a pixel spans more than a texel, it is the dither of the mean coverage.
+  The shadow pass draws these sheets whole (`CONIFER_KINDS`): leaves cut out would be a pass of their
+  own. Far level: one opaque skirt a whorl (at most six tips), its colour the boughs' mean.
+- **Light** (`fsCard`): a bough's normal is the crown's, leaning the sheet's way, bent by each sprig's
+  tilt; its underside is in the shade of the bough above and lit as if half turned up, light coming
+  through the needles (from the ground, undersides are most of what is seen). Snow lies on the
+  sprigs' tops, thinning toward the feathered edge. Leaves went from teal toward a softer, yellower
+  green; the far forest's canopy follows, as it is taken from the same colours.
+- **The trunk** (`bark()` in `forest.wgsl.ts`): warm orange-brown patched redder and browner, dark and
+  grey at the foot, narrow fissures wandering up it, long scales (7 cm × 30 cm, seams faint, each its
+  own tone) with fibres running up them, knots low down, all bumping the normal; darker where the crown
+  shades it (`Skeleton.shade`). The needle tufts and `SpeciesInfo.cluster` are gone with the skirts.
+- **Checked** in headless Chrome against the dev server (a free camera over a grove of pines and a snowy
+  one, at 2.6–800 m, by day and at night) and in the hero's view; `bun test` passes, with a new test of
+  the crown's shape and its outline at every level.
+- **Cost** (uncapped frame rate in the grove, new against HEAD, interleaved, two rounds each, under
+  background GPU load, so ±5 %): 3–7 % slower with the pines in view (212 against 225 fps at 14 m, 228
+  against 246 at 60 m, 230 against 236 from 350 m up). Triangles a pine draws: 204 + 1.7 k cut-out
+  near (the cut-out ones twice, depth then colour), 35 + 0.8 k in the middle, 90 far (was 328 / 135 / 53).
+
 ## Next
 
 - High at 120 fps on this M1 Air: High is at 96–103 fps. What remains, each 4–12 % at High:

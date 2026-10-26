@@ -14,7 +14,8 @@
  * Both are blended (premultiplied) after the opaque world and the water,
  * test depth but do not write it.
  *
- * Needs, from the raster shader: u (Frame), realm (skyRealm.wgsl.ts),
+ * Needs, from the raster shader: u (Frame), SkyFall and fallAt (the falls: the sky realm's, skyRealm.wgsl.ts, or
+ * the land's model isles', modelIsles.wgsl.ts),
  * vnoise, the light API (sky.wgsl.ts), surfaceFog, display, skyShadowAt,
  * project().
  */
@@ -38,7 +39,7 @@ struct FOut {
 
 // Centre of fall k after dropping d metres: out over the lip at its speed, the spray drifting downwind.
 fn fallCentre(k: u32, d: f32) -> vec3f {
-  let F = realm.fall[k];
+  let F = fallAt(k);
   let out = F.b.z * sqrt(2.0 * d / FALL_G);
   let drift = 0.035 * d * d / max(F.b.w, 1.0);
   return vec3f(F.a.x + F.b.x * out + FALL_WIND.x * drift, F.a.y - d, F.a.z + F.b.y * out + FALL_WIND.y * drift);
@@ -48,13 +49,13 @@ fn fallCentre(k: u32, d: f32) -> vec3f {
 fn vsFall(@builtin(vertex_index) vi: u32, @builtin(instance_index) k: u32) -> FOut {
   let seg = vi / 2u;
   let side = f32(vi & 1u) * 2.0 - 1.0;
-  let reach = realm.fall[k].b.w;
+  let reach = fallAt(k).b.w;
   let f = f32(seg) / f32(FALL_SEGS);
   let d = reach * f * f; // denser near the lip, where the arc bends
   let c = fallCentre(k, d);
   let toCam = u.camPos - c;
   let right = normalize(vec3f(toCam.z, 0.0, -toCam.x) + vec3f(1e-4, 0.0, 0.0));
-  let w = realm.fall[k].a.w * (1.0 + 1.6 * sqrt(d / reach));
+  let w = fallAt(k).a.w * (1.0 + 1.6 * sqrt(d / reach));
   let p = c + right * (side * 0.5 * w);
   var o: FOut;
   o.rel = p - u.camPos;
@@ -68,7 +69,7 @@ fn vsFall(@builtin(vertex_index) vi: u32, @builtin(instance_index) k: u32) -> FO
 fn fsFall(i: FOut) -> @location(0) vec4f {
   let dist = length(i.rel);
   let rd = i.rel / dist;
-  let F = realm.fall[i.k];
+  let F = fallAt(i.k);
   let sd = F.c.x;
   let across = i.uv.x;
   let d = i.uv.y;
@@ -111,7 +112,7 @@ fn vsMist(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> M
   let q = corners[vi];
   let k = ii / ${MIST_PER_FALL}u;
   let m = ii % ${MIST_PER_FALL}u;
-  let F = realm.fall[k];
+  let F = fallAt(k);
   let reach = F.b.w;
   let fm = f32(m);
   let d = reach * (0.35 + 0.22 * fm);

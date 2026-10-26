@@ -15,7 +15,7 @@
 
 import { hydroBufferFor } from '../../src/lib/gpu/hydroBuffer';
 import { createTerrainRenderer, type FrameParams, type PassTimestamps, type TerrainRendererLike, type TerrainVariant } from '../../src/lib/gpu/terrainRenderer';
-import { PROBE_BYTES, PROBE_WGSL } from '../../src/lib/gpu/terrain.wgsl';
+import { PROBE_BYTES, probeWGSL } from '../../src/lib/gpu/terrain.wgsl';
 import { setPassStamp } from '../../src/lib/gpu/profile';
 
 type Frame = { x: number; y: number; z: number; yaw: number; pitch: number; hero?: number[]; heroF32?: Float32Array };
@@ -41,6 +41,8 @@ type Config = {
   /** Frames rendered at the same camera and time before each shot (TAA history converges). */
   converge?: number;
   probes: Probe[];
+  /** The world the probes read (default: the land). */
+  probeWorld?: 'land' | 'clouds';
   gen: { starts: number[]; rebuilds: number; cases: GenCase[] };
   /** Camera sequence rendered back to back at 60 Hz time steps (temporal stability). */
   seq?: Frame[];
@@ -48,6 +50,7 @@ type Config = {
   seqFreeze?: boolean;
   /** With each shot, post the forest's placement window (kind=forest blobs). */
   forestDump?: boolean;
+  rockDump?: boolean;
   /** Day–night variants: shots at each of these hours (named variant@hour), timing at `hour`, on game day `day`. */
   hours?: number[];
   hour?: number;
@@ -305,6 +308,14 @@ async function main(): Promise<void> {
             const fs = (x.r as { forestSlots?: () => Promise<{ side: number; data: ArrayBuffer } | null> }).forestSlots;
             const dump = cfg.forestDump && fs ? await fs.call(x.r) : null;
             if (dump) await post(`/blob?kind=forest&variant=${encodeURIComponent(x.name)}&frame=${f}&side=${dump.side}`, new Uint8Array(dump.data));
+            const rk = (x.r as { rockDump?: () => Promise<{ args: Uint32Array; inst: Float32Array } | null> }).rockDump;
+            const rdump = cfg.rockDump && rk ? await rk.call(x.r) : null;
+            if (rdump) {
+              const bytes = new Uint8Array(rdump.args.byteLength + rdump.inst.byteLength);
+              bytes.set(new Uint8Array(rdump.args.buffer, rdump.args.byteOffset, rdump.args.byteLength), 0);
+              bytes.set(new Uint8Array(rdump.inst.buffer, rdump.inst.byteOffset, rdump.inst.byteLength), rdump.args.byteLength);
+              await post(`/blob?kind=rocks&variant=${encodeURIComponent(x.name)}&frame=${f}&argBytes=${rdump.args.byteLength}`, bytes);
+            }
           }
         }
         buf.destroy();
@@ -314,7 +325,7 @@ async function main(): Promise<void> {
     },
 
     async probe() {
-      const probeModule = device.createShaderModule({ code: PROBE_WGSL });
+      const probeModule = device.createShaderModule({ code: probeWGSL(cfg.probeWorld ?? 'land') });
       const pipe = await device.createComputePipelineAsync({ layout: 'auto', compute: { module: probeModule, entryPoint: 'main' } });
       const ubuf = device.createBuffer({ size: PROBE_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
       const out = [];

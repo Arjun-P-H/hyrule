@@ -1,9 +1,11 @@
 import { describe, it, expect } from 'bun:test';
-import { DEFAULT_SEED, SPAWN } from '../src/lib/constants';
+import { COMBAT, DEFAULT_SEED, SPAWN } from '../src/lib/constants';
 import { CHARACTERS } from '../src/lib/hero/characters';
 import { createHeroState, type HeroState } from '../src/lib/hero/locomotion';
-import { HERO_UNIFORM, J, createHeroRig, packHeroUniforms, updateHeroRig } from '../src/lib/hero/rig';
-import { HERO_BYTES, packHeroOthers, packHeroWgsl } from '../src/lib/gpu/hero.wgsl';
+import { GEAR, HERO_UNIFORM, J, createCombatPose, createHeroRig, packHeroUniforms, updateHeroRig } from '../src/lib/hero/rig';
+import { MOVE } from '../src/lib/combat/moves';
+import { BOW_MODEL, MODEL, SHIELD_MODEL } from '../src/lib/combat/weapons';
+import { HERO_BYTES, HERO_OTHERS, OTHERS, packHeroOthers, packHeroWgsl } from '../src/lib/gpu/hero.wgsl';
 import { RemoteHeroes, SEND_INTERVAL, encodeSnapshot } from '../src/lib/net/remoteHeroes';
 import type { ClockState, NetLink } from '../src/lib/net/link';
 
@@ -21,6 +23,9 @@ function fakeLink(peers: Map<string, number>) {
     peers: () => peers,
     drain: (take) => { for (const [id, at, d] of inbox) take(id, at, d); inbox.length = 0; },
     sendState: () => {},
+    drainCombat: () => {},
+    sendCombat: () => {},
+    peerName: (id) => id,
     takeClock: (): ClockState | null => null,
     sendClock: () => {},
     keepsClock: () => false,
@@ -107,6 +112,87 @@ describe('remote heroes', () => {
     expect(r.pack(SPAWN.x, 0, SPAWN.z, 4).length).toBe(1);
   });
 
+  it('carry the combat pose: a swing is played back with the sword in hand, its progress in between; old snapshots are at peace', () => {
+    const { link, inbox } = fakeLink(new Map([['a', 0], ['b', 1]]));
+    const r = new RemoteHeroes();
+    const s = createHeroState(SPAWN.x, SPAWN.z, 0, DEFAULT_SEED);
+    const pose = { ...createCombatPose(), armed: true, act: 'swing' as const, move: MOVE.slashR, u: 0.2 };
+    inbox.push(['a', 0, encodeSnapshot(s, 0, [], pose)]);
+    inbox.push(['a', 100, encodeSnapshot(s, 100, [], { ...pose, u: 0.45 })]);
+    // a snapshot of an older build: no pose at all
+    inbox.push(['b', 0, encodeSnapshot({ ...s, x: s.x + 3 } as HeroState, 0, []).slice(0, 15)]);
+    for (let t = 0; t <= 170; t += 1000 / 60) r.update(link, t, 1 / 60);
+    const [a, b] = r.pack(SPAWN.x, 0, SPAWN.z, 4);
+    // (halfway between the two snapshots, 120 ms late)
+    const g = HERO_UNIFORM.gear + GEAR.grip;
+    expect(a[g + 3]).toBe(MODEL.sword);
+    const hand = 3 * J.handR;
+    expect(Math.hypot(a[g] - a[hand], a[g + 1] - a[hand + 1], a[g + 2] - a[hand + 2])).toBeLessThan(1e-4);
+    // b: its sword sheathed (the hilt over the shoulder, far from the hand), its shield on the back
+    expect(b[g + 3]).toBe(MODEL.sword);
+    expect(b[HERO_UNIFORM.gear + GEAR.flat + 3]).toBe(1);
+    expect(b[HERO_UNIFORM.gear + GEAR.shield + 3]).toBe(1);
+  });
+
+  it('carry the hero\'s hearts, and are listed for the combat world with the clock they show (older snapshots: all hearts)', () => {
+    const { link, inbox } = fakeLink(new Map([['a', 0], ['b', 1], ['c', 2]]));
+    const r = new RemoteHeroes();
+    const s = createHeroState(SPAWN.x, SPAWN.z, 0, DEFAULT_SEED);
+    inbox.push(['a', 1000, encodeSnapshot(s, 0, [], createCombatPose(), 7.25, 6)]);
+    inbox.push(['b', 1000, encodeSnapshot(s, 0, [], { ...createCombatPose(), act: 'guard' }).slice(0, 25)]); // (with a pose, no hearts)
+    inbox.push(['c', 1000, encodeSnapshot(s, 0, []).slice(0, 15)]);
+    r.update(link, 1200, 1 / 60);
+    const [a, b, c] = ['a', 'b', 'c'].map((id) => r.list().find((p) => p.id === id)!);
+    expect([a.health, a.hearts]).toEqual([7.25, 6]);
+    expect([b.health, b.hearts]).toEqual([COMBAT.hearts * 4, COMBAT.hearts]);
+    expect([c.health, c.hearts]).toEqual([COMBAT.hearts * 4, COMBAT.hearts]);
+    // (the shield up still shows on a pose without hearts)
+    expect(b.pose.act).toBe('guard');
+    // the sender's clock shown: 1000 ms of delivery, 120 of playback
+    expect(a.clock).toBeCloseTo(1200 - 1000 - 120, 6);
+    expect(r.list().length).toBe(3);
+  });
+
+  it('carry the surface a hero climbs, so it is posed hugging the same bark (older snapshots: a flat wall)', () => {
+    const { link, inbox } = fakeLink(new Map([['a', 0], ['b', 1]]));
+    const r = new RemoteHeroes();
+    const s = createHeroState(SPAWN.x, SPAWN.z, 0, DEFAULT_SEED);
+    // (on the bark of a trunk 0.6 m round, its axis 0.6 m ahead, 3 m up a 9 m trunk, a third of the way through a vault)
+    const climbing = { ...s, move: 'climb', climbX: s.x, climbZ: s.z + 0.6, climbR: 0.6, climbTop: s.y + 9, mantle: 0.33 } as HeroState;
+    inbox.push(['a', 0, encodeSnapshot(climbing, 0, [])]);
+    inbox.push(['b', 0, encodeSnapshot(climbing, 0, []).slice(0, 29)]); // (a build before trees were climbed)
+    for (let t = 0; t <= 400; t += 1000 / 60) r.update(link, t, 1 / 60);
+    const [a, b] = ['a', 'b'].map((id) => r.list().find((p) => p.id === id)!);
+    expect([a.body.climbX, a.body.climbZ, a.body.climbR, a.body.climbTop, a.body.mantle])
+      .toEqual([+climbing.climbX.toFixed(3), +climbing.climbZ.toFixed(3), 0.6, +climbing.climbTop.toFixed(3), 0.33]);
+    expect(a.body.move).toBe('climb');
+    expect(a.rig.treeR).toBeCloseTo(0.6, 6);
+    expect(b.body.climbR).toBe(0);
+    expect(b.rig.treeR).toBe(30); // (no surface sent: held as a flat wall)
+    for (const v of [...a.rig.local, ...b.rig.local]) expect(Number.isFinite(v)).toBe(true);
+  });
+
+  it('carry the shield and the bow: their models are played back (older snapshots: the Hylian Shield and the Traveler\'s Bow)', () => {
+    const { link, inbox } = fakeLink(new Map([['a', 0], ['b', 1], ['c', 2]]));
+    const r = new RemoteHeroes();
+    const s = createHeroState(SPAWN.x, SPAWN.z, 0, DEFAULT_SEED);
+    const aiming = { ...createCombatPose(), armed: true, act: 'aim' as const, draw: 0.5, shieldModel: SHIELD_MODEL.lid, bowModel: BOW_MODEL.soldier };
+    inbox.push(['a', 0, encodeSnapshot(s, 0, [], aiming)]);
+    inbox.push(['b', 0, encodeSnapshot(s, 0, [], { ...createCombatPose(), shield: false })]);
+    inbox.push(['c', 0, encodeSnapshot(s, 0, [], createCombatPose()).slice(0, 27)]); // (a build before the models)
+    for (let t = 0; t <= 400; t += 1000 / 60) r.update(link, t, 1 / 60);
+    const [a, b, c] = ['a', 'b', 'c'].map((id) => r.list().find((p) => p.id === id)!);
+    expect([a.pose.shield, a.pose.shieldModel, a.pose.bowModel]).toEqual([true, SHIELD_MODEL.lid, BOW_MODEL.soldier]);
+    expect(b.pose.shield).toBe(false);
+    expect([c.pose.shield, c.pose.shieldModel, c.pose.bowModel]).toEqual([true, SHIELD_MODEL.hylian, BOW_MODEL.traveler]);
+    // packed for the renderer: the models ride in the gear frames' w (the bow only while drawn)
+    const [pa, pb] = r.pack(SPAWN.x, 0, SPAWN.z, 4);
+    expect(pa[HERO_UNIFORM.gear + GEAR.shield + 3]).toBe(SHIELD_MODEL.lid);
+    expect(pa[HERO_UNIFORM.gear + GEAR.bow + 3]).toBe(BOW_MODEL.soldier);
+    expect(pb[HERO_UNIFORM.gear + GEAR.shield + 3]).toBe(0);
+    expect(pb[HERO_UNIFORM.gear + GEAR.bow + 3]).toBe(0);
+  });
+
   it('pack the nearest, at most `max`, each in its dress', () => {
     const peers = new Map(CHARACTERS.map((c) => [`p${c.id}`, c.id] as [string, number]));
     const { link, inbox } = fakeLink(peers);
@@ -116,10 +202,45 @@ describe('remote heroes', () => {
       inbox.push([`p${c.id}`, 0, encodeSnapshot(s, 0, [])]);
     }
     r.update(link, 200, 1 / 60);
-    const out = r.pack(SPAWN.x + 40, 0, SPAWN.z, 3); // nearest: characters 4, 3, 2
+    // (the camera at the ground's height there: distances are in three dimensions, and at height 0 the order of heroes ten metres apart
+    // was the order of their ground's heights, whatever the land at the spawn is)
+    const camY = createHeroState(SPAWN.x + 40, SPAWN.z, 0, DEFAULT_SEED).y;
+    const out = r.pack(SPAWN.x + 40, camY, SPAWN.z, 3); // nearest: characters 4, 3, 2
     expect(out.length).toBe(3);
     const dresses = out.map((p) => [...p.subarray(HERO_UNIFORM.dress, HERO_UNIFORM.dress + 3)].map((v) => v.toFixed(4)).join());
     for (const id of [4, 3, 2]) expect(dresses).toContain(CHARACTERS[id].dress.map((v) => v.toFixed(4)).join());
+  });
+});
+
+describe('remote heroes in two worlds', () => {
+  it('only the players in this world are drawn and fought; one who comes through the portal shows up', () => {
+    const { link, inbox } = fakeLink(new Map([['land', 0], ['sky', 1]]));
+    const r = new RemoteHeroes();
+    const h = createHeroState(SPAWN.x, SPAWN.z, 0, DEFAULT_SEED);
+    let t = 0;
+    const send = (id: string, world: 'land' | 'clouds') => inbox.push([id, t, encodeSnapshot(h, t, [], undefined, undefined, undefined, world)]);
+    send('land', 'land'); send('sky', 'clouds');
+    r.update(link, t, 1 / 60, 'land');
+    expect(r.list().map((p) => p.id)).toEqual(['land']);
+    expect(r.pack(SPAWN.x, 0, SPAWN.z, 4).length).toBe(1);
+    r.update(link, t, 1 / 60, 'clouds');
+    expect(r.list().map((p) => p.id)).toEqual(['sky']);
+    // the sky player comes back through the portal
+    t += SEND_INTERVAL;
+    send('sky', 'land');
+    r.update(link, t, 1 / 60, 'land');
+    expect(r.list().map((p) => p.id).sort()).toEqual(['land', 'sky']);
+  });
+
+  it('a snapshot from an older build (no world in it) is on the land', () => {
+    const { link, inbox } = fakeLink(new Map([['old', 0]]));
+    const r = new RemoteHeroes();
+    const d = encodeSnapshot(createHeroState(SPAWN.x, SPAWN.z, 0, DEFAULT_SEED), 0, []).slice(0, 41);
+    inbox.push(['old', 0, d]);
+    r.update(link, 0, 1 / 60, 'land');
+    expect(r.list().length).toBe(1);
+    r.update(link, 0, 1 / 60, 'clouds');
+    expect(r.list().length).toBe(0);
   });
 });
 
@@ -143,13 +264,14 @@ describe('hero block: dress and other players', () => {
     expect([...plain.subarray(HERO_UNIFORM.dress, HERO_UNIFORM.dress + 3)]).toEqual([...new Float32Array(CHARACTERS[0].dress)]);
   });
 
-  it('lists the other players (pelvis, head, between the ankles) and ends the list', () => {
+  it('lists the other players (pelvis, head, between the ankles), then the foes, and ends the list', () => {
     const block = new Float32Array(HERO_BYTES / 4).fill(7);
     const a = posed(3), b = posed(-3), gone = posed(9);
     gone[HERO_UNIFORM.bound + 3] = 0; // not drawn: skipped
-    packHeroOthers([a, gone, b], block);
+    const foes = new Float32Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    packHeroOthers([a, gone, b], block, foes, 1);
     for (const [k, src] of [[0, a], [1, b]] as const) {
-      const o = 116 + 12 * k;
+      const o = HERO_OTHERS + 12 * k;
       expect(block[o + 3]).toBe(1);
       for (let c = 0; c < 3; c++) {
         expect(block[o + c]).toBeCloseTo(src[3 * J.pelvis + c], 5);
@@ -157,9 +279,13 @@ describe('hero block: dress and other players', () => {
         expect(block[o + 8 + c]).toBeCloseTo(0.5 * (src[3 * J.ankleL + c] + src[3 * J.ankleR + c]), 5);
       }
     }
-    expect(block[116 + 24 + 3]).toBe(0);
+    // (a foe's body after the players: its pelvis, head and feet as given)
+    expect([...block.subarray(HERO_OTHERS + 24, HERO_OTHERS + 27)]).toEqual([1, 2, 3]);
+    expect([...block.subarray(HERO_OTHERS + 28, HERO_OTHERS + 31)]).toEqual([4, 5, 6]);
+    expect([...block.subarray(HERO_OTHERS + 32, HERO_OTHERS + 35)]).toEqual([7, 8, 9]);
+    expect(block[HERO_OTHERS + 36 + 3]).toBe(0);
     packHeroOthers(null, block);
-    expect(block[116 + 3]).toBe(0);
-    expect(HERO_BYTES / 4).toBe(116 + 48);
+    expect(block[HERO_OTHERS + 3]).toBe(0);
+    expect(HERO_BYTES / 4).toBe(HERO_OTHERS + 12 * OTHERS);
   });
 });

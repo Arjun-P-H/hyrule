@@ -273,7 +273,7 @@ export function bottomAt(isl: SkyIsland, x: number, z: number): number {
   return b;
 }
 
-/** The deepest the underside can reach below the top's base height (m): its tip clears SKY_REALM.floor. */
+/** The deepest the underside can reach below the top's base height (m): its tip clears the ground under it (archipelago.ts floorUnder). */
 export function maxDrop(isl: Pick<SkyIsland, 'R' | 'cliff' | 'depth'> & { lobes?: readonly Lobe[]; tiltX?: number; tiltZ?: number }): number {
   const lobes = isl.lobes ? Math.max(0, ...isl.lobes.map((L) => L.d)) : 0;
   const tilt = (Math.abs(isl.tiltX ?? 0) + Math.abs(isl.tiltZ ?? 0)) * isl.R * 1.2;

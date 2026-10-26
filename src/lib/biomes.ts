@@ -130,6 +130,33 @@ export const LOOK: Record<Biome, Look> = {
 };
 
 /**
+ * How a region's ground is used (the WebGPU bake, terrain.wgsl.ts biomeShader, blends these by the region
+ * weights): the share of the land that dirt roads and footpaths cross, bare patches in the grass, how much
+ * the grass's height varies (long grass in drifts, short lawns round them), and the rocks lying about.
+ * All 0 … 1; the ground's look otherwise is LOOK's.
+ */
+type GroundUse = { trail: number; bare: number; tall: number; rocks: number };
+const GU = (trail: number, bare: number, tall: number, rocks: number): GroundUse => ({ trail, bare, tall, rocks });
+export const GROUND_USE: Record<Biome, GroundUse> = {
+  //                trail bare  tall  rocks
+  plains:     GU(0.9, 0.35, 0.8, 0.25),
+  forest:     GU(0.5, 0.25, 0.35, 0.3),
+  rainforest: GU(0.0, 0.1, 0.2, 0.25),
+  jungle:     GU(0.0, 0.1, 0.25, 0.35),
+  wetland:    GU(0.0, 0.05, 0.5, 0.05),
+  desert:     GU(0.0, 0.0, 0.0, 0.35),
+  badlands:   GU(0.25, 0.0, 0.0, 0.7),
+  savanna:    GU(0.85, 0.35, 0.9, 0.3),
+  volcanic:   GU(0.0, 0.0, 0.0, 0.8),
+  mountains:  GU(0.2, 0.3, 0.3, 1.0),
+  highland:   GU(0.7, 0.4, 0.6, 0.6),
+  tundra:     GU(0.15, 0.3, 0.2, 0.5),
+  taiga:      GU(0.45, 0.25, 0.35, 0.4),
+  sacred:     GU(0.0, 0.0, 0.3, 0.35),
+  lakes:      GU(0.55, 0.2, 0.6, 0.3),
+};
+
+/**
  * Snow's albedo (linear), on every renderer. Lower than fresh snow's (~0.8): the display is exposed
  * for the green lands, and snow much brighter than this sits in the tone curve's shoulder, flat
  * white, its slopes and drifts lost.

@@ -41,6 +41,7 @@ import { CLIMATE } from '../constants';
 import { hash3, landCoarse, lastMoisture, lastRegions, lastSeaTemperature, lastShore, surfaceAt, vnoise } from '../terrainMath';
 import { SKY_FLORA } from '../skyworld/biomes';
 import { CELL, type Species } from './species';
+import { worldOf } from '../world';
 
 export const ZONES = [
   'temperate', 'autumn', 'plains', 'savanna', 'rainforest', 'jungle', 'wetland', 'desert', 'badlands',
@@ -449,6 +450,7 @@ function canopyFrom(x: number, z: number, seed: number, g: CanopyGround): Canopy
 
 /** canopyFrom on the ground at (x, z) as plantInCell sees it (surveys, tests). */
 export function forestCanopy(x: number, z: number, seed: number): Canopy | null {
+  if (worldOf(seed) === 'clouds') return null;
   const ev = (px: number, pz: number, d: number) => surfaceAt(px, pz, seed, _sf, d)[0];
   const e = ev(x, z, 1);
   const slope = Math.hypot(ev(x + 1.5, z, 1) - e, ev(x, z + 1.5, 1) - e) / 1.5;
@@ -461,6 +463,7 @@ export function forestCanopy(x: number, z: number, seed: number): Canopy | null 
 
 /** The dominant zone and the forest body at world (x, z) (surveys, tests); null in the water or above the tree line. */
 export function forestAt(x: number, z: number, seed: number): { zone: Zone; mask: number } | null {
+  if (worldOf(seed) === 'clouds') return null;
   const s = siteAt(x, z, seed, noise01(x, z, PLACE.region.wavelength, seed + PLACE.region.seed), 0);
   return s && { zone: ZONES[s.dom], mask: s.mask };
 }
@@ -471,6 +474,7 @@ export function forestAt(x: number, z: number, seed: number): { zone: Zone; mask
  * its coarse cell's own spot, which falls in exactly one fine cell).
  */
 export function plantInCell(ix: number, iz: number, seed: number, world: PlaceWorld = {}): Plant | null {
+  if (worldOf(seed) === 'clouds') return null; // (no trees on the clouds)
   const h0 = hash3(ix, iz, seed + 7101), h1 = hash3(ix, iz, seed + 7102), h2 = hash3(ix, iz, seed + 7103);
   const jx = 0.08 + 0.84 * u16(h0, 0), jz = 0.08 + 0.84 * u16(h0, 16);
   const keep = u16(h1, 0), pick = u16(h1, 16);

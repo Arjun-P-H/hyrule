@@ -12,9 +12,11 @@
  * Every box of a site shares its yaw.
  */
 
-import { RUINS } from './constants';
+import { PORTAL, RUINS } from './constants';
 import { elevation, hash01, waterLevel } from './terrainMath';
 import { islandAt } from './skyworld/realm';
+import { portalOf } from './portal';
+import { userSeed, worldOf, type World } from './world';
 import { islandRho, nearWater, topAt } from './skyworld/island';
 
 /** Materials: weathered stone, mossy stone, shrine stone (glowing lines). */
@@ -55,6 +57,7 @@ function buildSite(ix: number, iz: number, seed: number): RuinSite | null {
   // Ground: a sky island's top when the site is well inside one (and clear of its water), else the terrain.
   const isl = islandAt(x, z, seed);
   if (isl && (isl.kind === 'debris' || islandRho(isl, x, z) >= 0.6 || nearWater(isl, x, z, 30))) return null;
+  if (!isl && worldOf(seed) === 'clouds') return null; // (no ground ruins on the clouds)
   const onIsland = !!isl;
   const ground = (px: number, pz: number) => (onIsland ? topAt(isl!, px, pz) : elevation(px, pz, seed, 0));
   const corners = [at(-w / 2, -d / 2), at(w / 2, -d / 2), at(-w / 2, d / 2), at(w / 2, d / 2), at(0, 0)];
@@ -112,6 +115,39 @@ function buildSite(ix: number, iz: number, seed: number): RuinSite | null {
   return { x, z, radius: Math.hypot(w, d) / 2 + 2, top, shrine, boxes };
 }
 
+/**
+ * The portal's ring in `world` (portal.ts) for the user's `seed`, as a ruin site: blocks of shrine stone
+ * round a circle standing across the way through, the bottom three left out (the opening), so the ring
+ * is drawn, walked round and kept clear of trees and grass as the ruins are.
+ */
+export function portalSite(world: World, seed: number): RuinSite {
+  const key = `${world}${seed}`;
+  let site = portals.get(key);
+  if (site) return site;
+  const p = portalOf(world, seed);
+  const R = PORTAL.radius, cs = Math.cos(p.yaw), sn = Math.sin(p.yaw);
+  const boxes: RuinBox[] = [];
+  for (let k = 0; k < PORTAL.segments; k++) {
+    const a = (k / PORTAL.segments) * 2 * Math.PI, u = R * Math.cos(a), h = R * Math.sin(a);
+    if (h < -0.7 * R) continue; // (the way through)
+    boxes.push({ x: p.x + cs * u, y: p.y + PORTAL.centre + h, z: p.z - sn * u, hx: 0.55, hy: 0.55, hz: 0.45, yaw: p.yaw, material: 2 });
+  }
+  site = { x: p.x, z: p.z, radius: R + 1.5, top: p.y, shrine: true, boxes };
+  if (portals.size >= 8) portals.clear();
+  portals.set(key, site);
+  return site;
+}
+const portals = new Map<string, RuinSite>();
+/**
+ * The ring of the world a generator's seed belongs to (the last one kept: the hero asks every tick); none
+ * on the land while the cloud world is inactive (reached only by the settings' switch).
+ */
+let ringSeed = NaN, ringLast: RuinSite | null = null;
+function ringOf(seed: number): RuinSite | null {
+  if (seed !== ringSeed) { ringLast = worldOf(seed) === 'clouds' ? portalSite('clouds', userSeed(seed)) : null; ringSeed = seed; }
+  return ringLast;
+}
+
 // Sites are pure functions of (cell, seed); recent ones are kept in a
 // direct-mapped cache (no allocation on a hit: the hero asks every tick).
 type Slot = { ix: number; iz: number; seed: number; site: RuinSite | null };
@@ -138,12 +174,16 @@ export function ruinSitesNear(x: number, z: number, range: number, seed: number,
       if (d <= range) out.push({ s, d });
     }
   }
+  const ring = ringOf(seed);
+  if (ring && Math.hypot(ring.x - x, ring.z - z) <= range) out.push({ s: ring, d: Math.hypot(ring.x - x, ring.z - z) });
   out.sort((a, b) => a.d - b.d);
   return out.slice(0, max).map((o) => o.s);
 }
 
 /** The site whose footprint may touch (x, z) (a site never leaves the middle half of its cell). */
 export function ruinSiteAt(x: number, z: number, seed: number): RuinSite | null {
+  const ring = ringOf(seed);
+  if (ring && Math.hypot(x - ring.x, z - ring.z) <= ring.radius + 1) return ring;
   const s = siteInCell(Math.floor(x / RUINS.cell), Math.floor(z / RUINS.cell), seed);
   return s && Math.hypot(x - s.x, z - s.z) <= s.radius + 1 ? s : null;
 }

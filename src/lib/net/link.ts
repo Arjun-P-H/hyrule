@@ -1,7 +1,8 @@
 /**
  * What the engine's frame loop sees of a multiplayer session (session.ts):
- * other players' hero snapshots to draw, a way to send its own, and the
- * shared clock. Types only, so the engine chunk and the page share no code.
+ * other players' hero snapshots to draw, a way to send its own, the blows and
+ * shots players trade (combat/pvp.ts), and the shared clock. Types only, so
+ * the engine chunk and the page share no code.
  */
 
 /** The sky clock as sent between players: game days, stopped or not, real minutes per game day. */
@@ -16,6 +17,12 @@ export type NetLink = {
   drain(take: (id: string, at: number, snap: readonly number[]) => void): void;
   /** Send this player's snapshot (remoteHeroes.ts encodeSnapshot). */
   sendState(snap: readonly number[]): void;
+  /** Hand over the combat messages (combat/pvp.ts) received since the last call: player, local arrival time (ms), message. */
+  drainCombat(take: (id: string, at: number, msg: readonly number[]) => void): void;
+  /** Send a combat message to one player (`to`, its id), or to everyone else in the world. */
+  sendCombat(msg: readonly number[], to: string | null): void;
+  /** A player's name in the world (for the HUD's banners). */
+  peerName(id: string): string;
   /** A clock another player set, taken once (null: none since the last call). */
   takeClock(): ClockState | null;
   sendClock(c: ClockState): void;

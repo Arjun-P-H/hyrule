@@ -35,8 +35,10 @@ describe('tree models', () => {
     SPECIES.forEach((_, s) => {
       for (let v = 0; v < VARIANTS; v++) {
         const [a, b, c] = [0, 1, 2].map((l) => mesh(s, v, l).indexCount / 3);
-        expect(a).toBeGreaterThan(b);
-        expect(b).toBeGreaterThan(c);
+        // (cheaper by what is drawn at all, cards and conifer boughs too; the budgets are of the opaque meshes)
+        const [ta, tb, tc] = [0, 1, 2].map((l) => (mesh(s, v, l).indexCount + mesh(s, v, l).cardCount) / 3);
+        expect(ta).toBeGreaterThan(tb);
+        expect(tb).toBeGreaterThan(tc);
         expect(a).toBeLessThanOrEqual(2200);
         expect(b).toBeLessThanOrEqual(520);
         expect(c).toBeLessThanOrEqual(100);
@@ -59,6 +61,32 @@ describe('tree models', () => {
         expect(minY).toBeLessThan(0);
       }
     });
+  });
+
+  test('conifers: a bare trunk, then a column of drooping boughs narrowing to a spire, that keeps its outline at every level of detail', () => {
+    const f32 = new Float32Array(models.vertices);
+    const s = SPECIES.indexOf('pine');
+    for (let v = 0; v < VARIANTS; v++) {
+      const reach = [0, 1, 2].map((l) => {
+        const m = mesh(s, v, l);
+        let lowest = Infinity, lower = 0, upper = 0;
+        for (let i = 0; i < m.vertexCount; i++) {
+          const o = ((m.baseVertex + i) * VERTEX_BYTES);
+          if (u8[o + 16] !== 2) continue; // boughs (and the skirts that stand in for them)
+          const y = f32[o / 4 + 1], r = Math.hypot(f32[o / 4], f32[o / 4 + 2]);
+          lowest = Math.min(lowest, y);
+          if (y > 0.25 * SPECIES_INFO.pine.height && y < 0.5 * SPECIES_INFO.pine.height) lower = Math.max(lower, r);
+          if (y > 0.75 * SPECIES_INFO.pine.height) upper = Math.max(upper, r);
+        }
+        // The trunk stands bare to a person's height and more; the crown is wider below than above (boughs of
+        // nearly one length most of the way up, shorter toward the spire).
+        expect(lowest).toBeGreaterThan(0.5);
+        expect(lower).toBeGreaterThan(1.3 * upper); // (the reference spruces: ~1.3)
+        return lower;
+      });
+      expect(reach[1]).toBeGreaterThan(0.85 * reach[0]);
+      expect(reach[2]).toBeGreaterThan(0.85 * reach[0]);
+    }
   });
 
   test('surface coordinates run round each trunk (a seam vertex closes the ring) and up it in metres; across and along fronds', () => {
@@ -102,6 +130,13 @@ describe('tree models', () => {
       for (let v = 0; v < VARIANTS; v++) {
         const [near, mid, far] = [0, 1, 2].map((l) => mesh(s, v, l));
         expect(far.cardCount).toBe(0);
+        if (sp === 'pine') {
+          // A conifer's cards are its boughs: sheets (not billboards) with their coordinates across and along, near and middle.
+          expect(near.cardCount).toBeGreaterThan(300);
+          expect(mid.cardCount).toBeGreaterThan(100);
+          expect(mid.cardCount).toBeLessThan(near.cardCount);
+          continue;
+        }
         if (!cards) { expect(near.cardCount + mid.cardCount).toBe(0); continue; }
         // Enough cards to clothe the crown, fewer in the middle level (drawn larger there).
         expect(near.cardCount / 6).toBeGreaterThan(30);
@@ -129,7 +164,7 @@ describe('tree models', () => {
   test('leaf sprays: a spray of leaves on each layer, premultiplied, mipmaps averaging down to one texel', () => {
     const atlas = buildLeafAtlas();
     expect(atlas.length).toBe(LEAF_STYLES.length);
-    for (const levels of atlas) {
+    atlas.forEach((levels, layer) => {
       expect(levels.length).toBe(LEAF_MIPS);
       const base = levels[0];
       let cov = 0;
@@ -140,7 +175,7 @@ describe('tree models', () => {
       }
       const share = cov / (255 * LEAF_SIZE * LEAF_SIZE);
       expect(share).toBeGreaterThan(0.2);
-      expect(share).toBeLessThan(0.6);
+      expect(share).toBeLessThan(LEAF_STYLES[layer] === 'fir' ? 0.75 : 0.6); // (a bough is a denser sheet than a spray of leaves)
       // The edge of the tile stays empty (cards would show a cut).
       for (let i = 0; i < LEAF_SIZE; i++) {
         expect(base[4 * i]).toBe(0);
@@ -148,7 +183,7 @@ describe('tree models', () => {
       }
       // The last level is the mean of the first.
       expect(Math.abs(levels[LEAF_MIPS - 1][0] - share * 255)).toBeLessThan(2);
-    }
+    });
   });
 
   test('the same seeds build the same models', () => {
@@ -406,10 +441,11 @@ describe('tree collision', () => {
     expect(trunk.r).toBeGreaterThan(0.4);
   });
 
-  test('the hero runs into a trunk, stops at its bark and slides round it', () => {
+  test('a body runs into a trunk, stops at its bark and slides round it', () => {
     const a = 1.1, from = { x: trunk.x + 9 * Math.sin(a), z: trunk.z + 9 * Math.cos(a) };
     const hero = createHeroState(from.x, from.z, 0, SEED);
-    const idle: HeroInput = { forward: 0, strafe: 0, sprint: false, jump: false, sneak: false, camYaw: 0 };
+    // (a foe's way: the hero pushing into a trunk grabs it and climbs, hero.test.ts)
+    const idle: HeroInput = { forward: 0, strafe: 0, sprint: false, jump: false, sneak: false, camYaw: 0, noClimb: true };
     for (let i = 0; i < 60; i++) updateHero(hero, idle, 1 / 60, SEED);
     // Aim a little off-centre, so the body slides round the trunk rather than stopping dead.
     const run: HeroInput = { ...idle, forward: 1, camYaw: Math.atan2(trunk.x - hero.x, trunk.z - hero.z) + 0.04 };

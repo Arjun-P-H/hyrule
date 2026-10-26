@@ -20,6 +20,10 @@ const JUSTIFIED: Record<string, string> = {
   'src/lib/hero/camera.ts - HeroCamera': 'return type of the exported createHeroCamera()',
   'src/lib/hero/locomotion.ts - HeroMove': 'type of the exported HeroState.move',
   'src/lib/engine/useTerrainEngine.ts - RendererChoice': 'type of the exported TerrainEngineOptions.renderer',
+  'src/lib/gpu/groundTex.wgsl.ts - GroundLayer': 'key type of the exported GROUND_TILE and GROUND_RELIEF',
+  'src/lib/rocks/models.ts - RockKind': 'element type of the exported ROCK_KINDS',
+  'src/lib/rocks/models.ts - RockModels': 'return type of the exported buildRockModels()',
+  'src/lib/rocks/tiers.ts - RockTier': 'element type of the exported ROCK_TIERS',
 };
 
 const q = await runQuality();
