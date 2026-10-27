@@ -48,7 +48,8 @@
 import { COMBAT, FOE, HERO, PLAYER } from '../constants';
 import { launchHero, startSurf, stopSurf, updateHero, type HeroInput, type HeroState } from '../hero/locomotion';
 import { createCombatPose, J, type CombatPose } from '../hero/rig';
-import { elevation } from '../terrainMath';
+import { elevation, surfaceAt } from '../terrainMath';
+import { Ragdoll } from '../hero/ragdoll';
 import { COMBO, MOVE, MOVES, THROW_HOLD, THROW_RELEASE } from './moves';
 import { BOW, BOWS, FOOD, FOODS, ITEM_CODE, MODEL, SHIELD, SHIELDS, WEAPON, WEAPONS, type Carried } from './weapons';
 import {
@@ -89,7 +90,8 @@ export function createCombatInput(): CombatInput {
 
 export type HeroAct =
   | 'idle' | 'swing' | 'charge' | 'guard' | 'aim' | 'throw' | 'hurt' | 'stun' | 'dodge' | 'flurry' | 'dead'
-  | 'lift' | 'carry' | 'hurl' | 'push';
+  | 'lift' | 'carry' | 'hurl' | 'push'
+  | 'thrown' | 'rising'; // flung limp (hero/ragdoll.ts: a horse's blow, thrown off a horse), then getting up
 
 /**
  * Most are where they happened, with a number: a swing's move, damage, a foe's kind… `defeat` (this
@@ -100,7 +102,22 @@ export type HeroAct =
 export type CombatEventType =
   | 'swing' | 'hit' | 'crit' | 'sneak' | 'block' | 'parry' | 'dodge' | 'flurry' | 'fire' | 'thud' | 'splash'
   | 'throw' | 'alert' | 'down' | 'poof' | 'pickup' | 'hurt' | 'die' | 'break' | 'surf' | 'charged' | 'spin'
-  | 'draw' | 'swap' | 'return' | 'empty' | 'defeat' | 'parried' | 'equip' | 'eat';
+  | 'draw' | 'swap' | 'return' | 'empty' | 'defeat' | 'parried' | 'equip' | 'eat'
+  | 'vanish' // a slain beast gone in a drift of motes (a: its heading)
+  | 'quake';  // something colossal meeting the ground (colossus/colossi.ts; a: the dust's reach, m)
+
+/**
+ * A big animal the hero's blows, arrows and throws strike (set each tick as `beasts`): a horse (horse/horses.ts) is
+ * a body along its heading, BEAST_HALF either way of (x, z), BEAST_R thick, from BEAST_LOW to BEAST_HIGH over y; a
+ * colossus (colossus/colossi.ts) answers for itself, from its skinned collision mesh: `meets` (where a segment first
+ * meets it, −1: misses) and `near` (its surface's distance from a point, the point into P).
+ */
+type Beast = {
+  x: number; y: number; z: number; yaw: number; hp: number; hitSwing: number; rockHit: object | null;
+  meets?: (ax: number, ay: number, az: number, bx: number, by: number, bz: number, pad: number) => number;
+  near?: (px: number, py: number, pz: number, P: Float64Array) => number;
+};
+const BEAST_HALF = 0.85, BEAST_R = 0.5, BEAST_LOW = 0.6, BEAST_HIGH = 1.75;
 
 export type CombatEvent = { type: CombatEventType; x: number; y: number; z: number; a: number };
 
@@ -143,6 +160,13 @@ const round = (v: number, k: number) => Math.round(v * k) / k;
 const P3 = new Float64Array(3);
 const P3B = new Float64Array(3);
 const V3 = new Float64Array(3);
+
+/** Getting up after being thrown: the ragdoll hands the body back over RISE_HANDOVER s (lying on the back), the
+ *  knockdown pose rises from there; the hero is its own again after RISE_TIME s. */
+const RISE_HANDOVER = 0.4;
+const RISE_TIME = 1.35;
+/** Lying on the back in the knockdown pose, the pelvis is this far from the feet (the root), head-ward (m). */
+const LIE_REACH = 0.8;
 
 export class CombatWorld implements FoeWorld {
   seed: number;
@@ -196,6 +220,11 @@ export class CombatWorld implements FoeWorld {
   thrown = false;      // this throw has let go
   /** Seconds the hero has been down (the engine respawns it). */
   downFor = 0;
+  /** The body while thrown (act 'thrown'), and the scratch its ground and pelvis are read into. */
+  readonly ragdoll = new Ragdoll();
+  private ragAt = new Float64Array(3);
+  private ragSurf: [number, number] = [0, 0];
+  private ragPlane = { x: 0, z: 0, y: 0, gx: 0, gz: 0 };
   // the rocks in its hands (combat/stones.ts): lifted, carried, being thrown or put down; a boulder being pushed
   /** The rock in the hands, or null. */
   stone: RockBody | null = null;
@@ -270,6 +299,34 @@ export class CombatWorld implements FoeWorld {
     for (let k = 0; k < MAX_EVENTS; k++) this.events.push({ type: 'swing', x: 0, y: 0, z: 0, a: 0 });
     for (let k = 0; k < MAX_OUT; k++) this.outbox.push({ to: null, d: [] });
     for (let k = 0; k < MAX_IN; k++) this.inbox.push({ live: false, from: null, open: false, d: new Float64Array(MSG_MAX) });
+  }
+
+  /** The beasts the hero can strike this tick, and what a blow on one does (its owner takes the damage; 0: it took none, a clink). */
+  beasts: readonly Beast[] = [];
+  onBeast: ((b: Beast, damage: number, fromX: number, fromZ: number) => number | void) | null = null;
+
+  /** An effect at (x, y, z) from outside the fight (a beast's vanishing), for the scene and the sounds. */
+  effect(type: CombatEventType, x: number, y: number, z: number, a = 0): void {
+    this.emit(type, x, y, z, a);
+  }
+
+  /**
+   * The beast's body point nearest (px, pz) into P (y its middle), its distance across the ground. A colossus:
+   * nearest (px, py, pz), its distance from its surface plus BEAST_R (so a swing's reach reads the same).
+   */
+  private beastNear(b: Beast, px: number, py: number, pz: number, P: Float64Array): number {
+    if (b.near) return b.near(px, py, pz, P) + BEAST_R;
+    const fx = Math.sin(b.yaw), fz = Math.cos(b.yaw);
+    const t = Math.max(-BEAST_HALF, Math.min(BEAST_HALF, (px - b.x) * fx + (pz - b.z) * fz));
+    P[0] = b.x + fx * t; P[1] = b.y + 0.5 * (BEAST_LOW + BEAST_HIGH); P[2] = b.z + fz * t;
+    return Math.hypot(px - P[0], pz - P[2]);
+  }
+
+  /** Where segment (a → b) first meets beast B's body (its fraction along, −1: misses), with `pad` more thickness. */
+  private beastMeets(B: Beast, ax: number, ay: number, az: number, bx: number, by: number, bz: number, pad: number): number {
+    if (B.meets) return B.meets(ax, ay, az, bx, by, bz, pad);
+    const fx = Math.sin(B.yaw) * BEAST_HALF, fz = Math.cos(B.yaw) * BEAST_HALF, y = B.y + 0.5 * (BEAST_LOW + BEAST_HIGH);
+    return segmentsMeet(ax, ay, az, bx, by, bz, B.x - fx, y, B.z - fz, B.x + fx, y, B.z + fz, 0.5 * (BEAST_HIGH - BEAST_LOW) + pad);
   }
 
   private emit(type: CombatEventType, x: number, y: number, z: number, a = 0): void {
@@ -375,6 +432,16 @@ export class CombatWorld implements FoeWorld {
       case 'hurt': {
         hi.forward = 0; hi.strafe = 0; hi.jump = false; hi.sprint = false;
         if (this.actT > COMBAT.hurtTime) this.setAct('idle');
+        break;
+      }
+      case 'thrown': {
+        hi.forward = 0; hi.strafe = 0; hi.jump = false; hi.sprint = false;
+        this.stepThrown(dt);
+        break;
+      }
+      case 'rising': {
+        hi.forward = 0; hi.strafe = 0; hi.jump = false; hi.sprint = false;
+        if (this.actT > RISE_TIME) this.setAct('idle');
         break;
       }
       case 'stun': {
@@ -632,7 +699,7 @@ export class CombatWorld implements FoeWorld {
       this.health = Math.min(this.hearts * 4, this.health + COMBAT.regenRate * dt);
     }
 
-    if (this.act !== 'flurry') updateHero(s, hi, dth, this.seed);
+    if (this.act !== 'flurry' && this.act !== 'thrown') updateHero(s, hi, dth, this.seed);
     this.fillPose(inp);
   }
 
@@ -745,6 +812,8 @@ export class CombatWorld implements FoeWorld {
     p.glow = this.act === 'charge' ? this.charge : this.act === 'swing' && this.move === MOVE.spin ? 1 - this.u : 0;
     p.flip = 0; p.roll = 0;
     p.draw = -1;
+    p.rag = this.ragdoll.p;
+    p.ragW = this.act === 'thrown' ? 1 : this.act === 'rising' ? 1 - smooth(0, RISE_HANDOVER - 0.05, this.actT) : 0;
     p.pitch = inp.camPitch;
     const st = this.stone ?? this.pushRock;
     p.rock = st ? st.reach : 0;
@@ -765,6 +834,9 @@ export class CombatWorld implements FoeWorld {
       case 'hurt': p.act = 'hurt'; p.move = -1; p.u = this.actT; break;
       case 'stun': p.act = 'stun'; p.move = -1; p.u = this.actT; break;
       case 'dead': p.act = 'dead'; p.move = -1; p.u = this.actT; break;
+      case 'thrown': p.act = 'none'; p.move = -1; p.u = this.actT; p.armed = false; break;
+      // (handed back lying on the back, then up from the knockdown pose)
+      case 'rising': p.act = this.actT < RISE_HANDOVER ? 'down' : 'none'; p.move = -1; p.u = this.actT; p.armed = false; break;
       case 'dodge': {
         p.act = this.dodgeDir === 0 ? 'none' : 'guard'; p.move = -1; p.u = this.actT;
         const k = smooth(0, 0.5, this.actT);
@@ -868,6 +940,21 @@ export class CombatWorld implements FoeWorld {
       if (died) this.emit('down', P3[0], P3[1], P3[2], f.kind);
       landed = true;
       heavy ||= m.heavy || died;
+      this.peace = 0;
+    }
+    // Beasts (the horses): their bodies within the swing's reach and arc
+    if (this.act !== 'flurry') for (const b of this.beasts) {
+      if (b.hp <= 0 || b.hitSwing === this.swingId) continue;
+      const d = this.beastNear(b, s.x, s.y - PLAYER.groundBias + 1, s.z, P3);
+      const dy = b.near ? 0 : b.y + BEAST_LOW - (s.y - PLAYER.groundBias);
+      if (d > m.reach + BEAST_R || dy > 1.6 || dy < -2) continue;
+      if (m.arc < Math.PI && d > 0.5 && ((P3[0] - s.x) * fx + (P3[2] - s.z) * fz) / d < cosArc) continue;
+      b.hitSwing = this.swingId;
+      const dmg = base * m.damage;
+      const took = this.onBeast?.(b, dmg, s.x, s.z);
+      this.emit(took === 0 ? 'block' : 'hit', P3[0], P3[1], P3[2], dmg);
+      landed = true;
+      heavy ||= m.heavy;
       this.peace = 0;
     }
     // Other players: the blow goes out to them (each settles it against its own hero, pvp.ts); where
@@ -1000,6 +1087,67 @@ export class CombatWorld implements FoeWorld {
     const s = this.hero;
     const dx = x - s.x, dz = z - s.z, d = Math.hypot(dx, dz) || 1;
     return (dx * Math.sin(s.yaw) + dz * Math.cos(s.yaw)) / d > 0.3;
+  }
+
+  /**
+   * The hero flung limp at (vx, vy, vz) m/s from the pose `local` (the rig's joints, hero-local): a horse's blow,
+   * thrown off a horse. It flies and tumbles (hero/ragdoll.ts), lands, comes to rest and gets up.
+   */
+  throwHero(vx: number, vy: number, vz: number, local: ArrayLike<number>): void {
+    const s = this.hero;
+    if (this.act === 'dead' || this.act === 'thrown') return;
+    if (this.stone) this.releaseStone(0, 0, 0);
+    if (s.surfing) stopSurf(s);
+    this.charge = 0;
+    this.draw = 0;
+    this.armed = false;
+    this.ragdoll.start(local, s.x, s.y, s.z, s.yaw, vx, vy, vz, 1 / 60);
+    this.setAct('thrown');
+    this.invulnerable = Math.max(this.invulnerable, COMBAT.invulnerable);
+    this.emit('hurt', s.x, s.y + 1.1, s.z, 0);
+  }
+
+  /**
+   * A colossal blow (colossus/colossi.ts): `q` quarters, past any shield; the hero flung limp at (vx, vy, vz)
+   * unless it falls. A dodge (or the moments after a blow) lets it pass.
+   */
+  smashHero(q: number, vx: number, vy: number, vz: number, local: ArrayLike<number>): void {
+    const s = this.hero;
+    if (this.invulnerable > 0 || this.act === 'dead' || this.act === 'thrown' || this.act === 'dodge') return;
+    this.hurt(q, s.x - vx, s.z - vz, 0);
+    if ((this.act as HeroAct) !== 'dead') { this.invulnerable = 0; this.throwHero(vx, vy, vz, local); }
+  }
+
+  /** Thrown: the ragdoll a tick on the ground under its pelvis; the hero's root follows it; at rest, handed back. */
+  private stepThrown(dt: number): void {
+    const s = this.hero, R = this.ragdoll, P = this.ragAt, g = this.ragPlane, sf = this.ragSurf;
+    R.at(J.pelvis, P);
+    surfaceAt(P[0], P[2], this.seed, sf);
+    g.x = P[0]; g.z = P[2]; g.y = sf[0];
+    g.gx = (elevation(P[0] + 0.5, P[2], this.seed, 0) - g.y) / 0.5;
+    g.gz = (elevation(P[0], P[2] + 0.5, this.seed, 0) - g.y) / 0.5;
+    // (into deep water: the body is left to swim)
+    if (sf[1] - sf[0] > HERO.swimDepth) { s.move = 'air'; s.vx = s.vz = 0; s.vy = -1; this.setAct('idle'); return; }
+    R.step(dt, g);
+    R.at(J.pelvis, P);
+    s.x = P[0]; s.z = P[2];
+    s.y = Math.max(P[1] - 0.9, g.y) + PLAYER.groundBias;
+    s.ground = g.y; s.water = sf[1]; s.gx = g.gx; s.gz = g.gz;
+    R.velocity(dt, P);
+    s.vx = P[0]; s.vy = P[1]; s.vz = P[2];
+    s.move = 'ground';
+    if (!R.settled) return;
+    // At rest: face from the head toward the feet and stand the root where the knockdown pose (lying on the back,
+    // rig.ts r.fall) has its feet, so the rig takes the body over where it lies.
+    R.at(J.pelvis, P);
+    const bx = P[0], bz = P[2];
+    R.at(J.head, P);
+    const dx = P[0] - bx, dz = P[2] - bz;
+    if (Math.hypot(dx, dz) > 0.05) s.yaw = Math.atan2(-dx, -dz);
+    s.x = bx + Math.sin(s.yaw) * LIE_REACH; s.z = bz + Math.cos(s.yaw) * LIE_REACH;
+    s.y = elevation(s.x, s.z, this.seed, 0) + PLAYER.groundBias;
+    s.vx = s.vy = s.vz = 0;
+    this.setAct('rising');
   }
 
   /** The hero takes `q` quarters from a blow from (x, z): it staggers back, or falls. */
@@ -1207,6 +1355,15 @@ export class CombatWorld implements FoeWorld {
           if (crit && !died) dazeFoe(f);
           this.emit(crit ? 'crit' : 'hit', p.x, p.y, p.z, dmg);
           if (died) this.emit('down', p.x, p.y, p.z, f.kind);
+          this.hitStop = Math.max(this.hitStop, COMBAT.hitStop * 0.6);
+          if (p.arrow) p.live = false;
+          else this.settleWeapon(p, -p.vx * 0.15, -p.vz * 0.15);
+        }
+        for (const b of this.beasts) {
+          if (b.hp <= 0 || !p.live) continue;
+          if (this.beastMeets(b, p.px, p.py, p.pz, p.x, p.y, p.z, p.arrow ? 0.02 : 0.2) < 0) continue;
+          const took = this.onBeast?.(b, p.damage, p.px, p.pz);
+          this.emit(took === 0 ? 'block' : 'hit', p.x, p.y, p.z, p.damage);
           this.hitStop = Math.max(this.hitStop, COMBAT.hitStop * 0.6);
           if (p.arrow) p.live = false;
           else this.settleWeapon(p, -p.vx * 0.15, -p.vz * 0.15);
@@ -1443,6 +1600,18 @@ export class CombatWorld implements FoeWorld {
         if (died) this.emit('down', b.x, b.y, b.z, f.kind);
         this.hitStop = Math.max(this.hitStop, COMBAT.hitStop * 0.6);
         this.peace = 0;
+      }
+      for (const B of this.beasts) {
+        if (B.hp <= 0 || B.rockHit === b) continue;
+        if (this.beastMeets(B, px, py + b.roll * 0.3, pz, b.x, b.y + b.roll * 0.3, b.z, 0.3 + b.roll * 0.85) < 0) continue;
+        B.rockHit = b;
+        const hand = this.isStone(b) ? 0 : 1;
+        const dmg = b.state === 'rolling' ? Math.min(STONE.rollMaxDamage, STONE.rollDamage * v * Math.sqrt(b.size))
+          : STONE.damage[hand] * Math.min(1.3, v / STONE.speed[hand] + 0.2);
+        if (b.state !== 'rolling') { b.vx *= -0.25; b.vz *= -0.25; b.vy = Math.min(b.vy, 1); }
+        const took = this.onBeast?.(B, dmg, px, pz);
+        this.emit(took === 0 ? 'block' : 'hit', b.x, b.y + b.roll, b.z, dmg);
+        this.hitStop = Math.max(this.hitStop, COMBAT.hitStop * 0.6);
       }
     }
   }

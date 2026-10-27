@@ -54,7 +54,7 @@ export class CombatSfx {
     if (!c || !this.out || this.muted || c.state !== 'running') return;
     const dx = e.x - lx, dy = e.y - ly, dz = e.z - lz;
     const d = Math.hypot(dx, dy, dz);
-    const near = 1 / (1 + d / 7);
+    const near = e.type === 'quake' ? Math.min(1, e.a / 10) / (1 + d / 60) : 1 / (1 + d / 7); // (a colossus is heard from afar)
     if (near < 0.04) return;
     const pan = d > 0.5 ? Math.max(-0.8, Math.min(0.8, (dx * Math.cos(yaw) - dz * Math.sin(yaw)) / d)) : 0;
     const bus = c.createStereoPanner();
@@ -84,7 +84,9 @@ export class CombatSfx {
       case 'splash': this.burst(g, t, 0.35, 'bandpass', 900, 0.35); break;
       case 'alert': this.tone(g, t, 'square', 660, 660, 0.07, 0.12); this.tone(g, t + 0.08, 'square', 990, 990, 0.11, 0.12); break;
       case 'down': this.thump(g, t, 90, 0.45); break;
+      case 'quake': this.tone(g, t, 'sine', 55, 28, 0.9, 0.9); this.burst(g, t, 0.7, 'lowpass', 260, 0.7); this.thump(g, t, 70, 0.6); break;
       case 'poof': this.whoosh(g, t, 0.55, 2200, 180, 0.35); break;
+      case 'vanish': this.whoosh(g, t, 0.9, 400, 2400, 0.22); [784, 1175, 1568].forEach((f, i) => this.tone(g, t + 0.1 + i * 0.12, 'sine', f, f, 0.5, 0.08)); break;
       case 'pickup': [880, 1109, 1319].forEach((f, i) => this.tone(g, t + i * 0.06, 'triangle', f, f, 0.12, 0.16)); break;
       case 'return': [659, 988, 1319, 1976].forEach((f, i) => this.tone(g, t + i * 0.07, 'sine', f, f, 0.25, 0.14)); break;
       case 'hurt': this.thump(g, t, 120, 0.6); this.burst(g, t, 0.08, 'lowpass', 900, 0.4); break;

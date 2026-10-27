@@ -23,6 +23,7 @@ const DEFS = [
   { id: 'sprint', group: 'Movement', label: 'Sprint / boost', keys: ['Shift'] },
   { id: 'jump', group: 'Movement', label: 'Jump / glide / rise', keys: ['Space'] },
   { id: 'crouch', group: 'Movement', label: 'Sneak / descend', keys: ['KeyC', 'Control'] },
+  { id: 'whistle', group: 'Movement', label: 'Whistle (call your horse)', keys: ['KeyZ'] },
   // turning the camera with keys: no key by default (the mouse looks); the settings' Key Look gives it the arrows
   { id: 'lookUp', group: 'Look', label: 'Look up', keys: [] },
   { id: 'lookDown', group: 'Look', label: 'Look down', keys: [] },
@@ -222,7 +223,7 @@ export const DEFAULT_KEYMAP: Keymap = compileKeymap(DEFAULT_BINDINGS);
 
 const HELD_ACTIONS = [
   'forward', 'back', 'left', 'right', 'sprint', 'jump', 'crouch', 'lookUp', 'lookDown', 'lookLeft', 'lookRight',
-  'attack', 'guard', 'aim', 'throw', 'interact', 'swap',
+  'attack', 'guard', 'aim', 'throw', 'interact', 'swap', 'whistle',
 ] as const satisfies readonly ActionId[];
 
 /** The actions the engine polls every frame, one bit each. */

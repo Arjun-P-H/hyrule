@@ -124,6 +124,27 @@ export class CombatScene {
         case 'hurt':
           this.sparks(e.x, e.y, e.z, 8, 3, 3, 0.4, 0.3);
           break;
+        case 'vanish': {
+          // a slain beast going: pale motes drifting up off the length of its body, a faint haze
+          const fx = Math.sin(e.a), fz = Math.cos(e.a);
+          for (let k = 0; k < 16; k++) {
+            const t = (rnd() * 2 - 1) * 1.05, j = (rnd() - 0.5) * 0.5;
+            this.emit(SPRITE.glow, e.x + fx * t + fz * j, e.y + (rnd() - 0.35) * 0.9, e.z + fz * t - fx * j,
+              (rnd() - 0.5) * 0.4, 0.6 + 0.8 * rnd(), (rnd() - 0.5) * 0.4, 1.0 + 0.8 * rnd(), 0.06, 0.015, 0.95, 0.9, 0.7, 0.8, -0.4, 0.6);
+          }
+          for (const t of [-0.8, 0, 0.8]) this.smoke(e.x + fx * t, e.y - 0.3, e.z + fz * t, 2, 0.7, 0.82, 0.8, 0.74, 0.18, 0.6, 1.2);
+          break;
+        }
+        case 'quake': {
+          // dust thrown up round something colossal meeting the ground, rolling outward
+          const n = Math.min(16, 4 + Math.round(e.a));
+          for (let k = 0; k < n; k++) {
+            const th = rnd() * 6.283, d = rnd() * e.a * 0.4, cx = Math.cos(th), sz = Math.sin(th);
+            this.emit(SPRITE.puff, e.x + cx * d, e.y + 0.4, e.z + sz * d, cx * e.a * 0.4, 0.6 + 1.2 * rnd(), sz * e.a * 0.4,
+              1.8 + rnd(), e.a * 0.22, e.a * (0.55 + 0.25 * rnd()), 0.43, 0.38, 0.3, 0.62, -0.25, 0.9);
+          }
+          break;
+        }
         case 'poof':
           this.smoke(e.x, e.y, e.z, 10, 0.9, 0.09, 0.045, 0.13, 0.85, 1.4, 1.3);
           this.emit(SPRITE.glow, e.x, e.y, e.z, 0, 0, 0, 0.35, 0.6, 1.4, 1.2, 0.35, 1.6, 0);

@@ -86,20 +86,24 @@ export type CombatPose = {
   rockHand: boolean; // held in one hand (a stone), else in both
   rockFwd: number;  // where it lay when lifted (or will lie, put down), hero-local: ahead (m)…
   rockLow: number;  // … and its middle's height over the feet (m)
+  /** The ragdoll's joints (hero/ragdoll.ts, world fp64; null: none) and how far the body is theirs 0..1. */
+  rag: Float64Array | null;
+  ragW: number;
 };
 
 export function createCombatPose(): CombatPose {
   return {
     weapon: MODEL.sword, armed: false, shield: true, shieldModel: SHIELD_MODEL.hylian, bowModel: BOW_MODEL.traveler, act: 'none', move: -1, u: 0,
     pitch: 0, draw: -1, glow: 0, spin: 0, flip: 0, roll: 0, rock: 0, rockHalf: 0, rockHand: false, rockFwd: 0.6, rockLow: 0.3,
+    rag: null, ragW: 0,
   };
 }
 
 /** The pose of a hero at peace: sword and shield on the back (what callers without a combat layer draw). */
 const AT_PEACE = createCombatPose();
 
-const POSES = 7; // ground, air, glide, climb, swim, surf, skydive
-const W_GROUND = 0, W_AIR = 1, W_GLIDE = 2, W_CLIMB = 3, W_SWIM = 4, W_SURF = 5, W_SKY = 6;
+const POSES = 8; // ground, air, glide, climb, swim, surf, skydive, ride
+const W_GROUND = 0, W_AIR = 1, W_GLIDE = 2, W_CLIMB = 3, W_SWIM = 4, W_SURF = 5, W_SKY = 6, W_RIDE = 7;
 const TAU = Math.PI * 2;
 const DEG = Math.PI / 180;
 
@@ -524,6 +528,31 @@ function poseGlide(r: HeroRig, o: Float64Array): void {
   }
   const hl = 3 * J.handL, hr = 3 * J.handR;
   set(o, J.glider, 0.5 * (o[hl] + o[hr]), 0.5 * (o[hl + 1] + o[hr + 1]) + 0.42, 0.5 * (o[hl + 2] + o[hr + 2]));
+}
+
+/**
+ * On horseback (horse/horses.ts seats the root so the pelvis is at RIDE_PELVIS over the saddle): sitting astride,
+ * the knees out round the barrel and a little forward, the hands low before the withers on the reins, leaning into
+ * the pace.
+ */
+function poseRide(r: HeroRig, o: Float64Array): void {
+  const lean = 0.06 + 0.25 * smoothstep(2, 12, r.speed);
+  set(o, J.pelvis, 0, 0.9, 0);
+  set(o, J.chest, 0, 0.9 + Math.cos(lean) * P.spine, Math.sin(lean) * P.spine);
+  torsoFrame(o, 0, 0, 1);
+  inTorso(o, J.hipL, J.pelvis, -P.hipW, -P.hipDrop, 0);
+  inTorso(o, J.hipR, J.pelvis, P.hipW, -P.hipDrop, 0);
+  upperBody(o, 0.1 - lean * 0.5);
+  for (let k = 0; k < 2; k++) {
+    const side = k === 0 ? -1 : 1;
+    const ank = side < 0 ? J.ankleL : J.ankleR;
+    set(o, ank, side * 0.37, 0.3, 0.06);
+    ik(o, side < 0 ? J.hipL : J.hipR, side < 0 ? J.kneeL : J.kneeR, ank, P.thigh, P.shin, side * 0.8, 0, 0.6);
+    toe(o, ank, side < 0 ? J.toeL : J.toeR, side * 0.02, -0.03, P.footLen * 0.85);
+    const sh = side < 0 ? J.shoulderL : J.shoulderR, ha = side < 0 ? J.handL : J.handR;
+    set(o, ha, side * 0.11, 1.12 + 0.05 * Math.cos(lean), 0.36 + 0.1 * lean);
+    ik(o, sh, side < 0 ? J.elbowL : J.elbowR, ha, P.upperArm, P.forearm, side * 0.6, -0.6, -0.5);
+  }
 }
 
 // ---- climbing a tree -----------------------------------------------------------
@@ -1512,7 +1541,7 @@ export function updateHeroRig(r: HeroRig, s: HeroState, dt: number, pose: Combat
   // (skydiving until the ground is landTTI away: then upright, feet first, to land)
   const tti = (s.y - PLAYER.groundBias - s.ground) / Math.max(1e-3, -s.vy);
   const sky = s.move === 'air' && s.skydive && tti > SKYDIVE.landTTI;
-  const target = s.move === 'surf' || (s.move === 'air' && s.surfing) ? W_SURF
+  const target = s.riding ? W_RIDE : s.move === 'surf' || (s.move === 'air' && s.surfing) ? W_SURF
     : sky ? W_SKY : s.move === 'ground' ? W_GROUND : s.move === 'air' ? W_AIR
       : s.move === 'glide' ? W_GLIDE : s.move === 'climb' ? W_CLIMB : W_SWIM;
   let sum = 0;
@@ -1605,6 +1634,7 @@ export function updateHeroRig(r: HeroRig, s: HeroState, dt: number, pose: Combat
     else if (i === W_CLIMB) poseClimb(r, s, o, dt, snap);
     else if (i === W_SWIM) poseSwim(r, o);
     else if (i === W_SKY) poseSkydive(r, o, hv, s.vy);
+    else if (i === W_RIDE) poseRide(r, o);
     else poseSurf(r, o, grounded ? ga : 0, grounded ? gb : 0);
     if (i !== W_GLIDE) {
       // Only the glide pose places the canopy; the others park it over the hands.
@@ -1631,7 +1661,30 @@ export function updateHeroRig(r: HeroRig, s: HeroState, dt: number, pose: Combat
   }
 
   // Frames of the blended skeleton: torso faces forward (bodyFrame), head leans upright.
-  const skyW = r.weights[W_SKY];
+  jointFrames(r, out, r.weights[W_SKY]);
+
+  // Whole-body turns: a backflip or a side hop about the hips, a knockdown about the feet (onto
+  // the back); a spin attack's turn is added to the facing when packing.
+  const down = pose.act === 'down' || pose.act === 'dead';
+  r.fall += ((down ? -1.42 : 0) - r.fall) * follow(snap, down ? 9 : 4, dt);
+  // (handed back by the ragdoll: lying on the back already)
+  if (down && pose.ragW > 0) r.fall = -1.42;
+  if (Math.abs(r.fall) < 1e-4) r.fall = 0;
+  r.spin = pose.spin;
+  if (pose.flip !== 0 || pose.roll !== 0) { rotXZ(pose.flip, pose.roll); turnBody(r, 0, 0.95, 0, true, true); }
+  if (r.fall !== 0) { rotXZ(r.fall, 0); turnBody(r, 0, 0.12, 0, true, true); }
+  // A landing roll: once head over heels about the tucked body's middle.
+  if (r.roll > 0) { rotXZ(TAU * smoothstep(0, 1, 1 - r.roll / SKYDIVE.rollTime), 0); turnBody(r, 0, 0.7, 0, true, true); }
+  // Thrown: the body is the ragdoll's (blended in as it takes over and as it hands back).
+  if (pose.rag && pose.ragW > 0) ragdollBody(r, s, pose.rag, Math.min(1, pose.ragW), out);
+
+  // Bounding sphere: centre of the joints' and the gear's box, radius to the
+  // farthest primitive reach (HERO_SHAPE.*Reach / limbPad / gear, mirrored in the shader).
+  heroBounds(out, r.gear, r.glide, r.bound);
+}
+
+/** The torso's frame (bodyFrame) and the head's (upright off the neck, facing the torso's way) into r.frames. */
+function jointFrames(r: HeroRig, out: Float64Array, skyW: number): void {
   bodyFrame(r, out);
   for (let q = 0; q < 9; q++) r.frames[q] = F[q];
   let ux = out[3 * J.head] - out[3 * J.chest];
@@ -1650,21 +1703,39 @@ export function updateHeroRig(r: HeroRig, s: HeroState, dt: number, pose: Combat
   fr[9] = uy * fz - uz * fy; fr[10] = uz * fx - ux * fz; fr[11] = ux * fy - uy * fx;
   fr[12] = ux; fr[13] = uy; fr[14] = uz;
   fr[15] = fx; fr[16] = fy; fr[17] = fz;
+}
 
-  // Whole-body turns: a backflip or a side hop about the hips, a knockdown about the feet (onto
-  // the back); a spin attack's turn is added to the facing when packing.
-  const down = pose.act === 'down' || pose.act === 'dead';
-  r.fall += ((down ? -1.42 : 0) - r.fall) * follow(snap, down ? 9 : 4, dt);
-  if (Math.abs(r.fall) < 1e-4) r.fall = 0;
-  r.spin = pose.spin;
-  if (pose.flip !== 0 || pose.roll !== 0) { rotXZ(pose.flip, pose.roll); turnBody(r, 0, 0.95, 0, true, true); }
-  if (r.fall !== 0) { rotXZ(r.fall, 0); turnBody(r, 0, 0.12, 0, true, true); }
-  // A landing roll: once head over heels about the tucked body's middle.
-  if (r.roll > 0) { rotXZ(TAU * smoothstep(0, 1, 1 - r.roll / SKYDIVE.rollTime), 0); turnBody(r, 0, 0.7, 0, true, true); }
+/** Scratch: the torso's frame and the chest before the ragdoll took the body. */
+const RAG_F = new Float64Array(12);
 
-  // Bounding sphere: centre of the joints' and the gear's box, radius to the
-  // farthest primitive reach (HERO_SHAPE.*Reach / limbPad / gear, mirrored in the shader).
-  heroBounds(out, r.gear, r.glide, r.bound);
+/**
+ * The joints blended toward the ragdoll's (world `rag`, by `w`), hero-local; the frames made again from them and the
+ * gear (on the back, in the hands) carried with the torso, from where it was to where it is now.
+ */
+function ragdollBody(r: HeroRig, s: HeroState, rag: Float64Array, w: number, out: Float64Array): void {
+  for (let q = 0; q < 9; q++) RAG_F[q] = r.frames[q];
+  RAG_F[9] = out[3 * J.chest]; RAG_F[10] = out[3 * J.chest + 1]; RAG_F[11] = out[3 * J.chest + 2];
+  const yaw = s.yaw + r.spin, sy = Math.sin(yaw), cy = Math.cos(yaw), by = s.y - PLAYER.groundBias;
+  for (let j = 0; j < J.glider; j++) {
+    const X = rag[3 * j] - s.x, Y = rag[3 * j + 1] - by, Z = rag[3 * j + 2] - s.z;
+    out[3 * j] += (cy * X - sy * Z - out[3 * j]) * w;
+    out[3 * j + 1] += (Y - out[3 * j + 1]) * w;
+    out[3 * j + 2] += (sy * X + cy * Z - out[3 * j + 2]) * w;
+  }
+  set(out, J.glider, 0.5 * (out[3 * J.handL] + out[3 * J.handR]), Math.max(out[3 * J.handL + 1], out[3 * J.handR + 1]) + 0.42,
+    0.5 * (out[3 * J.handL + 2] + out[3 * J.handR + 2]));
+  jointFrames(r, out, 0);
+  const g = r.gear, fr = r.frames;
+  const carry = (i: number, point: boolean) => {
+    const x = g[i] - (point ? RAG_F[9] : 0), y = g[i + 1] - (point ? RAG_F[10] : 0), z = g[i + 2] - (point ? RAG_F[11] : 0);
+    const a = x * RAG_F[0] + y * RAG_F[1] + z * RAG_F[2], b = x * RAG_F[3] + y * RAG_F[4] + z * RAG_F[5], c = x * RAG_F[6] + y * RAG_F[7] + z * RAG_F[8];
+    g[i] = (point ? out[3 * J.chest] : 0) + fr[0] * a + fr[3] * b + fr[6] * c;
+    g[i + 1] = (point ? out[3 * J.chest + 1] : 0) + fr[1] * a + fr[4] * b + fr[7] * c;
+    g[i + 2] = (point ? out[3 * J.chest + 2] : 0) + fr[2] * a + fr[5] * b + fr[8] * c;
+  };
+  carry(GEAR.grip, true); carry(GEAR.axis, false); carry(GEAR.flat, false);
+  carry(GEAR.shield, true); carry(GEAR.shieldX, false); carry(GEAR.shieldY, false);
+  carry(GEAR.bow, true); carry(GEAR.bowUp, false); carry(GEAR.bowFwd, false);
 }
 
 /** Up to seven points of the gear a bound must hold, each with its pad: GP (x, y, z, pad). */

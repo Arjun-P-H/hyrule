@@ -10,6 +10,8 @@ import type { PassTimestamps } from './clipmapCache';
 import type { GrassSpec } from './grass.wgsl';
 import type { ForestSpec } from './forest.wgsl';
 import type { RockFrame } from '../rocks/field';
+import type { HorseFrame } from '../horse/horses';
+import type { ColossusFrame } from '../colossus/colossi';
 
 /** Parts of the sky realm (skyRealm.ts) a bench may leave out (all drawn by default) to measure what each costs. */
 export type RealmSpec = {
@@ -53,6 +55,10 @@ export type FrameParams = {
   combat?: CombatFrame | null;
   /** The rocks the CPU owns (rocks/field.ts packRocks: round the hero, and those lifted, thrown or rolled); absent: the scatter's alone. */
   rocks?: RockFrame | null;
+  /** The horses round the hero (horse/horses.ts pack), camera-relative; drawn by renderers built with `horses`. */
+  horses?: HorseFrame | null;
+  /** The colossi round the hero (colossus/colossi.ts pack), camera-relative; drawn by renderers built with `horses`. */
+  colossi?: ColossusFrame | null;
 };
 
 /**
@@ -89,6 +95,8 @@ export type TerrainVariant =
       grass?: GrassSpec | null; forest?: ForestSpec | null; ruins?: boolean;
       /** Rocks (rocks.wgsl.ts): scattered stones, boulders and landmarks; the biomes' GROUND_USE says how many. */
       rocks?: boolean;
+      /** Horses (horses.wgsl.ts): the herds and the hero's horse; FrameParams.horses. And the colossi: FrameParams.colossi. */
+      horses?: boolean;
       /** The land's model isles (modelIsles.ts; skymodels.ts). */
       modelIsles?: boolean;
       /** The sky realm (skyRealm.ts): true, or with parts left out to measure their cost. */
@@ -121,7 +129,7 @@ export type TerrainVariant =
       /** Bench only: STUB_* constants switched on for every pipeline (their defaults rewritten), to measure them. */
       stubAll?: Array<'STUB_DISPLAY' | 'STUB_FOGALL' | 'NO_BLADE_CACHE'>;
       /** Bench only: draws left out of the main pass, to measure them. */
-      skip?: Array<'terrain' | 'water' | 'sky' | 'hero' | 'forest' | 'grass' | 'rocks' | 'realm' | 'ruins' | 'structures' | 'modelIsles' | 'fauna' | 'combat' | 'puffs'>;
+      skip?: Array<'terrain' | 'water' | 'sky' | 'hero' | 'forest' | 'grass' | 'rocks' | 'realm' | 'ruins' | 'structures' | 'modelIsles' | 'fauna' | 'combat' | 'puffs' | 'horses'>;
       /** Bench only: parts of the terrain's shading left out (terrain.wgsl.ts STUB_* constants), to measure them. */
       stub?: Partial<Record<'STUB_BIOME' | 'STUB_GRAD' | 'STUB_SHADOW' | 'STUB_FOG' | 'STUB_SHADE' | 'STUB_DETAIL' | 'DETAIL_LEVEL' | 'PER_PIXEL_GROUND' | 'CACHED_GRAD' | 'CANOPY_MODE', number>>;
     } & CacheOptions);

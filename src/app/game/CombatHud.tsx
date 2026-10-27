@@ -148,6 +148,21 @@ const Banner = React.memo(function Banner({ store }: { store: CombatHudStore }) 
   );
 });
 
+/** The colossus fighting the hero: its name and its life, across the bottom of the screen (glowing while it lies felled). */
+const BossBar = React.memo(function BossBar({ store }: { store: CombatHudStore }) {
+  const s = useCombatHud(store);
+  if (!s?.boss || s.dead) return null;
+  return (
+    <div className="pointer-events-none absolute bottom-10 left-1/2 z-20 flex w-[min(640px,calc(100vw-32px))] -translate-x-1/2 flex-col gap-1 animate-in fade-in duration-500" data-hud="boss">
+      <span className="font-serif text-lg tracking-[0.18em] text-amber-50 drop-shadow-[0_2px_6px_rgba(0,0,0,0.9)]">{s.boss}</span>
+      <div className="h-2.5 w-full overflow-hidden rounded-sm border border-stone-300/40 bg-stone-950/70"
+        role="progressbar" aria-label={`${s.boss} health`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(s.bossHp * 100)}>
+        <div className={`h-full transition-[width] duration-300 ${s.bossDown ? 'bg-amber-400 animate-pulse' : 'bg-[#c8332a]'}`} style={{ width: `${s.bossHp * 100}%` }} />
+      </div>
+    </div>
+  );
+});
+
 const Vignette = React.memo(function Vignette({ store }: { store: CombatHudStore }) {
   const s = useCombatHud(store);
   const on = !!s?.slowed && !s.dead;
@@ -243,6 +258,7 @@ export function CombatHud({ store, show, full }: { store: CombatHudStore; show: 
       <Markers store={store} />
       <Crosshair store={store} />
       <Banner store={store} />
+      <BossBar store={store} />
       {full && <Prompt store={store} />}
       {full && <Equipment store={store} />}
       <GameOver store={store} />

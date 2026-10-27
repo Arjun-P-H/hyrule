@@ -36,7 +36,7 @@ process.env.NODE_ENV = prod ? 'production' : 'development';
 const MAX_PLAYERS = 5;   // one per character
 const CHARACTERS = 5;
 const MAX_SNAPSHOT = 48; // numbers in one state message (remoteHeroes.ts S.length, with room to grow)
-const MAX_COMBAT = 16;   // … in one combat message (a blow, a shot, what came of one)
+const MAX_COMBAT = 32;   // … in one combat message (a blow, a shot, what came of one, a colossus's state)
 const MP_PATH = '/mp';
 
 // ---- production build ------------------------------------------------------

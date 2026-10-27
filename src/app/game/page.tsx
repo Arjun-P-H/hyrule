@@ -219,7 +219,7 @@ function ControlsBanner({ mode, isPointerLocked, timeKey, bindings }: { mode: Ca
       : mode === 'walk'
         ? [[moveKeys(bindings), 'Move'], [lookKeys(bindings), 'Look'], [k('sprint'), 'Sprint'], [k('jump'), 'Jump'], [k('toggleView'), 'Third person'], [k('toggleMode'), 'Fly'], [k('map'), 'Map'], [k('respawn'), 'Respawn']]
         : [[moveKeys(bindings), 'Move'], [lookKeys(bindings), 'Look'], [k('sprint'), 'Sprint'], [k('jump'), 'Jump · Glide'], [k('crouch'), 'Sneak'], ['LMB', 'Attack (hold: spin)'], ['RMB', 'Shield · Lock on'],
-          [k('aim'), 'Bow'], [k('throw'), 'Throw'], [k('interact'), 'Action · Surf'], [k('swap'), 'Swap'], [k('inventory'), 'Inventory'], [k('map'), 'Map'], [k('toggleView'), 'First person'], [k('toggleMode'), 'Fly'], [k('respawn'), 'Respawn']];
+          [k('aim'), 'Bow'], [k('throw'), 'Throw'], [k('interact'), 'Action · Surf · Mount'], [k('whistle'), 'Whistle'], [k('swap'), 'Swap'], [k('inventory'), 'Inventory'], [k('map'), 'Map'], [k('toggleView'), 'First person'], [k('toggleMode'), 'Fly'], [k('respawn'), 'Respawn']];
   if (timeKey) keys.push([k('fastTime'), 'Time ≫']);
   return (
     <div className="flex flex-wrap items-center justify-center gap-x-3 gap-y-1 px-4 py-2 rounded-full border border-stone-800/80 bg-stone-950/80 backdrop-blur-md font-mono text-[11px] text-stone-300 shadow-xl">

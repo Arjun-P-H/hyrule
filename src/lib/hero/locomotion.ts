@@ -47,6 +47,8 @@ export type HeroState = {
   sneaking: boolean;
   sliding: boolean;
   surfing: boolean;                 // on the shield: surfing on the ground, or in the air after a surf jump
+  riding: boolean;                  // on a horse (horse/horses.ts places it on the saddle; its own steps stand aside)
+  clinging: boolean;                // holding on to a colossus (colossus/colossi.ts places it; its own steps stand aside)
   jumpHeld: boolean;                // jumps, the glider and climb jumps fire on the press
   surge: number;                    // metres of climb-jump surge left
   ground: number;                   // E under the root at the last sample
@@ -104,7 +106,7 @@ export type HeroInput = {
 export type HeroAction =
   | 'idle' | 'walk' | 'run' | 'sprint' | 'sneak' | 'tired' | 'slide'
   | 'jump' | 'fall' | 'glide' | 'climb' | 'hang' | 'swim' | 'dash' | 'surf'
-  | 'skydive' | 'dive' | 'roll' | 'squat';
+  | 'skydive' | 'dive' | 'roll' | 'squat' | 'ride';
 
 const TAU = Math.PI * 2;
 const GRAD_H = 0.25; // m — forward-difference step of the ground gradient
@@ -984,6 +986,8 @@ export function placeHero(
   s.yaw = wrapAngle(yaw);
   s.surge = 0;
   s.surfing = false;
+  s.riding = false;
+  s.clinging = false;
   leaveClimb(s);
   s.skydive = false; s.dive = 0; s.flare = 0; s.recover = 0; s.rolling = false;
   s.jumpHeld = true; // a Space still held from the previous mode must not fire
@@ -1006,7 +1010,7 @@ export function createHeroState(x: number, z: number, yaw: number, seed: number)
   const s: HeroState = {
     x, y: 0, z, vx: 0, vy: 0, vz: 0, yaw: 0, move: 'ground',
     stamina: 1, exhausted: false, rest: 0,
-    sprinting: false, sneaking: false, sliding: false, surfing: false, jumpHeld: false,
+    sprinting: false, sneaking: false, sliding: false, surfing: false, riding: false, clinging: false, jumpHeld: false,
     surge: 0, ground: 0, gx: 0, gz: 0, water: LANDS.sea, flowX: 0, flowZ: 0, impact: 0, landings: 0, spring: 0,
     skydive: false, dive: 0, flare: 0, recover: 0, rolling: false,
     tree: null, wall: false, wallNX: 0, wallNZ: 1, wallInv: 0, wallFX: NaN, wallFY: NaN, wallFZ: NaN, wallTick: 0, climbVA: 0, climbVS: 0, touch: null, bump: 0, perch: null, climbX: 0, climbZ: 0, climbR: 0, climbTaper: 0, climbLeanX: 0, climbLeanZ: 0, climbTaperDown: 0, climbLeanDownX: 0, climbLeanDownZ: 0, climbTop: 0, grip: 0, slip: 0, mantle: 0, mx: 0, my: 0, mz: 0,
@@ -1055,6 +1059,7 @@ function skydive(s: HeroState, input: HeroInput, wx: number, wz: number, mag: nu
 
 /** One tick of hero locomotion (any dt; the engine caps it at 50 ms). */
 export function updateHero(s: HeroState, input: HeroInput, dt: number, seed: number): void {
+  if (s.riding || s.clinging) { if (s.riding) s.jumpHeld = input.jump; return; }
   // Camera-relative wish direction, unit length (diagonals are not faster).
   let wx = 0, wz = 0, mag = 0;
   if (input.forward !== 0 || input.strafe !== 0) {
@@ -1334,6 +1339,7 @@ export function updateHero(s: HeroState, input: HeroInput, dt: number, seed: num
 /** What the hero is doing, for the HUD and the animation rig. */
 export function heroAction(s: HeroState): HeroAction {
   const hv = Math.sqrt(s.vx * s.vx + s.vz * s.vz);
+  if (s.riding) return 'ride';
   switch (s.move) {
     case 'ground':
       if (s.recover > 0) return s.rolling ? 'roll' : 'squat';

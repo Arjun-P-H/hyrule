@@ -37,6 +37,9 @@ export type CombatHudState = {
   downBy: string | null;   // the player who felled the hero (multiplayer), while it is down
   slowed: boolean;         // bullet time or a Flurry Rush's slowed world
   rush: boolean;           // a Flurry Rush can start: attack now
+  boss: string | null;     // the colossus fighting the hero (its name), for the life bar
+  bossHp: number;          // its health 0..1 (hundredths)
+  bossDown: boolean;       // it lies felled: every blow tells
 };
 
 export type HudMarker = {

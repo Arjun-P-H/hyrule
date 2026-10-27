@@ -52,6 +52,9 @@ import { DRS_HARDWARE, DRS_SOFTWARE, createDrsState, drsStep, updateFpsEma } fro
 import { createHeroState, firstPersonGround, heroAction, placeHero, type HeroState } from '@/lib/hero/locomotion';
 import { createHeroRig, heroLocalToWorld, packHeroUniforms, updateHeroRig, HERO_UNIFORM } from '@/lib/hero/rig';
 import { createRockFrame, focusRocks, freeRocks, packRocks, setRocksOn, type RockFrame } from '@/lib/rocks/field';
+import { Horses, createHorseFrame, createHorseInput, type Horse, type HorseFrame } from '@/lib/horse/horses';
+import { loadHorse, loadModel } from '@/lib/horse/model';
+import { Colossi, COLOSSUS_MSG, COLOSSUS_URL, createColossusFrame, type Colossus, type ColossusFrame } from '@/lib/colossus/colossi';
 import { createHeroCamera, updateHeroCamera } from '@/lib/hero/camera';
 import { exitOf, portalCrossed, portalOf, spawnPoint } from '@/lib/portal';
 import { skySpawn } from '@/lib/skyworld/realm';
@@ -84,6 +87,8 @@ import {
   SPAWN,
   PLAYER,
   HERO_CAMERA,
+  HORSE,
+  COLOSSUS,
   QUALITY_PRESETS,
   type PresetId,
 } from '@/lib/constants';
@@ -169,6 +174,7 @@ const FAST_TIME = 1;
 
 /** Metres between characters side by side at the spawn (multiplayer). */
 const SPAWN_GAP = 1.6;
+const NO_BEASTS: readonly Horse[] = [];
 const NO_REMOTES: readonly Float32Array[] = [];
 const NO_RIVALS: readonly RemoteHero[] = [];
 
@@ -203,6 +209,10 @@ type DrawState = {
   packCombat: () => CombatFrame | null;
   /** The rocks the CPU owns round the hero (rocks/field.ts), for the frame drawn from ds's camera. */
   packRocks: () => RockFrame | null;
+  /** The horses round the hero (horse/horses.ts), for the frame drawn from ds's camera. */
+  packHorses: () => HorseFrame | null;
+  /** The colossi round the hero (colossus/colossi.ts), for the frame drawn from ds's camera. */
+  packColossi: () => ColossusFrame | null;
 };
 
 type View = {
@@ -521,6 +531,8 @@ function createGpuView(canvas: HTMLCanvasElement, gpu: GpuBackend): View {
       fp.remotes = ds.packRemotes();
       fp.combat = ds.thirdPerson ? ds.packCombat() : null;
       fp.rocks = ds.packRocks();
+      fp.horses = ds.packHorses();
+      fp.colossi = ds.packColossi();
       ds.basisDirty = false;
       gpu.draw(fp);
     },
@@ -646,11 +658,24 @@ export function startEngine(
     // the renderer, its sounds, and what the HUD shows. Foes only where they can be drawn (WebGPU).
     const combat = new CombatWorld(cam.hero, seedNow());
     // (development builds: the hero, the camera and the fight on window.__hyrule, for scripted checks in a browser)
-    if (process.env.NODE_ENV === 'development') (window as unknown as { __hyrule?: object }).__hyrule = { cam, combat, rig, freeRocks };
+    if (process.env.NODE_ENV === 'development') (window as unknown as { __hyrule?: object }).__hyrule = { cam, combat, rig, freeRocks, get horses() { return horses; }, get colossi() { return colossi; } };
     if (inputs.kit?.current) combat.stock();
     const combatScene = new CombatScene();
     const sfx = new CombatSfx();
     const combatIn = createCombatInput();
+    // Horses: the herds round the hero and the hero's own, ridden from the combat world's hero (WebGPU draws them).
+    const horses = new Horses();
+    const horseIn = createHorseInput();
+    const horseFrame = createHorseFrame();
+    if (gpu) loadHorse().then((m) => horses.setModel(m), (e) => console.warn('horses: not loaded —', e));
+    // Colossi: Herod roaming the land (colossus/colossi.ts): its blows on the hero, the shaking ground.
+    const colossi = new Colossi();
+    const colossusFrame = createColossusFrame();
+    if (gpu) loadModel(COLOSSUS_URL).then((m) => colossi.setModel(m), (e) => console.warn('colossi: not loaded —', e));
+    // (the hero's blows, arrows and throws strike them all: combat.beasts, set each tick)
+    const beasts: Array<Horse | Colossus> = [];
+    let colossiSentAt = 0;
+    combat.onBeast = (b, dmg, x, z) => (b.meets ? colossi.hurt(b as Colossus, dmg) : horses.hurt(b as Horse, dmg, x, z));
     const hud = inputs.combatHud ?? null;
     const noise = createNoiseMeter(); // (the sound meter: map/gauges.ts)
     let mouseAttack = false, mouseGuard = false;
@@ -739,6 +764,13 @@ export function startEngine(
       const shk = sh ? SHIELDS[sh.kind] : null, bwk = bw ? BOWS[bw.kind] : null;
       const left = (g: { wear: number } | null, max: number) => (!g || g.wear === Infinity ? 1 : Math.round((g.wear / max) * 20) / 20);
       const pick = w.nearestPickup();
+      const horsePrompt = world === 'land' ? horses.prompt(cam.hero) : null;
+      // (the colossus fighting the hero, nearest first)
+      let boss: Colossus | null = null;
+      if (world === 'land') for (const C of colossi.list) {
+        if (colossi.engaged(C) && Math.hypot(C.x - cam.hero.x, C.z - cam.hero.z) < COLOSSUS.forget
+          && (!boss || Math.hypot(C.x - cam.hero.x, C.z - cam.hero.z) < Math.hypot(boss.x - cam.hero.x, boss.z - cam.hero.z))) boss = C;
+      }
       const s: CombatHudState = {
         hearts: w.hearts,
         health: Math.ceil(w.health),
@@ -757,7 +789,7 @@ export function startEngine(
         aiming: w.act === 'aim',
         draw: Math.round(w.draw * 10) / 10,
         charge: Math.round(w.charge * 10) / 10,
-        prompt: w.flurryWait > 0 ? 'Click|Flurry Rush'
+        prompt: horsePrompt ? horsePrompt : colossi.cling ? (colossi.cling.top ? 'Space|Let go' : 'Click|Stab  ·  Space  Let go') : w.flurryWait > 0 ? 'Click|Flurry Rush'
           : w.act === 'carry' ? 'Click|Throw  ·  E  Put down'
           : pick >= 0 ? `E|${w.canTake(pick) ? 'Pick up' : 'No room for'} ${pickName(w.pickups[pick])}`
             : (stoneHint = w.stoneHint()) ? `E|${stoneHint}`
@@ -769,6 +801,9 @@ export function startEngine(
         downBy: w.act === 'dead' && w.downBy !== null && netRef?.current ? netRef.current.peerName(w.downBy) : null,
         slowed: w.worldScale < 0.5 && w.hitStop <= 0,
         rush: w.flurryWait > 0,
+        boss: boss ? COLOSSUS.name : null,
+        bossHp: boss ? Math.ceil((boss.hp / COLOSSUS.hp) * 100) / 100 : 0,
+        bossDown: boss?.mind === 'down',
       };
       hud.set(s);
     };
@@ -813,6 +848,11 @@ export function startEngine(
           foeJoint(f, J.chest, MK);
           putMarker('lock', MK[0], MK[1], MK[2], 1);
         }
+      }
+      // horses: their health once hurt
+      if (world === 'land') for (const H of horses.list) {
+        if (H.hp <= 0 || H.hp >= HORSE.hp) continue;
+        if (Math.hypot(H.x - ds.x, H.y + 2 - ds.y, H.z - ds.z) < 36) putMarker('bar', H.x, H.y + 2.25, H.z, H.hp / HORSE.hp);
       }
       // other players: their hearts once hurt (or locked onto), the lock-on reticle
       for (const r of combat.rivals) {
@@ -1176,6 +1216,8 @@ export function startEngine(
       packRemotes: () => (netRef?.current ? remotes.pack(ds.x, ds.y, ds.z, MAX_REMOTE_HEROES) : NO_REMOTES),
       packCombat: () => (gpu ? combatScene.pack(combat, ds.x, ds.y, ds.z) : null),
       packRocks: () => packRocks(ds.x, ds.z, rockFrame),
+      packHorses: () => (gpu && world === 'land' ? horses.pack(ds.x, ds.y, ds.z, horseFrame) : null),
+      packColossi: () => (gpu && world === 'land' ? colossi.pack(ds.x, ds.y, ds.z, colossusFrame) : null),
     };
 
     // Multiplayer: other players' heroes, this player's snapshot (the hero, or the first-person /
@@ -1185,7 +1227,12 @@ export function startEngine(
     const proxy = createHeroState(spawn.x, spawn.z, spawn.yaw, seedNow());
     // Before the step: the others played back for now (the combat world's rivals) and their blows and
     // shots (fought in third person only: the first-person and flying views take none).
-    const takeCombat = (id: string, _at: number, d: readonly number[]) => { if (cam.mode === 'hero') combat.receive(id, d); };
+    const takeCombat = (id: string, _at: number, d: readonly number[]) => {
+      // (a colossus's state from its thinker, a player's blow on its eye: for every view)
+      if (d[0] === COLOSSUS_MSG.state) colossi.receive(d);
+      else if (d[0] === COLOSSUS_MSG.hit) colossi.struckBy(d[1], d[2]);
+      else if (cam.mode === 'hero') combat.receive(id, d);
+    };
     const netIn = (net: NetLink, now: number, dt: number) => {
       remotes.update(net, now, dt, world);
       combat.rivals = net.inWorld() ? remotes.list() : NO_RIVALS;
@@ -1426,6 +1473,26 @@ export function startEngine(
         ci.swap = (keyMask & HELD.swap) !== 0;
         ci.camYaw = cam.yaw;
         ci.camPitch = tp.pitch;
+        // The horses first: mounting, the ridden horse carrying the hero (its own steps then stand aside), the herds.
+        if (!frozen && world === 'land') {
+          if (horses.seed !== s) horses.reset(s);
+          const hi = horseIn;
+          hi.forward = fwdKey; hi.strafe = strKey; hi.camYaw = cam.yaw;
+          hi.sprint = sprint; hi.jump = jump; hi.sneak = ci.sneak;
+          const down = combat.act === 'dead' || combat.act === 'thrown' || combat.act === 'rising';
+          hi.action = !blocked && ci.action && !down; hi.whistle = !blocked && (keyMask & HELD.whistle) !== 0;
+          horses.step(blocked ? 0 : dt, cam.hero, hi, hourOf(clock.days));
+          if (horses.tookAction) ci.action = false;
+          if (horses.event === 'tamed') say('Tamed!');
+          else if (horses.event === 'thrown') {
+            say('Thrown off');
+            combat.throwHero(cam.hero.vx, cam.hero.vy, cam.hero.vz, rig.local);
+          }
+          if (horses.riding) {
+            ci.forward = ci.strafe = 0;
+            ci.sprint = ci.jump = ci.sneak = ci.attack = ci.guard = ci.aim = ci.throw = ci.swap = false;
+          }
+        }
         // (the view: last frame's eye and the way through the screen's centre, for the bow and throws)
         ci.eyeX = tp.x; ci.eyeY = tp.y; ci.eyeZ = tp.z;
         const cpv = Math.cos(tp.pitch);
@@ -1437,14 +1504,77 @@ export function startEngine(
           updateHeroRig(rig, cam.hero, 0, combat.pose);
         } else {
           const hx0 = cam.hero.x, hy0 = cam.hero.y, hz0 = cam.hero.z;
+          if (world === 'land') {
+            if (colossi.seed !== s) colossi.reset(s);
+            // (one player thinks for them all in multiplayer: the world's first; the others are hunted too)
+            colossi.authority = !net || !net.inWorld() || net.keepsClock();
+            const others = combat.rivals.filter((r) => r.pose.act !== 'dead').map((r) => ({ x: r.body.x, y: r.body.y - PLAYER.groundBias, z: r.body.z }));
+            colossi.step(dt, cam.hero.x, cam.hero.y - PLAYER.groundBias, cam.hero.z, combat.act === 'dead', others);
+            // climbing one: grabbing hold (in the air touching it, or pushing into it), climbing, stabbing, letting go
+            const down = combat.act === 'dead' || combat.act === 'thrown' || combat.act === 'rising' || combat.act === 'hurt';
+            if (colossi.cling && down) colossi.release(cam.hero);
+            if (!colossi.cling && !down && !horses.riding) {
+              const sn = Math.sin(cam.yaw), cs = Math.cos(cam.yaw);
+              colossi.grab(cam.hero, sn * fwdKey + cs * strKey, cs * fwdKey - sn * strKey, dt);
+            }
+            if (colossi.cling) {
+              const c = combat.carried();
+              colossi.climb(cam.hero, fwdKey, strKey, cam.yaw, jump, ci.attack && !colossi.cling.top, c ? WEAPONS[c.kind].damage : 4, dt);
+              if (colossi.cling && !colossi.cling.top) ci.attack = false; // (a stab, not a swing)
+              ci.jump = false;
+              if (colossi.thrown) { say('Thrown off'); combat.throwHero(colossi.thrown[0], colossi.thrown[1], colossi.thrown[2], rig.local); }
+              const st = colossi.stab;
+              if (st) combat.effect(st.took > 0 ? 'crit' : 'block', st.x, st.y, st.z);
+            }
+            beasts.length = 0;
+            for (const H of horses.list) beasts.push(H);
+            for (const C of colossi.list) beasts.push(C);
+          }
+          combat.beasts = world === 'land' ? beasts : NO_BEASTS;
           combat.step(dt, ci);
+          // (slain horses going, in a drift of motes)
+          for (const H of horses.vanished) combat.effect('vanish', H.x, H.y + 1.1, H.z, H.yaw);
+          if (horses.riding) {
+            // (struck on horseback: thrown off it)
+            if (combat.act === 'hurt' || combat.act === 'dead') {
+              horses.dismount(cam.hero, true);
+              combat.throwHero(cam.hero.vx, cam.hero.vy, cam.hero.vz, rig.local);
+            } else horses.seat(cam.hero);
+          } else if (world === 'land' && combat.act !== 'thrown' && combat.act !== 'rising' && combat.act !== 'dead'
+            && horses.collideHero(cam.hero, RK3)) {
+            // (run down by a horse: flung)
+            combat.throwHero(RK3[0], RK3[1], RK3[2], rig.local);
+          }
+          if (world === 'land') {
+            // the colossi: the ground shaking under them, their blows (past any shield), their legs in the way
+            for (const q of colossi.quakes) {
+              combat.effect('quake', q.x, q.y, q.z, q.size);
+              shake = Math.max(shake, (q.size * 0.04) / (1 + Math.hypot(q.x - cam.hero.x, q.z - cam.hero.z) / 25));
+            }
+            for (const C of colossi.vanished) for (let k = -1; k <= 1; k++) combat.effect('vanish', C.x + Math.sin(C.yaw) * (8 + 8 * k), C.y + 4, C.z + Math.cos(C.yaw) * (8 + 8 * k), C.yaw);
+            if (colossi.roused) say(COLOSSUS.name);
+            const ch = colossi.hit;
+            if (ch && combat.act !== 'dead') {
+              if (horses.riding) horses.dismount(cam.hero, true);
+              combat.smashHero(ch.q, ch.vx, ch.vy, ch.vz, rig.local);
+            }
+            if (!horses.riding && combat.act !== 'thrown' && combat.act !== 'dead') colossi.collideHero(cam.hero);
+          }
           // (only the cloud world has a ring: the land's is gone while that world is inactive)
           if (world === 'clouds') {
             const ring = portalOf(world, seedRef.current);
             crossed = portalCrossed(ring, hx0, hy0, hz0, cam.hero.x, cam.hero.y, cam.hero.z);
           }
-          // (what the fight sends the other players: its blows and shots, what came of theirs)
+          // (what the fight sends the other players: its blows and shots, what came of theirs; the colossi's states, blows on their eyes)
           if (net) for (let k = 0; k < combat.outCount; k++) net.sendCombat(combat.outbox[k].d, combat.outbox[k].to);
+          if (net && net.inWorld() && world === 'land') {
+            for (const m of colossi.sent) net.sendCombat(m, null);
+            if (colossi.authority && combat.rivals.length && now - colossiSentAt >= 100) {
+              colossiSentAt = now;
+              for (const C of colossi.list) net.sendCombat(colossi.encode(C), null);
+            }
+          }
+          colossi.sent.length = 0;
           combat.outCount = 0;
           combatTime += dt;
           updateHeroRig(rig, cam.hero, combat.heroDt, combat.pose);
@@ -1462,6 +1592,8 @@ export function startEngine(
           cam.yaw += (d - 2 * Math.PI * Math.round(d / (2 * Math.PI))) * (1 - Math.exp(-HERO_CAMERA.lockRate * dt));
         }
         updateHeroCamera(tp, cam.hero, cam.yaw, cam.pitch, dt, s, combat.act === 'aim' || combat.act === 'throw');
+        // (never seeing from inside a colossus, nor its stone between the eye and the hero)
+        if (world === 'land' && colossi.list.length && cam.mode === 'hero') colossi.clearView(cam.hero.x, cam.hero.y + 1.5, cam.hero.z, tp, 0.5);
         if (!frozen) {
           combatScene.update(combat, rig, dt);
           combatEvents();

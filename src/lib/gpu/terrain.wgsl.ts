@@ -19,6 +19,8 @@ import type { World } from '../world';
 import { HERO_WGSL, NO_HERO_WGSL } from './hero.wgsl';
 import { combatWGSL } from './combat.wgsl';
 import { rocksWGSL } from './rocks.wgsl';
+import { horsesWGSL } from './horses.wgsl';
+import { colossusWGSL } from './colossus.wgsl';
 import { modelIslesWGSL } from './modelIsles.wgsl';
 import { GROUND_SAMPLE_WGSL } from './groundTex.wgsl';
 import { GROUND_DETAIL_WGSL } from './groundDetail.wgsl';
@@ -684,6 +686,8 @@ type RasterOptions = CachedOptions & {
   combat?: boolean;
   /** Rocks (rocks.wgsl.ts): the scatter and the draws. */
   rocks?: boolean;
+  /** Horses (horses.wgsl.ts) and colossi (colossus.wgsl.ts): skinned, textured, casting into the trees' shadow map. */
+  horses?: boolean;
   /** The land's model isles (modelIsles.wgsl.ts). */
   modelIsles?: boolean;
 };
@@ -861,6 +865,7 @@ ${opts.puffs ? PUFFS_WGSL : ''}
 ${islands ? skyRealmWGSL(!!opts.clip) + WATERFALLS_WGSL + structuresWGSL(!!opts.forest) + effectsWGSL() + faunaWGSL() + motesWGSL() + lanternsWGSL() : 'fn skyShadowAt(p: vec3f) -> f32 { return 1.0; }'}
 ${opts.combat ? combatWGSL() : ''}
 ${opts.rocks ? rocksWGSL(!!opts.forest && opts.forest.spec.shadowRes > 0) : ''}
+${opts.horses ? horsesWGSL(!!opts.forest && opts.forest.spec.shadowRes > 0) + colossusWGSL(!!opts.forest && opts.forest.spec.shadowRes > 0) : ''}
 ${opts.modelIsles ? modelIslesWGSL({ forest: !!opts.forest, falls: !islands }) + (islands ? '' : WATERFALLS_WGSL) : ''}
 
 struct Mesh {

@@ -740,6 +740,106 @@ export const QUALITY_PRESETS: QualityPreset[] = [
 ];
 
 /**
+ * Horses (src/lib/horse/), after Breath of the Wild: wild herds on the open grassland, horses that notice the
+ * hero (less when it sneaks) and bolt with their herd, mounting one from close by, the struggle to tame it
+ * (stamina against its temper), gaits shifted up with spurs, a whistle for the horse that is the hero's.
+ * Speeds in m/s, distances in m, times in s.
+ */
+export const HORSE = {
+  herdCell: 340,          // a herd may live in each cell of this lattice…
+  herdChance: 0.8,        // … this often where the land is all grassland (less on its edges)
+  herdSize: [3, 7],
+  herdSpread: 14,         // horses stand within this of their herd's anchor…
+  wander: 26,             // … and wander within this of it
+  spawnRange: 210,        // wild horses come into being within this of the hero…
+  despawnRange: 270,      // … and go beyond this (the hero's own horses stay)
+  maxLive: 40,
+  hp: 64,                 // health (a Master Sword blow takes about a third; the hero's horse the same)
+  dieFor: 1.9,            // s from the death clip's start to the vanishing…
+  vanishFor: 1.3,         // … and of the vanishing
+  // gaits: standing, walk, trot, canter, gallop (the gallop's is × the horse's own speed stat)
+  gaitSpeed: [0, 1.9, 4.5, 8.5, 12.0],
+  gaitTurn: [2.6, 2.2, 1.8, 1.3, 0.95], // turn rate (rad/s) at each gait
+  accel: 3.2,
+  brake: 7.0,
+  backSpeed: 1.1,
+  gallopFor: 2.6,         // a spur's gallop lasts this, then the horse eases to a canter
+  spurRegen: 3.2,         // one spur back after this…
+  spurRest: 1.4,          // … once none was used for this
+  jumpSpeed: 5.4,         // up, a leap from a trot or faster
+  gravity: 18,
+  cliff: 3.2,             // ground falling more than this a few metres ahead: the horse refuses
+  steep: 1.05,            // or rising steeper than this
+  deep: 1.1,              // or water deeper than this
+  // senses (to the hero; × 0.35 sneaking — and it never bolts from a sneaking hero — × 1.4 sprinting)
+  notice: 17,
+  bolt: 10,
+  fleeSpeed: 10.5,
+  fleeFor: [5, 8],
+  mountReach: 2.4,
+  trample: 3.2,           // a horse faster than this running into the hero throws it (slower: it is pushed aside)
+  // taming: the struggle lasts tameTime + temper × tameTemper, each soothe (Action) shortens it, stamina drains
+  tameTime: 1.8,
+  tameTemper: 3.2,
+  soothe: 0.32,
+  tameDrain: 0.24,
+  whistleRange: 180,
+  nightFrom: 21,          // wild horses lie down to sleep from this hour…
+  nightTo: 5,             // … to this
+  seatDrop: 0.08,         // the rider's pelvis over the saddle point
+} as const;
+
+/**
+ * The colossi (src/lib/colossus/): Herod, a 30 m stone golem after Shadow of the Colossus's Argus and Valus, roaming
+ * the open land. Slow, heavy steps that shake the ground; it smashes both fists down, stomps a hero at its feet, and
+ * throws its whole body down on the hero. Every blow on it tells a little, on its single eye four times as much (eight
+ * while it lies felled); its health is vast. A hero can land and stand on it (climbing its walls is off for now); it
+ * shakes to throw the hero off.
+ */
+export const COLOSSUS = {
+  name: 'Herod',
+  cell: 600,              // a colossus may roam in each cell of this lattice, in any biome…
+  chance: 0.9,            // … this often (where the land is dry and not too rough)
+  rough: 30,              // a place is skipped where the ground rises more than this within 24 m
+  spawnRange: 800,        // it comes into being within this of a hero, and goes beyond despawnRange of all of them
+  despawnRange: 1000,
+  maxLive: 3,
+  roam: 70,               // it wanders within this of its spot
+  hp: 30000,              // (a long, hard fight: a Master Sword's swing takes 12)
+  body: 1,                // × the damage of a blow on its body…
+  eye: 4,                 // … on its eye…
+  downed: 2,              // … × this on its eye while it lies felled
+  stab: 3,                // a stab into its eye, clinging to it: × the weapon's damage
+  rage: 0.5,              // below this share of its health it is enraged: its attacks come quicker
+  notice: 150,            // it turns to the hero within this…
+  forget: 260,            // … and gives up beyond this
+  reach: 24,              // it smashes or falls on a hero before it closer than this…
+  stompNear: 7,           // … and stomps one this close to a foot
+  walk: 1.35,             // m/s
+  turn: 0.18,             // rad/s
+  stepFor: 1.9,           // s a step takes
+  stride: 2.2,            // m a foot falls behind before it steps
+  lift: 3.2,              // m a stepping foot rises
+  // attacks: the hero within `inner` of the impact takes `hit` quarters and is flung; within `outer`, `ring`
+  smash: { inner: 6, outer: 13, hit: 12, ring: 5 },
+  stomp: { inner: 5, outer: 11, hit: 10, ring: 3 },
+  fall: { inner: 7, outer: 15, hit: 16, ring: 5 },
+  downFor: 6,             // s it lies felled after its fall
+  cooldown: 1.9,          // s between attacks (× 0.6 enraged)
+  dieFor: 3.2,            // s from its collapse to its vanishing…
+  vanishFor: 3.5,         // … and of the vanishing
+  climbWalls: false,      // climbing its walls (off for now: a hero only lands and stands on top of it)
+  // climbing it: the hero's speed on it, the stamina it costs (a wheel: 1 per s) climbing, hanging, and through a shake
+  climb: 1.5,
+  climbCost: 0.04,
+  hangCost: 0.015,
+  shakeCost: 0.22,        // (× 1.5 climbing through it)
+  shakeFor: 1.5,          // s a shake lasts…
+  shakeAfter: 2.2,        // … the first comes this long after a hero gets on…
+  shakeEvery: [6.5, 9.5], // … then one this often
+} as const;
+
+/**
  * The sky realm (src/lib/skyworld/): archipelagos — a great hub island,
  * satellites round it joined by natural rock arches, small isles and
  * floating rocks — and lone isles between them, all above the highest peak

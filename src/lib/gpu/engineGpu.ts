@@ -34,6 +34,7 @@ export const GAME_VARIANT: TerrainVariant = {
   diag: true,
   combat: true,
   rocks: true,
+  horses: true,
   modelIsles: true,
 };
 

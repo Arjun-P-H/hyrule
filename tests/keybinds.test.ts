@@ -34,6 +34,7 @@ const ORIGINAL: Record<ActionId, readonly string[]> = {
   sprint: ['Shift'],
   jump: ['Space'],
   crouch: ['KeyC', 'Control'],
+  whistle: ['KeyZ'], // (added with the horses)
   lookUp: [], // (the camera turned with the mouse alone)
   lookDown: [],
   lookLeft: [],

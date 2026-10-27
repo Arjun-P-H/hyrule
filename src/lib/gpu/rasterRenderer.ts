@@ -37,6 +37,7 @@ import { boxInView, RING_BLOCK, ringBlockOrder, ringIndices, ringLayout } from '
 import { SCENE_FORMAT, TemporalResolve } from './taa';
 import { Forest } from './forest';
 import { Rocks } from './rocks';
+import { COLOSSI_SPEC, HORSES_SPEC, SkinnedGpu } from './horses';
 import { ModelIsles } from './modelIsles';
 import { SkyCycle, type SkyBindings } from './sky';
 import { biomeAir, createBiomeAir } from '../sky/air';
@@ -178,6 +179,9 @@ export class RasterTerrainRenderer implements TerrainRendererLike {
   private forest: Forest | null = null;
   // rocks (variant.rocks): the scatter and the draws
   private rocks: Rocks | null = null;
+  // horses (variant.horses): the herds and the hero's horse, skinned; and the colossi
+  private horses: SkinnedGpu | null = null;
+  private colossi: SkinnedGpu | null = null;
   // the land's model isles (variant.modelIsles)
   private modelIsles: ModelIsles | null = null;
   // the day–night sky (variant.sky = 'cycle'): its LUTs, the frame's light rig and the probe of the sky
@@ -210,6 +214,7 @@ export class RasterTerrainRenderer implements TerrainRendererLike {
     const grass = v.grass ?? null;
     if (v.forest) this.forest = new Forest(d, v.forest);
     if (v.rocks) this.rocks = new Rocks(d);
+    if (v.horses) { this.horses = new SkinnedGpu(d, HORSES_SPEC); this.colossi = new SkinnedGpu(d, COLOSSI_SPEC); }
     if (v.modelIsles) this.modelIsles = new ModelIsles(d);
     const cycle = v.sky === 'cycle';
     if (cycle) this.sky = new SkyCycle(d);
@@ -265,7 +270,7 @@ export class RasterTerrainRenderer implements TerrainRendererLike {
     const pl = d.createPipelineLayout({ bindGroupLayouts: [layout] });
     const f16 = d.features.has('shader-f16') && !v.shadeF32;
     let code = rasterShader({ n: v.clip.n, levels: v.clip.levels, blend: v.blend, world: v.world, k: v.k, rings: this.rings, grass, islands, clip, ruins, puffs, diag: !!v.diag, f16,
-      forest: this.forest ? { spec: this.forest.spec, bounds: this.forest.models.bounds } : null, sky: cycle ? 'cycle' : 'classic', combat: !!v.combat, rocks: !!v.rocks, modelIsles: !!v.modelIsles });
+      forest: this.forest ? { spec: this.forest.spec, bounds: this.forest.models.bounds } : null, sky: cycle ? 'cycle' : 'classic', combat: !!v.combat, rocks: !!v.rocks, horses: !!v.horses, modelIsles: !!v.modelIsles });
     if (v.privateTables) code = code.replace(/^const ([A-Za-z_0-9]+): array</gm, 'var<private> $1: array<');
     for (const k of v.stubAll ?? []) code = code.replace(`override ${k}: bool = false;`, `override ${k}: bool = true;`);
     const shaders = d.createShaderModule({ code });
@@ -372,6 +377,7 @@ export class RasterTerrainRenderer implements TerrainRendererLike {
     await this.motes?.init(shaders, layout, target, depthState(true, 'greater'), multisample);
     await this.combat?.init(shaders, layout, target, depthState(true, 'greater'), multisample);
     await this.rocks?.init(shaders, computeLayout, layout, target, depthState(true, 'greater'), multisample, this.forest?.shadowLayout ?? null);
+    await Promise.all([this.horses, this.colossi].map((g) => g?.init(shaders, layout, target, depthState(true, 'greater'), multisample, this.forest?.shadowLayout ?? null)));
     await this.modelIsles?.init(shaders, layout, target, depthState(true, 'greater'), multisample, !!this.forest);
     if (ringJobLayout && waterLayout) {
       const k = v.k;
@@ -640,6 +646,8 @@ export class RasterTerrainRenderer implements TerrainRendererLike {
     if (this.forest && plants !== this.seenPlants) { this.seenPlants = plants; this.forest.invalidate(); }
     if (this.forest) this.forest.setFrame(fp, this.sky?.rig.key);
     this.rocks?.setFrame(fp);
+    this.horses?.setFrame(fp.horses);
+    this.colossi?.setFrame(fp.colossi);
     this.modelIsles?.setFrame(fp, ox, oz);
     if (this.realm) this.realm.setFrame(fp, ox, oz, this.sky?.rig.key ?? CLASSIC_SUN);
     this.structures?.setFrame(fp, ox, oz);
@@ -814,8 +822,10 @@ export class RasterTerrainRenderer implements TerrainRendererLike {
     this.rocks?.encode(enc, this.computeBind);
     const casters = this.structures && (!this.variant.skip || !this.variant.skip.includes('structures'));
     const rockCasts = this.rocks && (!this.variant.skip || !this.variant.skip.includes('rocks'));
-    this.forest?.encode(enc, this.computeBind, casters || rockCasts ? (sp) => {
+    const horseCasts = this.horses && (!this.variant.skip || !this.variant.skip.includes('horses'));
+    this.forest?.encode(enc, this.computeBind, casters || rockCasts || horseCasts ? (sp) => {
       if (rockCasts) this.rocks!.drawShadow(sp);
+      if (horseCasts) { this.horses!.drawShadow(sp); this.colossi?.drawShadow(sp); }
       if (casters) this.structures!.drawShadow(sp);
     } : undefined);
     const grass = this.variant.grass;
@@ -881,6 +891,7 @@ export class RasterTerrainRenderer implements TerrainRendererLike {
     if (drawn('combat')) this.combat?.drawParts(pass);
     if (drawn('forest')) this.forest?.draw(pass);
     if (drawn('rocks')) this.rocks?.draw(pass);
+    if (drawn('horses')) { this.horses?.draw(pass); this.colossi?.draw(pass); }
     if (this.grassPipe && this.grassFarPipe && this.drawBind && this.drawFarBind && this.argsBuf && drawn('grass')) {
       pass.setPipeline(this.grassPipe);
       pass.setBindGroup(1, this.drawBind);
@@ -1006,6 +1017,8 @@ export class RasterTerrainRenderer implements TerrainRendererLike {
     this.taa?.destroy();
     this.forest?.destroy();
     this.rocks?.destroy();
+    this.horses?.destroy();
+    this.colossi?.destroy();
     this.modelIsles?.destroy();
     this.sky?.destroy();
     this.cache.destroy();
