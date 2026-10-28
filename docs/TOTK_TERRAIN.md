@@ -378,7 +378,9 @@ the seed), at 12:00. Place 3's x was hidden by the minimap and was re-read as 18
     28 m ± 30 % thick, each layer's run shared among a cliff, a bench and a talus slope. The mesas'
     region weight is taken by a forward difference whose step grows with distance (max(1 m,
     distance / 32,768), `fdSpan`): at a fixed 1 m, fp32 noise put the GPU's ground 4.6 m off the
-    CPU's at 1,000 km.
+    CPU's at 1,000 km. In WGSL its two samples share one call in a loop: each call site inlines its
+    own copy of the uplift and the regions, and side by side they made the world shader 1.6× the
+    size it was before the pass (§4).
 32. **Ridges of value noise.** The ridged octaves now come from simplex noise, each damped by the
     slope already built (`RIDGE_DAMP` 0.25), so the finer octaves add detail on crests and benches
     more than down flanks.

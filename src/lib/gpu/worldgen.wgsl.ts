@@ -744,7 +744,8 @@ fn mesasE(g: vec2f, seed: i32, dp: f32, mw: f32, lfm: f32) -> vec2f {
   var mg = vec2f(0.0);
   if (lfm < 0.85) {
     let h = max(1.0, length(g) / ${f(MESA.fdSpan)});
-    mg = (vec2f(mesaWeightAt(g + vec2f(h, 0.0), seed), mesaWeightAt(g + vec2f(0.0, h), seed)) - mw) / h;
+    // (one call in a loop, not two: each call site inlines its own copy of the uplift and the regions)
+    for (var k = 0; k < 2; k++) { mg[k] = (mesaWeightAt(g + h * vec2f(f32(1 - k), f32(k)), seed) - mw) / h; }
     gr += ${f(MESA.retreat)} * mg;
   }
   let gl = max(length(gr), 1e-7);
