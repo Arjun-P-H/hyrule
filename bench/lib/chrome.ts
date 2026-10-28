@@ -13,6 +13,9 @@ import path from 'node:path';
 export const CHROME_PATH =
   process.env.CHROME_PATH ?? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 
+/** More switches for the platform (CHROME_ARGS, space-separated): on Linux, say, `--no-sandbox --use-angle=swiftshader`. */
+const ENV_ARGS = (process.env.CHROME_ARGS ?? '').split(' ').filter(Boolean);
+
 export type ChromeOptions = {
   url: string;
   software?: boolean;
@@ -49,6 +52,7 @@ export async function launchChrome(opts: ChromeOptions): Promise<ChromeHandle> {
     `--window-size=${opts.width ?? 1280},${opts.height ?? 720}`,
     ...(opts.remoteDebugging ? ['--remote-debugging-port=0'] : []),
     ...(opts.extraArgs ?? []),
+    ...ENV_ARGS,
     opts.url,
   ];
   const proc = Bun.spawn([CHROME_PATH, ...args], { stdout: 'ignore', stderr: 'pipe' });

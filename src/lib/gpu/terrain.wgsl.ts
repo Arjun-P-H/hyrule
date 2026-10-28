@@ -31,7 +31,8 @@ import { SPECIES, SPECIES_INFO } from '../forest/species';
 import { CLASSIC_LIGHT_WGSL, cycleSkyWGSL } from './sky.wgsl';
 import { CAMERA, CLIMATE, LANDS, MARCH, SHADOW } from '../constants';
 import { BIOME_COUNT, SNOW_ALBEDO } from '../biomes';
-import { RING_BLOCK, ringBlockOrder } from './rings';
+import { RING_BLOCK, ringBlockOrder, WATER_COARSE, WATER_DIP, WATER_WET } from './rings';
+import { ROCK_WGSL } from './rockLook';
 import { PATH_N, SKY } from '../sky/celestial';
 
 /** The farthest any tree is drawn (m): beyond it the forest is painted on the ground. */
@@ -270,6 +271,8 @@ override CACHED_GRAD: bool = false;
 // Bench only, to match the far forest to the trees it stands for: 1 no canopy painted (the trees
 // alone), 2 the canopy painted at every distance in full, 3 its cover and the distance as colours.
 override CANOPY_MODE: u32 = 0u;
+// Bench only: the rock as before its detail, joints, filtered strata and curvature light (groundLook).
+override STUB_ROCK: bool = false;
 const SH_START: f32 = ${f(SHADOW.startT)};
 const SH_FOOT: f32 = ${f(SHADOW.footprintScale)};
 const SH_K: f32 = ${f(SHADOW.penumbraK)};
@@ -765,17 +768,23 @@ fn ringTris(@builtin(global_invocation_id) id: vec3u) {
   let v01 = v00 + RING_SIDE;
   let v11 = v01 + 1u;
   // Water here (some corner truly wet, and its water above another's ground, with a margin): onto the
-  // ring's water list. (Dry corners' tables lie under their ground: a cliff with none wet holds none.)
-  let w00 = meshGW(vec2f(P), l);
-  let w10 = meshGW(vec2f(P + vec2i(st, 0)), l);
-  let w01 = meshGW(vec2f(P + vec2i(0, st)), l);
-  let w11 = meshGW(vec2f(P + vec2i(st, st)), l);
-  // (on the coarse rings a cell needs two wet corners: a channel narrower than a cell would only clip
-  // one, and stand as a sliver of steep water — a spike — on a slope)
-  let nWet = select(0, 1, w00.y > w00.x + 0.02) + select(0, 1, w10.y > w10.x + 0.02) + select(0, 1, w01.y > w01.x + 0.02) + select(0, 1, w11.y > w11.x + 0.02);
+  // ring's water list (rings.ts waterCellDrawn). (Dry corners' tables lie under their ground: a cliff
+  // with none wet holds none.)
+  let wc = array<vec2f, 4>(meshGW(vec2f(P), l), meshGW(vec2f(P + vec2i(st, 0)), l),
+    meshGW(vec2f(P + vec2i(0, st)), l), meshGW(vec2f(P + vec2i(st, st)), l));
+  var nWet = 0;
+  var wetMin = 1e9;
+  var dryMin = 1e9;
+  for (var q = 0; q < 4; q++) {
+    if (wc[q].y > wc[q].x + ${f(WATER_WET)}) { nWet++; wetMin = min(wetMin, wc[q].y); } else { dryMin = min(dryMin, wc[q].x); }
+  }
+  // (on the coarse rings a cell with one wet corner and a dry one far under that water is left out: a
+  // channel narrower than a cell, on a slope, would stand as a sliver of steep water — a spike. A bank,
+  // its dry corners above the water, keeps its cell, so the shore follows the ground's contour rather
+  // than the cell lattice.)
   let cellM = f32(st) * mesh.cam.w; // (P and st are in level-0 lattice units)
-  let anyWet = nWet >= select(1, 2, cellM > 4.0);
-  if (anyWet && max(max(w00.y, w10.y), max(w01.y, w11.y)) > min(min(w00.x, w10.x), min(w01.x, w11.x)) - 0.6) {
+  let spike = nWet == 1 && cellM > ${f(WATER_COARSE)} && dryMin < wetMin - ${f(WATER_DIP)} * cellM;
+  if (nWet > 0 && !spike && max(max(wc[0].y, wc[1].y), max(wc[2].y, wc[3].y)) > min(min(wc[0].x, wc[1].x), min(wc[2].x, wc[3].x)) - 0.6) {
     let n = atomicAdd(&waterArgs[ringJob.ring * 4u], 6u) / 6u;
     waterCellsOut[ringJob.ring * side2 * side2 + n] = (ringJob.ring << 20u) | i;
   }
@@ -953,11 +962,80 @@ fn beachAt(gc: GroundCache, p: vec3f, slope: f32) -> f32 {
     * max(seaShore, 0.8 * (1.0 - gc.bioA.a));
 }
 
+${ROCK_WGSL}
+// The sun layer's gradient at xz from level l, or with level l + 1 by b (its blend band): curvatureAt.
+fn sunGradIn(rel: vec2f, l: i32, b: f32) -> vec2f {
+  let L = clip.lv[l];
+  var gr = textureSampleLevel(sunTex, hSamp, (rel * L.z + L.xy) * CLIP_INV_N, l, 0.0).zw;
+  if (b > 0.0) {
+    let L1 = clip.lv[l + 1];
+    gr = mix(gr, textureSampleLevel(sunTex, hSamp, (rel * L1.z + L1.xy) * CLIP_INV_N, l + 1, 0.0).zw, b);
+  }
+  return gr;
+}
+
+// How convex the land is at xz: > 0 on a rim or a ridge, < 0 in a hollow or at a wall's foot. Minus
+// the divergence of the unit normal's lean over ±e, e 1.5 texels of the level that holds xz (the land's
+// form, not its lattice's) and at least 2 m. A sharp break reads half the change in the lean, however
+// wide e is: 0.47 at the rim of a 72° wall.
+fn curvatureAt(xz: vec2f) -> f32 {
+  let rel = xz - clip.cam.xy;
+  let lf = log2(max(max(abs(rel.x), abs(rel.y)) * clip.cam.z, 1e-6));
+  let lc = clamp(ceil(lf), 0.0, CLIP_LMAX);
+  let l = i32(lc);
+  let b = select(0.0, clamp((lf - lc) / CLIP_BLEND + 1.0, 0.0, 1.0), lc < CLIP_LMAX);
+  let e = max(2.0, 1.5 * clip.lv[l].w * (1.0 + b));
+  let gx0 = sunGradIn(rel - vec2f(e, 0.0), l, b);
+  let gx1 = sunGradIn(rel + vec2f(e, 0.0), l, b);
+  let gz0 = sunGradIn(rel - vec2f(0.0, e), l, b);
+  let gz1 = sunGradIn(rel + vec2f(0.0, e), l, b);
+  let nx = gx1.x * inverseSqrt(1.0 + dot(gx1, gx1)) - gx0.x * inverseSqrt(1.0 + dot(gx0, gx0));
+  let nz = gz1.y * inverseSqrt(1.0 + dot(gz1, gz1)) - gz0.y * inverseSqrt(1.0 + dot(gz0, gz0));
+  return -0.5 * (nx + nz);
+}
+
+// A stratum's tint by its index: cream, rust or purple-grey.
+fn strataTint(layer: f32) -> vec3f {
+  let pick = fract(sin(layer * 12.9898) * 43758.547);
+  if (pick < 0.3) { return vec3f(1.3, 1.18, 1.0); }
+  if (pick > 0.75) { return vec3f(0.78, 0.66, 0.66); }
+  return vec3f(1.0, 0.86, 0.72);
+}
+// (their mean, by the shares above)
+const STRATA_MEAN: vec3f = vec3f(1.035, 0.906, 0.789);
+
+// The rock's vertical joints at world g (how dark, 0 … 1), at height y, seen at footprint dp: two sets
+// of upright cracks about 13 and 21 m apart, crossing at right angles and turning with the land, so
+// on a wall they run plumb whatever its lean. A crack is 0.35 m wide, deep in places and faint in
+// others along its length; it fades to its share of the face as the pixel grows past it.
+fn jointsAt(g: vec2f, y: f32, dp: f32) -> f32 {
+  if (dp >= 10.5) { return 0.0; }
+  let ang = 3.1415927 * vnoise(g.x / 700.0, g.y / 700.0, 4491);
+  let d0 = vec2f(cos(ang), sin(ang));
+  var dark = 0.0;
+  for (var k = 0; k < 2; k++) {
+    let sp = select(13.0, 21.0, k == 1);
+    let fade = 1.0 - smoothstep(0.25 * sp, 0.5 * sp, dp);
+    if (fade <= 0.0) { continue; }
+    let dir = select(d0, vec2f(-d0.y, d0.x), k == 1);
+    let ph = dot(g, dir) / sp + 0.6 * vnoise(g.x / 37.0, g.y / 37.0, 4492 + k);
+    let id = floor(ph + 0.5);
+    let dist = abs(ph - id) * sp;
+    let wf = max(0.35, dp);
+    let line = (1.0 - smoothstep(0.0, wf, dist)) * (0.35 / wf);
+    let along = dot(g, vec2f(-dir.y, dir.x));
+    let deep = smoothstep(-0.35, 0.45, vnoise(along / 25.0 + y / 18.0, id * 7.31, 4494 + k));
+    dark = max(dark, line * deep * fade);
+  }
+  return dark;
+}
+
 struct GroundLook { albedo: vec3f, glow: vec3f, snow: f32 };
-// The ground's colour at p from its biome layers (gc), its slope and its height above the water:
-// grass over soil, rock on the steep (banded in strata in canyon country), sand on low gentle shores,
-// mud by the water in wet lands, snow above the snow line, lava's glow on a volcano.
-fn groundLook(gc: GroundCache, p: vec3f, slope: f32) -> GroundLook {
+// The ground's colour at p (unit normal n, slope the gradient's length, seen at footprint dp) from its
+// biome layers (gc), its slope and its height above the water: grass over soil, rock on the steep
+// (banded in strata in canyon country), sand on low gentle shores, mud by the water in wet lands, snow
+// above the snow line, lava's glow on a volcano.
+fn groundLook(gc: GroundCache, p: vec3f, slope: f32, n: vec3f, dp: f32) -> GroundLook {
   let soil = gc.bioA.rgb * gc.bioA.rgb;
   let cover = gc.bioA.a;
   let grassCol = gc.bioB.rgb * gc.bioB.rgb;
@@ -971,15 +1049,34 @@ fn groundLook(gc: GroundCache, p: vec3f, slope: f32) -> GroundLook {
   let rockAmt = smoothstep(0.72, 1.15, slope + (1.0 - cover) * 0.22);
   if (rockAmt > 0.0) {
     var rk = rock;
+    // how far the face leans from level (the sine of its slope): a pixel spans dp·lean up it
+    let lean = sqrt(max(1.0 - n.y * n.y, 0.0));
     if (strata > 0.01) {
-      // Strata: layers by height, warped a little, each its own tint (cream, rust, purple-grey).
+      // Strata: layers by height, warped a little, each its own tint, a darker bedding line between.
       let hb = p.y / 7.5 + 0.6 * vnoise(g.x / 90.0, g.y / 90.0, 4441);
       let layer = floor(hb);
-      let pick = fract(sin(layer * 12.9898) * 43758.547);
-      var tint = vec3f(1.0, 0.86, 0.72);
-      if (pick < 0.3) { tint = vec3f(1.3, 1.18, 1.0); } else if (pick > 0.75) { tint = vec3f(0.78, 0.66, 0.66); }
-      let edge = smoothstep(0.42, 0.5, abs(fract(hb) - 0.5));
+      let fr = hb - layer;
+      var tint = strataTint(layer);
+      var edge = smoothstep(0.42, 0.5, abs(fr - 0.5));
+      if (!STUB_ROCK) {
+        // (box-filtered over the w layers the pixel spans up the face, so far walls don't shimmer)
+        let w = clamp(dp * lean / 7.5, 1e-3, 1.0);
+        let up = clamp((fr + 0.5 * w - 1.0) / w, 0.0, 1.0);
+        let dn = clamp((0.5 * w - fr) / w, 0.0, 1.0);
+        tint = tint * (1.0 - up - dn) + strataTint(layer + 1.0) * up + strataTint(layer - 1.0) * dn;
+        tint = mix(tint, STRATA_MEAN, smoothstep(0.5, 1.0, w));
+        edge = mix(edge, 0.08, smoothstep(0.02, 0.12, w));
+      }
       rk = mix(rock, rock * tint * (1.0 - 0.25 * edge), strata);
+    }
+    if (!STUB_ROCK) {
+      // The rock's own detail, drawn on the planes that face it (rockDetail: stretched at most 1.47×);
+      // its joints, plumb on the walls; and its form, lit along the rims and dark in the hollows.
+      rk *= 1.0 + 0.2 * rockDetail(vec3f(g.x, p.y, g.y), n, dp);
+      let jl = smoothstep(0.75, 0.9, lean);
+      if (jl > 0.0) { rk *= 1.0 - 0.45 * jl * jointsAt(g, p.y, dp); }
+      let cv = curvatureAt(p.xz);
+      rk *= 1.0 + 0.28 * smoothstep(0.08, 0.4, cv) - 0.32 * smoothstep(0.08, 0.4, -cv);
     }
     col = mix(col, rk, rockAmt);
   }
@@ -1053,7 +1150,7 @@ fn shadeGround(p: vec3f, rd: vec3f, tS: f32, gc: GroundCache) -> vec3f {
   var albedo = vec3f(0.1, 0.16, 0.05);
   var glow = vec3f(0.0);
   if (!STUB_BIOME) {
-    let look = groundLook(gc, p, length(grad));
+    let look = groundLook(gc, p, length(grad), n, max(tS * u.footprint, 1e-4));
     albedo = bedTint(look.albedo, p, gc.wt);
     glow = look.glow;
     if (look.snow > 0.01 && !STUB_GRAD) { n = snowRelief(n, p, tS * u.footprint, look.snow); }
@@ -1139,7 +1236,7 @@ fn project(rel: vec3f) -> vec4f {
 // under a bank and the ground hides it there — never up the bank, a sloped sheet over a shore or a cliff.
 // (flatTo ≥ 1e8: no cell known; the table there kept just under the ground.)
 fn waterVertexH(gw: vec2f, flatTo: f32) -> f32 {
-  if (gw.y > gw.x + 0.02) { return gw.y; }
+  if (gw.y > gw.x + ${f(WATER_WET)}) { return gw.y; }
   if (flatTo < 1e8) { return min(flatTo, gw.x - 0.05); }
   return max(gw.y, gw.x - 0.5);
 }
@@ -1222,7 +1319,7 @@ fn vsWaterCell(@builtin(vertex_index) vi: u32) -> TOut {
   var wetMin = 1e9;
   for (var q = 0u; q < 4u; q++) {
     let gw = meshGW(vec2f(P + vec2i(i32(q & 1u), i32(q >> 1u)) * R.z), R.w);
-    if (gw.y > gw.x + 0.02) { wetMin = min(wetMin, gw.y); }
+    if (gw.y > gw.x + ${f(WATER_WET)}) { wetMin = min(wetMin, gw.y); }
   }
   return ringVertex((c / side2 + WC_DZ[k]) * RING_SIDE + c % side2 + WC_DX[k], ring, true, wetMin);
 }

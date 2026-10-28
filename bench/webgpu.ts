@@ -18,7 +18,7 @@
  *                                  pan, flicker per variant (say, the trees'
  *                                  surface detail against plain trees)
  *
- * Options: --res=1280x800 --reps=2 --frames=all|0,6,12 --variants=a,b --warmup=1 (a copy of the
+ * Options: --res=1280x800 --reps=2 --frames=all|none|0,6,12 --variants=a,b --warmup=1 (a copy of the
  *          first variant runs first and is left out of the ratios: see pickVariants)
  *          --hours=6,12,18.2 (stills of day–night variants at those hours; --day=n the game day)
  *          --hour=18.2 (timing of day–night variants at that hour)
@@ -272,6 +272,7 @@ function pickVariants(def: string): Array<{ name: string; variant: TerrainVarian
 function frameList(def: number[]): number[] {
   const f = opt('frames', '');
   if (f === 'all') return FRAMES.map((_, i) => i);
+  if (f === 'none') return [];
   if (f) return f.split(',').map(Number);
   return def;
 }
@@ -295,7 +296,9 @@ async function runWebGPU(cfg: Record<string, unknown>): Promise<SessionResult> {
     variants: [], presets: [PRESET], frames: FRAMES, seed: DEFAULT_SEED, fov: CAMERA.fov, reps: REPS,
     warmupMs: 2000, sentinelEvery: 10, batch: 8, repeat: Number(opt('repeat', '3')), shotFrames: [], probes: [],
     gen: { starts: [0, 12, 24, 35, 47], rebuilds: 3, cases: [] },
-    stallMs: 180_000, timeoutMs: 40 * 60_000,
+    // --stall=s, --timeout=min: a slow device (SwiftShader) compiles the pipelines for minutes before its
+    // first message, and takes minutes over each still
+    stallMs: Number(opt('stall', '180')) * 1000, timeoutMs: Number(opt('timeout', '40')) * 60_000,
     ...cfg,
   };
   return runSession(all, { pageJs: await webgpuPage(), chromeArgs: CHROME_WEBGPU });
@@ -359,18 +362,23 @@ function printDiff(d: ReturnType<typeof diffTable>): void {
 // ---------------------------------------------------------------------------
 async function port(): Promise<void> {
   const frames = frameList(SHOT_FRAMES);
-  const probes = probeSpecs();
+  // --config=forms: also a probe round each camera of that framed config (landprobe's)
+  const probes = [...probeSpecs(), ...(opt('config', '') ? frameProbes(opt('config', ''), 4, 1e-4) : [])];
   console.log(`WGSL port check at ${W}×${H}, frames ${frames.join(',')}`);
-  const gpu = await runWebGPU({ modes: ['shots', 'probe'], variants: pickVariants('direct'), shotFrames: frames, probes });
+  // --frames=none: the probes alone (a raymarched frame can outlast a software adapter's watchdog)
+  const gpu = await runWebGPU({ modes: frames.length ? ['shots', 'probe'] : ['probe'], variants: pickVariants('direct'), shotFrames: frames, probes });
   console.log('  webgpu env:', JSON.stringify(gpu.env), 'compile:', JSON.stringify(gpu.compile));
   const src = await loadShader(WORKTREE);
-  const gl = await runSession(webglBase(['shots'], [{ name: 'webgl', vs: src.vs, fs: src.fs }], { shotFrames: frames }));
   const glProbe = await runSession(webglBase(['probe'], [{ name: 'glsl', vs: src.vs, fs: transformShader(src.fs, 'probe') }], { probes }));
-  const dir = path.join(OUT, 'webgpu', 'port');
-  const a = saveShots(gl, dir, true);
-  const b = saveShots(gpu, dir, false);
-  const d = diffTable(a, 'webgl', b, 'direct', frames);
-  printDiff(d);
+  let d: ReturnType<typeof diffTable> | null = null;
+  if (frames.length) {
+    const gl = await runSession(webglBase(['shots'], [{ name: 'webgl', vs: src.vs, fs: src.fs }], { shotFrames: frames }));
+    const dir = path.join(OUT, 'webgpu', 'port');
+    const a = saveShots(gl, dir, true);
+    const b = saveShots(gpu, dir, false);
+    d = diffTable(a, 'webgl', b, 'direct', frames);
+    printDiff(d);
+  }
 
   const { mod } = await loadTerrainMath(WORKTREE);
   const wgsl = analyzeParity(probes, gpu.blobs, 'wgsl', mod);
@@ -835,14 +843,19 @@ async function shimmer(): Promise<void> {
  * The lands' elevation on the GPU (PROBE_WGSL: worldgen.wgsl.ts elevation) against the CPU twin at
  * every camera of a framed config (default: lands), on a 64 × 64 grid round each (--step=4 m).
  */
-async function landprobe(): Promise<void> {
-  const config = opt('config', 'lands');
+/** A 64 × 64 probe (spacing step m, footprint dp) round each camera of a framed config. */
+function frameProbes(config: string, step: number, dp: number) {
   const framed: CameraFrame[] = JSON.parse(readFileSync(path.join(OUT, '.cache', `framed-${config}.json`), 'utf8'));
-  const step = Number(opt('step', '4')), n = 64;
-  const probes = framed.map((fr) => {
+  const n = 64;
+  return framed.map((fr) => {
     const ox = Math.floor(fr.x / CHUNK_SIZE) * CHUNK_SIZE, oz = Math.floor(fr.z / CHUNK_SIZE) * CHUNK_SIZE;
-    return { id: `f${fr.frame}-${fr.scene}`, origin: [ox, oz] as [number, number], local0: [fr.x - ox - (n / 2) * step, fr.z - oz - (n / 2) * step] as [number, number], step, w: n, h: n, dp: 1e-4 };
+    return { id: `f${fr.frame}-${fr.scene}`, origin: [ox, oz] as [number, number], local0: [fr.x - ox - (n / 2) * step, fr.z - oz - (n / 2) * step] as [number, number], step, w: n, h: n, dp };
   });
+}
+
+async function landprobe(): Promise<void> {
+  const step = Number(opt('step', '4')), n = 64;
+  const probes = frameProbes(opt('config', 'lands'), step, 1e-4);
   const gpu = await runWebGPU({ modes: ['probe'], variants: pickVariants('direct'), probes });
   console.log('  probe                        max |E_gpu − E_cpu|   p99      cells > 0.1 m   max |W_gpu − W_cpu| (wet)');
   for (const s of probes) {

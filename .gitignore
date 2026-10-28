@@ -55,3 +55,6 @@ server.log
 .agents
 # benchmark run outputs (reports, frames, caches) — baselines live in bench/baseline/
 /bench/out/
+
+# python
+__pycache__/

@@ -13,7 +13,9 @@
  * CPU twin in fp64 and the GPU in fp32 place the same cells at any distance from the origin, where
  * IQ's fract-based hash diverges); each octave fades to its fade target as it shrinks below the
  * pixel footprint (spec §5 prefiltering); the gully direction bends by a smooth sign of each octave's
- * slope (upstream: sign(), a discontinuity on which fp32 and fp64 part ways); the ridge map is not computed.
+ * slope (upstream: sign(), a discontinuity on which fp32 and fp64 part ways); the ridge map is not computed;
+ * each cell scales its stripe spacing by up to ±jitter/2 (upstream: one spacing per octave, which lines
+ * every flank with a comb of gullies at one wavelength; the pivot jitter keeps 12 bits a axis to make room).
  *
  * What it does: given a height and its gradient, every octave lays stripes ("Phacelle" noise)
  * along the downhill direction, interpolated between jittered cell pivots, and adds them as
@@ -40,6 +42,8 @@ const EROSION = {
   octaves: 4,
   lacunarity: 2.0,
   gain: 0.5,
+  /** Spread of the stripe spacing between cells (0: upstream's one spacing per octave). */
+  jitter: 0.8,
 } as const;
 
 const TAU = Math.PI * 2;
@@ -68,11 +72,12 @@ function phacelle(px: number, pz: number, dx: number, dz: number, freq: number, 
   for (let j = -1; j <= 2; j++) {
     for (let i = -1; i <= 2; i++) {
       const h = hash3(ix + i, iz + j, SEED + octave);
-      const vx = fx - i - ((h & 0xffff) / 65535 - 0.5);
-      const vz = fz - j - ((h >>> 16) / 65535 - 0.5);
+      const vx = fx - i - ((h & 0xfff) / 4095 - 0.5);
+      const vz = fz - j - (((h >>> 12) & 0xfff) / 4095 - 0.5);
       const w = Math.max(0, Math.exp(-(vx * vx + vz * vz) * 2) - 0.01111);
       ws += w;
-      const wave = vx * sx + vz * sz + off;
+      const fj = 1 + EROSION.jitter * ((h >>> 24) / 255 - 0.5);
+      const wave = (vx * sx + vz * sz) * fj + off;
       pc += Math.cos(wave) * w;
       ps += Math.sin(wave) * w;
     }
@@ -147,11 +152,12 @@ fn eroPhacelle(p: vec2f, dir: vec2f, freq: f32, offset: f32, norm: f32, octave: 
   for (var j = -1; j <= 2; j++) {
     for (var i = -1; i <= 2; i++) {
       let h = hash3(ii.x + i, ii.y + j, ${SEED} + octave);
-      let v = pf - vec2f(f32(i), f32(j)) - (vec2f(f32(h & 0xffffu), f32(h >> 16u)) / 65535.0 - 0.5);
+      let v = pf - vec2f(f32(i), f32(j)) - (vec2f(f32(h & 0xfffu), f32((h >> 12u) & 0xfffu)) / 4095.0 - 0.5);
       let w = max(0.0, exp(-dot(v, v) * 2.0) - 0.01111);
       ws += w;
       // (range-reduced: the GPU's fast sin and cos lose accuracy far from zero)
-      let w0 = dot(v, side) + off;
+      let fj = 1.0 + ${f(EROSION.jitter)} * (f32(h >> 24u) / 255.0 - 0.5);
+      let w0 = dot(v, side) * fj + off;
       let wave = w0 - 6.283185307 * round(w0 / 6.283185307);
       pc += cos(wave) * w;
       ps += sin(wave) * w;
@@ -216,10 +222,11 @@ vec4 eroPhacelle(vec2 p, vec2 dir, float freq, float offset, float norm, int oct
   for (int j = -1; j <= 2; j++) {
     for (int i = -1; i <= 2; i++) {
       uint h = hash3(ii.x + i, ii.y + j, ${SEED} + octave);
-      vec2 v = pf - vec2(float(i), float(j)) - (vec2(float(h & 0xffffu), float(h >> 16u)) / 65535.0 - 0.5);
+      vec2 v = pf - vec2(float(i), float(j)) - (vec2(float(h & 0xfffu), float((h >> 12u) & 0xfffu)) / 4095.0 - 0.5);
       float w = max(0.0, exp(-dot(v, v) * 2.0) - 0.01111);
       ws += w;
-      float w0 = dot(v, side) + off;
+      float fj = 1.0 + ${f(EROSION.jitter)} * (float(h >> 24u) / 255.0 - 0.5);
+      float w0 = dot(v, side) * fj + off;
       float wave = w0 - 6.283185307 * floor(w0 / 6.283185307 + 0.5);
       pc += cos(wave) * w;
       ps += sin(wave) * w;

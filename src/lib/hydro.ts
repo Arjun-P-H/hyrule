@@ -556,6 +556,13 @@ export const RF = {
    * over a bank another valley has cut lower.
    */
   cap: Infinity,
+  /**
+   * The valley walls' slope at the point (warped plane): the tensor g gᵀ of each reach's gradient
+   * across its valley, averaged with weights falling off by e per HYDRO.wallSoft its surface stands
+   * over the lowest, so it changes smoothly where two valleys' walls meet. A wall's slope seen through a
+   * map J of the plane is √(gᵀ J Jᵀ g).
+   */
+  gxx: 0, gxz: 0, gzz: 0,
 };
 
 /** The gentlest valley walls of any region: a lake's ring is judged on them, so no region's valleys can breach it. */
@@ -760,6 +767,15 @@ export function riverField(wx: number, wz: number, seed: number, k: number, lake
     S_LAT[nR] = dist < rl ? 0 : valleySlope(dist, dist, rl, LK_D[q], fl, k); S_ALG[nR] = 0; S_CURV[nR] = HYDRO.wallCurve;
     S_NX[nR] = LK_NX[q]; S_NZ[nR] = LK_NZ[q]; S_LOOSE[nR] = 0.3; S_WLO[nR] = LK_W[q]; S_NA[nR] = -1; S_NB[nR++] = -2;
   }
+  // the walls' slope: each reach's gradient across, weighted by a soft minimum over the surfaces
+  let gw = 0, gxx = 0, gxz = 0, gzz = 0;
+  for (let r = 0; r < nR; r++) {
+    const d = S_AT[r] - RF.R;
+    if (d > 10 * HYDRO.wallSoft) continue;
+    const wt = Math.exp(-d / HYDRO.wallSoft), g2 = wt * S_LAT[r] * S_LAT[r];
+    gw += wt; gxx += g2 * S_NX[r] * S_NX[r]; gxz += g2 * S_NX[r] * S_NZ[r]; gzz += g2 * S_NZ[r] * S_NZ[r];
+  }
+  if (gw > 0) { RF.gxx = gxx / gw; RF.gxz = gxz / gw; RF.gzz = gzz / gw; } else { RF.gxx = RF.gxz = RF.gzz = 0; }
   // the nearest channel's water stays under every other reach's surface out to its far bank (that
   // surface falls toward the bank by its slope along the line across the channel)
   if (best >= 0) {

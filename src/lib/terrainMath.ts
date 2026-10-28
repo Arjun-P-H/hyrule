@@ -33,7 +33,7 @@ import { erosionDelta } from "./erosion";
 import { n01, smoothstep } from "./noise";
 
 export { hashU, hash3, hash01, cellPoint, cellType, quintic, vnoise } from './noise';
-import { hash3, vnoise } from './noise';
+import { hash3, SN, snoise, vnoise, vnoiseG, VN } from './noise';
 
 /**
  * Nyquist octave weight (spec §5): fade out between 0.5 and 1 cycle/pixel.
@@ -340,10 +340,16 @@ const K_FLAT = LANDFORM_KEYS.indexOf('flat'), K_K = LANDFORM_KEYS.indexOf('k');
 const K_ERO = LANDFORM_KEYS.indexOf('erosion'), K_POND = LANDFORM_KEYS.indexOf('pond');
 
 /**
- * What filtered-out landforms fade to (the WGSL twin reads these): E[(1 − |n|)²] for the value noise
- * (a ridged octave), the karst towers' and the dunes' mean heights (m, per unit of their weight).
+ * What filtered-out landforms fade to (the WGSL twin reads these): E[(1 − |n|)²] for a ridged octave
+ * (RIDGE_SCALE sets it to value noise's), the karst towers' and the dunes' mean heights (m, per unit of their weight).
  */
 export const LAND_MEANS = { ridge: 0.4466, tower: 21.0, dune: 9.0 } as const;
+/**
+ * The ridged octaves' simplex noise: its scale (E[(1 − |RIDGE_SCALE · snoise|)²] = LAND_MEANS.ridge, and
+ * |RIDGE_SCALE · snoise| ≤ 0.79), its span (simplex crosses zero 2.75× as often as value noise: × 3/8
+ * keeps the ranges' ridges as far apart, and as steep) and how much each octave's slope damps the next.
+ */
+export const RIDGE_SCALE = 77.665, RIDGE_SPAN = 0.375, RIDGE_DAMP = 0.25;
 const RIDGE_MEAN = LAND_MEANS.ridge;
 const TOWER_MEAN = LAND_MEANS.tower;
 const DUNE_MEAN = LAND_MEANS.dune;
@@ -362,6 +368,17 @@ let _vW = 0, _sW = 0;
 let _wx = 0, _wz = 0;
 let _e = 0, _wt = 0, _land = 1, _riverK = 0, _lakeK = 0, _fx = 0, _fz = 0, _speed = 0, _lava = 0, _shore = -Infinity;
 
+/**
+ * Diagnostics (bench/terrain/forms.ts): while `on`, landCore records here each term of the land's height at
+ * the last point it evaluated — the regions' terms before their mask (`scale`, m · taper, applies to them),
+ * the lift round rivers and marshes, the terraces (≥ 0) and valleys (≤ 0) the rivers make, the pond, marsh
+ * and coast's change, and the final ground and water.
+ */
+export const TERMS = {
+  on: false, U: 0, hills: 0, ridges: 0, karst: 0, dunes: 0, mesas: 0, gullies: 0, scale: 0, lift: 0,
+  terraces: 0, valleys: 0, rest: 0, E: 0, W: 0,
+};
+
 /** §14 — the warped plane at (x, z) into _wx, _wz (the fBm warp, dp-free). */
 function warpInto(x: number, z: number, seed: number): void {
   const wx = x * F.warp, wy = z * F.warp;
@@ -369,6 +386,17 @@ function warpInto(x: number, z: number, seed: number): void {
   const qy = vnoise(wx + 5.2, wy + 1.3, seed + 37) + 0.5 * vnoise((wx + 5.2) * 2.0, (wy + 1.3) * 2.0, seed + 40540);
   _wx = x + WARP.strength * qx;
   _wz = z + WARP.strength * qy;
+}
+
+/** warpInto's Jacobian ∂(wx, wz)/∂(x, z) at (x, z), into _j11 (∂wx/∂x), _j12 (∂wx/∂z), _j21, _j22. */
+let _j11 = 1, _j12 = 0, _j21 = 0, _j22 = 1;
+function warpJ(x: number, z: number, seed: number): void {
+  const wx = x * F.warp, wy = z * F.warp, k = WARP.strength * F.warp;
+  vnoiseG(wx, wy, seed + 11); let ax = VN.dx, az = VN.dy;
+  vnoiseG(wx * 2.0, wy * 2.0, seed + 40514); ax += VN.dx; az += VN.dy;
+  vnoiseG(wx + 5.2, wy + 1.3, seed + 37); let bx = VN.dx, bz = VN.dy;
+  vnoiseG((wx + 5.2) * 2.0, (wy + 1.3) * 2.0, seed + 40540); bx += VN.dx; bz += VN.dy;
+  _j11 = 1 + k * ax; _j12 = k * az; _j21 = k * bx; _j22 = 1 + k * bz;
 }
 
 /**
@@ -522,27 +550,97 @@ export function lastSeaTemperature(): number { return _T0; }
 export function lastMoisture(): number { return _M; }
 
 /* ---- §6/§11 landforms ------------------------------------------------- */
-/** Karst towers: the highest of the steep-sided cones of the 3 × 3 cells of a 300 m lattice round the point (m). */
-function karstTowers(x: number, z: number, seed: number): number {
+/** Polynomial smooth max / min of a and b, rounding the crease between them over k (> 0). */
+function ksmax(a: number, b: number, k: number): number {
+  const h = Math.max(k - Math.abs(a - b), 0) / k;
+  return Math.max(a, b) + 0.25 * h * h * k;
+}
+function ksmin(a: number, b: number, k: number): number {
+  const h = Math.max(k - Math.abs(a - b), 0) / k;
+  return Math.min(a, b) - 0.25 * h * h * k;
+}
+
+/**
+ * The karst towers' plan: the angles of a tower's seven faces' normals (rad; their widest gap 1.04, so
+ * no direction lies more than 0.52 rad off a face), and the 16 turns of a tower ((cos, sin) of k·π/8;
+ * the GPU twins read both as tables, their sin and cos being only good to 2^-11).
+ */
+export const KARST_FACES = [0, 0.95, 1.71, 2.62, 3.41, 4.33, 5.37] as const;
+export const KARST_NORMALS = KARST_FACES.map((a) => [Math.cos(a), Math.sin(a)] as const);
+export const KARST_TURNS = Array.from({ length: 16 }, (_, k) => [Math.cos((k * Math.PI) / 8), Math.sin((k * Math.PI) / 8)] as const);
+/**
+ * Toward a river the towers stand under a ceiling rising this steeply (m/m, 72°) from KARST_BANK m
+ * back from its floor's edge: a tower by the water meets it in a sheer face, never a slope cut into
+ * a tilted plate by the valley's side.
+ */
+export const KARST_CEIL = 3, KARST_BANK = 4;
+/**
+ * A cliffed coast's cross-section, along the distance d (m) in from the coastline (C = level): a wall
+ * at `wall` (m/m, 80°) rising from a wave-cut platform `platform` m under the sea (falling seaward at
+ * `shelf` to the sea floor), standing `toe` m in from the coastline behind a talus apron (`talus` m/m,
+ * 34°) that reaches out up to `apron` m where the noise lets it; the wall meets the land in a rim
+ * rounded over `rim` m (and over the footprint). The cut is weighted by the cliffed coast's weight
+ * over `weight`; d is measured within `band` of the level in C, from a finite difference over `h` m
+ * (over 2 m, fp32's rounding of C put the GPU twins' wall 45 mm off the CPU twin's; over 16 m, a few).
+ */
+export const SEA_CLIFF = {
+  wall: 5.67, talus: 0.6745, apron: 26, toe: 6, platform: 1, shelf: 0.05, rim: 1.5,
+  weight: [0.05, 0.45], band: 0.04, h: 16,
+} as const;
+
+/** How much of the last point karstTowers evaluated is tower (0 on the apron's lower half, 1 on the wall and cap). */
+let _kcov = 0;
+/** The towers' height (m, × their region's weight) at the last point landDetail evaluated. */
+let _kt = 0;
+
+/**
+ * Karst towers (the form brief, docs/FORMS.md): one on most cells of a 300 m lattice laid out in
+ * the world, the highest of the 3 × 3 round the point (m). Each is a prism on a seven-sided plan, its
+ * faces (KARST_FACES) turned and pushed in or out by its hash: a cap that is near flat, a wall of 74–81°
+ * from the cap's rim down to its foot at 12–20 % of the tower's height, and from there a talus apron of
+ * 32–37° to the ground. 50–220 m high, its height over its width (at the wall's foot) 0.7–1.5. The
+ * breaks of slope are rounded over the footprint dp, never finer than a pixel can show. The tower's
+ * share of the point into _kcov.
+ */
+function karstTowers(x: number, z: number, seed: number, dp: number): number {
   const f = F.tower;
   const px = x * f, pz = z * f;
   const ipx = Math.floor(px), ipz = Math.floor(pz);
-  let best = 0;
+  const ws = clamp(dp, 1, 24), k2 = 4 * ws, k3 = 0.7 * ws + 1.5;
+  let best = 0, cov = 0;
   for (let j = -1; j <= 1; j++) {
     for (let i = -1; i <= 1; i++) {
+      const h2 = hash3(ipx + i, ipz + j, seed + 2302);
+      if (h2 >>> 27 < 4) continue; // (one cell in eight holds none)
       const h = hash3(ipx + i, ipz + j, seed + 2301);
-      const cx = ipx + i + 0.2 + 0.6 * (h & 0xfff) * INV_4095, cz = ipz + j + 0.2 + 0.6 * ((h >>> 12) & 0xfff) * INV_4095;
-      const dx = px - cx, dz = pz - cz;
-      const r = (75 + 70 * ((h >>> 24) & 15) / 15) * f; // in cells
-      const d2 = dx * dx + dz * dz;
-      if (d2 >= r * r) continue;
-      const q = 1 - Math.sqrt(d2) / r;
+      const cx = i + 0.2 + 0.6 * (h & 0xfff) * INV_4095, cz = j + 0.2 + 0.6 * ((h >>> 12) & 0xfff) * INV_4095; // (from the cell's corner)
       const H = 50 + 170 * ((h >>> 28) & 15) / 15;
-      const q1 = 1 - q, q2 = q1 * q1;
-      const t = H * (1 - q2 * q1 * Math.sqrt(q1)); // 1 − (1 − q)^3.5: sheer sides, a rounded top
+      const Rw = H / (2 * (0.7 + 0.8 * ((h >>> 24) & 15) / 15)); // the wall's foot (m from the axis)
+      const Ht = (0.12 + 0.08 * ((h2 >>> 18) & 7) / 7) * H; // its height
+      const Sw = 3.5 + 2.8 * ((h2 >>> 21) & 7) / 7, St = 0.62 + 0.13 * ((h2 >>> 24) & 7) / 7; // the wall's slope and the apron's
+      const Rz = Rw + (Ht + k3) / St; // (nothing of it beyond)
+      const ux = (px - ipx - cx) / f, uz = (pz - ipz - cz) / f; // (m; p − ip is exact in fp32, so the GPU twins lose nothing far out)
+      // (the plan's gauge s is at least 0.72 × the distance: no face lies over 0.52 rad off and none is pushed out over 1.2 ×)
+      if ((ux * ux + uz * uz) * 0.5184 >= Rz * Rz) continue;
+      const [tc, ts] = KARST_TURNS[h2 & 15];
+      const vx = tc * ux + ts * uz, vz = tc * uz - ts * ux;
+      const kr = 0.12 * Rw; // (the edges between faces rounded over an eighth of its width)
+      let s = 0;
+      for (let k = 0; k < 7; k++) {
+        const d = (vx * KARST_NORMALS[k][0] + vz * KARST_NORMALS[k][1]) / (0.8 + 0.4 * ((h2 >>> (4 + 2 * k)) & 3) / 3);
+        s = k === 0 ? d : ksmax(s, d, kr);
+      }
+      const wall = Ht + Sw * (Rw - s), talus = Ht - St * (s - Rw);
+      const Rtop = Rw - (H - Ht) / Sw; // the cap's rim (≥ 0.08 H)
+      const cap = H - (0.6 * Rtop * s * s) / (4 * Rtop * Rtop + s * s); // (falls 0.12 Rtop to its rim, at most 0.6 Rtop)
+      const p = ksmin(cap, ksmax(wall, talus, k2), 5 * ws + 0.03 * H);
+      const t = ksmax(p, 0, k3);
       if (t > best) best = t;
+      const c = smoothstep(0.5 * Ht, Ht + 0.1 * H, p);
+      if (c > cov) cov = c;
     }
   }
+  _kcov = cov;
   return best;
 }
 
@@ -570,15 +668,236 @@ export function dunesE(x: number, z: number, seed: number, dp: number): number {
   return amp * (wMain * d + (1 - wMain) * DUNE_MEAN);
 }
 
-/** Mesas: three tiers of flat-topped buttes, each a cliff over a talus skirt (m). Cliffs soften as dp grows. */
-function mesasE(wx: number, wz: number, seed: number, dp: number): number {
-  const n = 0.7 * n01(wx, wz, F.mesa, seed + 2501) + 0.3 * n01(wx, wz, F.mesafine, seed + 2502);
-  const cw = Math.max(0.011, 0.0012 * dp);
-  return 80 * (0.82 * smoothstep(0, cw, n - 0.42) + 0.18 * smoothstep(-0.07, 0, n - 0.42))
-    + 70 * (0.82 * smoothstep(0, cw, n - 0.52) + 0.18 * smoothstep(-0.07, 0, n - 0.52))
-    + 60 * (0.82 * smoothstep(0, cw, n - 0.61) + 0.18 * smoothstep(-0.07, 0, n - 0.61));
+/**
+ * Mesas and buttes (the form brief, docs/FORMS.md): up to three tiers, each standing where the
+ * plan noise n (two octaves laid out in the world) passes its threshold: a flat cap, a wall (a band of
+ * caprock over the cliff) down to its foot, and a talus apron down to the bench of the tier below. The
+ * wall is laid out by the distance d (m) in from the tier's contour along n's gradient, the linear
+ * guess (n − t)/|∇n| refined by a secant step, so walls and aprons keep their slopes however fast n
+ * changes (when each tier was a smoothstep of n, a wall's steepness followed n's gradient and smeared
+ * over 45–70°). A slow noise sets the rock's hardness, each tier's a step harder than the one under it:
+ * harder rock stands in steeper, taller walls over steeper talus. Toward the region's edge the tiers
+ * retreat and shrink, leaving buttes out on the plain.
+ */
+export const MESA = {
+  /** The tiers, from the lowest: n's threshold and the tier's height (m). */
+  tiers: [[0.42, 80], [0.52, 70], [0.61, 60]],
+  /** The caprock's slope (m/m, 82°) and its share of the wall's height. */
+  caprock: [7, 0.25],
+  /** Soft rock → hard: the cliff's slope (m/m, 75–79°), the wall's share of the tier, the talus' slope (32–37°). */
+  cliff: [3.8, 5.2], wall: [0.5, 0.72], talus: [0.62, 0.75],
+  /** A tier's hardness over the one under it. */
+  harder: 0.25,
+  /** At its region's edge (weight 0) the thresholds rise by `retreat`; the tiers' heights fade in over weights 0.001 → `rise`. */
+  retreat: 0.8, rise: 0.25,
+  /** The secant step is taken within this far of a contour (m), inside and out. */
+  reach: [40, 160],
+  /**
+   * The region weight's forward difference steps max(1 m, the distance from the origin / fdSpan): an fp32
+   * twin's weight is a little noisy far out (about 2.5 % of its gradient over 1 m at 78 km), and a longer
+   * step keeps that noise near 1 % out to 1000 km.
+   */
+  fdSpan: 32768,
+} as const;
+
+/** How much of the last point mesasE evaluated is a mesa (from halfway down an apron in, × its height's fade). */
+let _mcov = 0;
+
+/** n, the mesas' plan noise, at world (x, z). */
+function mesaPlan(x: number, z: number, seed: number): number {
+  return 0.5 + 0.35 * vnoise(x * F.mesa, z * F.mesa, seed + 2501) + 0.15 * vnoise(x * F.mesafine, z * F.mesafine, seed + 2502);
 }
 
+const _wm = new Float64Array(NB);
+/** The mesas' region weight at world (x, z) (its own warp, uplift and regions: they overwrite the scratch theirs share). */
+function mesaWeightAt(x: number, z: number, seed: number): number {
+  warpInto(x, z, seed);
+  upliftAt(_wx, _wz, seed);
+  regionsInto(x, z, _wx, _wz, seed, _wm);
+  let s = 0;
+  for (let b = 0; b < NB; b++) s += _wm[b] * LF_TABLE[b * NK + K_MESA];
+  return smoothstep(0.35, 0.75, s);
+}
+
+/**
+ * The mesas at world (x, z), where their region weighs mw (from the blended landform's
+ * share lfm; m, the weight applied); their cover into _mcov.
+ */
+function mesasE(x: number, z: number, seed: number, dp: number, mw: number, lfm: number): number {
+  _mcov = 0;
+  const hm = smoothstep(0.001, MESA.rise, mw);
+  if (hm <= 0) return 0;
+  const a = vnoiseG(x * F.mesa, z * F.mesa, seed + 2501), ax = VN.dx, az = VN.dy;
+  const b = vnoiseG(x * F.mesafine, z * F.mesafine, seed + 2502);
+  const n = 0.5 + 0.35 * a + 0.15 * b;
+  let gx = 0.35 * F.mesa * ax + 0.15 * F.mesafine * VN.dx, gz = 0.35 * F.mesa * az + 0.15 * F.mesafine * VN.dy;
+  // The tiers retreat toward the region's edge, their contours where n = threshold + lift; lift follows
+  // the region's weight, which across its fade changes as fast as n or faster, so the distance to a
+  // contour is measured along the gradient of both (the weight's a forward difference, MESA.fdSpan, where it
+  // is not yet 1: beyond lfm 0.85 it is 1 here and a step away)
+  let mx = 0, mz = 0;
+  if (lfm < 0.85) {
+    const sx = _wx, sz = _wz, sT = _T0, sM = _M, sC = _C, sU = _U, sv = _vW, ss = _sW;
+    const h = Math.max(1, Math.hypot(x, z) / MESA.fdSpan);
+    mx = (mesaWeightAt(x + h, z, seed) - mw) / h;
+    mz = (mesaWeightAt(x, z + h, seed) - mw) / h;
+    _wx = sx; _wz = sz; _T0 = sT; _M = sM; _C = sC; _U = sU; _vW = sv; _sW = ss;
+    gx += MESA.retreat * mx; gz += MESA.retreat * mz;
+  }
+  const gl = Math.max(Math.hypot(gx, gz), 1e-7), ux = gx / gl, uz = gz / gl;
+  const mu = MESA.retreat * (mx * ux + mz * uz);
+  const hd0 = n01(x, z, F.mesa, seed + 2503);
+  const lift = MESA.retreat * (1 - mw);
+  // (the blend of a tier onto the one under it fades with the tiers' heights: 3 × ¼ k3 where all are flat)
+  const ws = Math.max(dp, 1), k3 = (0.7 * ws + 1.5) * hm + 1e-3;
+  const [r0, r1] = MESA.reach;
+  let e = 0, top = 0, cov = 0;
+  for (let i = 0; i < 3; i++) {
+    const H = MESA.tiers[i][1] * hm, Cp = top, C = top + H;
+    top = C;
+    const ei = n - MESA.tiers[i][0] - lift;
+    let d = ei / gl;
+    if (d > -r1 && d < r0) {
+      // (the secant between the point and n at the linear guess of the contour, its correction held to
+      // ½–2× so it never flips, faded out toward the reach)
+      const nq = mesaPlan(x - d * ux, z - d * uz, seed);
+      const ds = d / clamp((n - nq + d * mu) / (Math.abs(ei) > 1e-12 ? ei : 1e-12), 0.5, 2);
+      d = ds + (d - ds) * smoothstep(0.75, 1, d > 0 ? d / r0 : -d / r1);
+    }
+    const hd = clamp(hd0 + MESA.harder * (i - 1), 0, 1);
+    const Sw = MESA.cliff[0] + (MESA.cliff[1] - MESA.cliff[0]) * hd;
+    const hw = (MESA.wall[0] + (MESA.wall[1] - MESA.wall[0]) * hd) * H;
+    const St = MESA.talus[0] + (MESA.talus[1] - MESA.talus[0]) * hd;
+    const cr = MESA.caprock[1] * hw;
+    // (the wall no steeper than its footprint can show: a step prefiltered to a ramp 1.5 footprints wide)
+    const m = Math.min(1, (cr / MESA.caprock[0] + (hw - cr) / Sw) / (1.5 * ws));
+    const sc = MESA.caprock[0] * m, sw = Sw * m;
+    const foot = -(cr / sc + (hw - cr) / sw); // (d at the wall's foot)
+    const wall = ksmax(C + sc * d, C - cr + sw * (d + cr / sc), ws);
+    const talus = C - hw + St * (d - foot);
+    const T = ksmin(C, ksmax(wall, talus, 3 * ws), 3 * ws + 0.02 * H);
+    // (each tier stands on the one under it: what it adds over its base, so its talus never runs on
+    // past it and down the lower tier's wall)
+    e += ksmax(T - Cp, 0, k3);
+    cov = Math.max(cov, smoothstep(foot - (0.5 * (H - hw)) / St, foot, d));
+  }
+  _mcov = cov * hm;
+  return e;
+}
+
+/**
+ * Canyon walls (the form brief, docs/FORMS.md): where mesas rule, a river valley's wall is cut
+ * through flat-lying strata, each layer a cliff of its hard rock, a bench on top of it, then a talus
+ * slope up to the next cliff. The valley's surface R becomes R + raise(R + dip): a layer's run is shared
+ * among the three slopes so the wall still climbs the layer in the same run, which pins the slopes
+ * (cliff 75–79°, talus 32–37°, bench 3°) wherever the wall's own slope s lets them. raise ≥ 0 (the steep
+ * part first, every later part falling back), so the valley's bank only rises and its water, cut under
+ * the unraised banks, still stands below them. Layers are layer ± jitter/2 thick, their boundaries and
+ * hardness hashed per layer; they dip gently over the region.
+ */
+export const CANYON = {
+  /** A layer's mean thickness (m) and the jitter of its boundaries (share of it). */
+  layer: 28, jitter: 0.6,
+  /** Soft rock → hard: the cliff's slope (m/m), the talus' slope, the cliff's share of the layer's rise. */
+  cliff: [3.8, 5.2], talus: [0.62, 0.75], share: [0.4, 0.75],
+  /** The bench's slope (m/m). */
+  bench: 0.06,
+  /** The strata's dip (m) over F.mesa. */
+  dip: 12,
+  /** Faded in over this distance past the valley floor's edge (m), and over these slopes of the wall (m/m). */
+  rim: [0, 12], steep: [0.25, 0.45],
+} as const;
+
+/** A canyon layer's profile (canyonLayer): bottom, thickness, and the three parts' runs (shares) and D at their ends. */
+const CL = { b: 0, H: 0, ac: 0, ab: 0, at: 0, d1: 0, d2: 0 };
+/** Layer i's boundary (m). */
+function canyonB(i: number, seed: number): number {
+  return CANYON.layer * (i + CANYON.jitter * ((hash3(i, 0, seed + 2611) & 0xfff) / 4095 - 0.5));
+}
+/** Layer i's profile on a wall of slope s, into CL: D(t) = g(t) − t, g the layer's rise against its run t. */
+function canyonLayer(i: number, s: number, seed: number): void {
+  const h = hash3(i, 0, seed + 2611);
+  const hd = ((h >>> 12) & 0xfff) / 4095;
+  CL.b = CANYON.layer * (i + CANYON.jitter * ((h & 0xfff) / 4095 - 0.5));
+  CL.H = canyonB(i + 1, seed) - CL.b;
+  const sc = CANYON.cliff[0] + (CANYON.cliff[1] - CANYON.cliff[0]) * hd;
+  const st = Math.min(CANYON.talus[0] + (CANYON.talus[1] - CANYON.talus[0]) * hd, s);
+  const rc = CANYON.share[0] + (CANYON.share[1] - CANYON.share[0]) * hd, sb = CANYON.bench;
+  // the bench's share of the rise, so the three runs fill the layer's; then the runs, normalised
+  const A = rc / sc + (1 - rc) / st;
+  const pb = clamp((1 / s - A) / (1 / sb - A), 0, 0.9), pc = rc * (1 - pb), pt = (1 - rc) * (1 - pb);
+  let ac = (pc * s) / sc, ab = (pb * s) / sb, at = (pt * s) / st;
+  const n = 1 / (ac + ab + at);
+  ac *= n; ab *= n; at *= n;
+  CL.ac = ac; CL.ab = ab; CL.at = at;
+  CL.d1 = pc - ac; CL.d2 = pc + pb - ac - ab;
+}
+/** ∫₀ᵗ D over the layer in CL (t its share of the layer's run). */
+function canyonJ(t: number): number {
+  const { ac, ab, at, d1, d2 } = CL;
+  if (t <= ac) return (d1 * t * t) / (2 * Math.max(ac, 1e-6));
+  const j1 = 0.5 * d1 * ac;
+  if (t <= ac + ab) { const u = t - ac; return j1 + d1 * u + ((d2 - d1) * u * u) / (2 * Math.max(ab, 1e-6)); }
+  const u = Math.min(t, 1) - ac - ab;
+  return j1 + 0.5 * (d1 + d2) * ab + d2 * u - (d2 * u * u) / (2 * Math.max(at, 1e-6));
+}
+/** The layer holding height h (m), from h's slot and its two neighbours. */
+function canyonAt(h: number, seed: number): number {
+  const i = Math.floor(h / CANYON.layer);
+  if (h < canyonB(i, seed)) return i - 1;
+  return h >= canyonB(i + 1, seed) ? i + 1 : i;
+}
+/**
+ * The canyon's raise (m, ≥ 0) at height h on a wall of slope s, averaged over heights h ± w/2 (the
+ * footprint's span on the wall): the exact box filter, ∫ D layer by layer; over a window of more
+ * than a layer it fades to the strata's mean raise.
+ */
+function canyonRaise(h: number, s: number, w: number, seed: number): number {
+  const L = CANYON.layer, wmax = 1.2 * L;
+  const f = smoothstep(0.6 * wmax, wmax, w);
+  let r = 0;
+  if (f < 1) {
+    if (w < 1e-3) {
+      canyonLayer(canyonAt(h, seed), s, seed);
+      const t = (h - CL.b) / CL.H, { ac, ab, d1, d2 } = CL;
+      const D = t <= ac ? (d1 * t) / Math.max(ac, 1e-6) : t <= ac + ab ? d1 + ((d2 - d1) * (t - ac)) / Math.max(ab, 1e-6) : (d2 * (1 - t)) / Math.max(CL.at, 1e-6);
+      r = CL.H * D;
+    } else {
+      const h1 = h - 0.5 * w, h2 = h + 0.5 * w;
+      const i1 = canyonAt(h1, seed), i2 = canyonAt(h2, seed);
+      canyonLayer(i1, s, seed);
+      let I = -CL.H * CL.H * canyonJ((h1 - CL.b) / CL.H);
+      for (let j = 0; j < 5 && i1 + j < i2; j++) {
+        I += CL.H * CL.H * canyonJ(1);
+        canyonLayer(i1 + j + 1, s, seed);
+      }
+      I += CL.H * CL.H * canyonJ((h2 - CL.b) / CL.H);
+      r = I / w;
+    }
+  }
+  if (f > 0) {
+    // (the mean: a layer of the mean thickness and hardness)
+    const H = CL.H, b = CL.b;
+    canyonLayerMean(s);
+    r += (L * canyonJ(1) - r) * f;
+    CL.H = H; CL.b = b;
+  }
+  return r;
+}
+/** canyonLayer for a layer of the mean thickness and hardness. */
+function canyonLayerMean(s: number): void {
+  const hd = 0.5;
+  const sc = CANYON.cliff[0] + (CANYON.cliff[1] - CANYON.cliff[0]) * hd;
+  const st = Math.min(CANYON.talus[0] + (CANYON.talus[1] - CANYON.talus[0]) * hd, s);
+  const rc = CANYON.share[0] + (CANYON.share[1] - CANYON.share[0]) * hd, sb = CANYON.bench;
+  const A = rc / sc + (1 - rc) / st;
+  const pb = clamp((1 / s - A) / (1 / sb - A), 0, 0.9), pc = rc * (1 - pb), pt = (1 - rc) * (1 - pb);
+  let ac = (pc * s) / sc, ab = (pb * s) / sb, at = (pt * s) / st;
+  const n = 1 / (ac + ab + at);
+  ac *= n; ab *= n; at *= n;
+  CL.ac = ac; CL.ab = ab; CL.at = at;
+  CL.d1 = pc - ac; CL.d2 = pc + pb - ac - ab;
+}
 
 /** The rolling hills' fBm at warped macro coords (mx, mz), centred on zero (× the region's LANDFORM.hills). */
 function hillsAt(mx: number, mz: number, seed: number, dp: number): number {
@@ -604,17 +923,26 @@ function hillsAt(mx: number, mz: number, seed: number, dp: number): number {
   return 0.2833333 * hLow + 0.5 * hHigh;
 }
 
-/** The mountains' ridged octaves at warped (wx, wz), centred on their mean (× LANDFORM.ridge × the range there). */
+/**
+ * The mountains' ridged octaves at warped (wx, wz), centred on their mean (× LANDFORM.ridge × the range there).
+ * Simplex, not value noise: value noise is flat at its lattice points and its zero contours are rounded
+ * squares, so its ridges stepped the ranges in square benches. Each octave is damped by the slope of
+ * those under it, so the flanks are long clean planes and the finer crests ride the crests and benches.
+ */
 function ridgesAt(wx: number, wz: number, seed: number, dp: number): number {
-  const rx = wx * F.ridge, rz = wz * F.ridge;
+  const rx = wx * F.ridge * RIDGE_SPAN, rz = wz * F.ridge * RIDGE_SPAN;
   const k = 4.0 * F.ridge * dp;
-  let rh = 0;
+  let rh = 0, slope2 = 0;
   for (let i = 0; i < 5; i++) {
     const fr = RIDGE_FREQ[i];
     const wgt = dp <= 0 ? 1 : Math.min(1, Math.max(0, 2.0 - fr * k));
     if (wgt > 0) {
-      const n = 1.0 - Math.abs(vnoise(rx * fr, rz * fr, seed + 5 + i * 0x85eb));
-      rh += RIDGE_AMP[i] * wgt * (n * n - RIDGE_MEAN);
+      const v = RIDGE_SCALE * snoise(rx * fr, rz * fr, seed + 5 + i * 0x85eb);
+      const n = 1.0 - Math.abs(v);
+      const a = (RIDGE_AMP[i] * wgt) / (1 + RIDGE_DAMP * slope2);
+      rh += a * (n * n - RIDGE_MEAN);
+      const g = 2 * n * a * fr * RIDGE_SPAN * RIDGE_SCALE * Math.hypot(SN.dx, SN.dy);
+      slope2 += g * g;
     }
   }
   return rh;
@@ -622,6 +950,8 @@ function ridgesAt(wx: number, wz: number, seed: number, dp: number): number {
 
 /** The step (m) of the gullies' gradient, and the footprint their land is prefiltered at. */
 export const ERO_STEP = 128;
+/** The gullies fade in over the slope (of the land they follow) [0] → [1] and out over [2] → [3] (6°–24°, 40°–55°). */
+export const GULLY_SLOPE = [0.1, 0.45, 0.84, 1.43] as const;
 
 /** The land the gullies follow at warped (wx, wz): the uplift U there and the hills and ridges over it, prefiltered at ERO_STEP (m). */
 function erosionLand(wx: number, wz: number, U: number, seed: number, hills: number, ridge: number): number {
@@ -660,20 +990,33 @@ const ceilH = (h: number) => (h > CEIL_START ? CEIL_START + CEIL_SPAN * Math.tan
 /**
  * The regions' detail over the uplift U at world (x, z), warped (wx, wz), before any mask (m): rolling
  * hills, mountain ridges, karst towers, dunes and mesas where their regions rule, and the gullies
- * over them all. `lf` is the blended landform there.
+ * over them all. `lf` is the blended landform there. With `river` the towers are left out (landCore
+ * stands them on the land after its valleys are cut) and only their height kept, in _kt.
  */
-function landDetail(x: number, z: number, wx: number, wz: number, seed: number, dp: number, U: number, range: number, massif: number, lf: Float64Array): number {
+function landDetail(x: number, z: number, wx: number, wz: number, seed: number, dp: number, U: number, range: number, massif: number, lf: Float64Array, river = false): number {
   let detail = lf[K_HILLS] * hillsAt(wx * F.macro, wz * F.macro, seed, dp);
+  const rec = TERMS.on;
+  if (rec) { TERMS.hills = detail; TERMS.ridges = TERMS.karst = TERMS.dunes = TERMS.mesas = TERMS.gullies = 0; }
   const rs = Math.min(1, 2 * range + 1.6 * massif);
-  if (lf[K_RIDGE] > 0) detail += lf[K_RIDGE] * (0.3 + 0.7 * rs) * ridgesAt(wx, wz, seed, dp);
+  if (lf[K_RIDGE] > 0) {
+    const t = lf[K_RIDGE] * (0.3 + 0.7 * rs) * ridgesAt(wx, wz, seed, dp);
+    detail += t;
+    if (rec) TERMS.ridges = t;
+  }
   // (karst, dunes and mesas only where their region rules: a few tiers in a meadow would be cliffs)
   const kw = smoothstep(0.35, 0.75, lf[K_KARST]), dw = smoothstep(0.35, 0.75, lf[K_DUNE]), mw = smoothstep(0.35, 0.75, lf[K_MESA]);
+  let kc = 0;
+  _kt = 0;
   if (kw > 0.001) {
     const wK = clamp(2 - 2 * dp / 150, 0, 1);
-    detail += kw * (wK > 0 ? wK * karstTowers(wx, wz, seed) + (1 - wK) * TOWER_MEAN : TOWER_MEAN);
+    let t = TOWER_MEAN;
+    if (wK > 0) { t = wK * karstTowers(x, z, seed, dp) + (1 - wK) * TOWER_MEAN; kc = kw * wK * _kcov; }
+    _kt = kw * t;
+    if (!river) detail += _kt;
+    if (rec) TERMS.karst = _kt;
   }
-  if (dw > 0.001) detail += dw * dunesE(x, z, seed, dp);
-  if (mw > 0.001) detail += mw * mesasE(wx, wz, seed, dp);
+  if (dw > 0.001) { const t = dw * dunesE(x, z, seed, dp); detail += t; if (rec) TERMS.dunes = t; }
+  if (mw > 0.001) { const t = mesasE(x, z, seed, dp, mw, lf[K_MESA]); detail += t; kc = Math.max(kc, _mcov); if (rec) TERMS.mesas = t; }
   if (lf[K_ERO] > 0.01) {
     // (the gullies run down the land itself, its hills and ridges, and are laid out in the world: laid
     // out in the warped plane and down the uplift alone, they ran side by side for kilometres, a comb
@@ -686,7 +1029,14 @@ function landDetail(x: number, z: number, wx: number, wz: number, seed: number, 
     // (fade target 0: the filter carves gullies only. A target set by height, +1 on peaks and −1 in
     // valleys, lifted every gentle crest by up to ~150 m but not its steep flanks: walls along the
     // ridges, their tops cut into teeth by the gullies)
-    detail += lf[K_ERO] * erosionDelta(x, z, U + detail, gx, gz, 0, dp);
+    // Gullies only on flanks and aprons: none on gentle land, where each octave's cross slope (~0.25)
+    // outweighed the land's own and corrugated it in even ribs, nor up walls (steeper than ~45°) or a
+    // tower, which stay walls
+    const S = Math.hypot(gx, gz);
+    const keep = smoothstep(GULLY_SLOPE[0], GULLY_SLOPE[1], S) * (1 - smoothstep(GULLY_SLOPE[2], GULLY_SLOPE[3], S)) * (1 - kc);
+    const t = keep > 0 ? lf[K_ERO] * keep * erosionDelta(x, z, U + detail, gx, gz, 0, dp) : 0;
+    detail += t;
+    if (rec) TERMS.gullies = t;
   }
   return detail;
 }
@@ -726,7 +1076,8 @@ function landCore(x: number, z: number, seed: number, dp: number, pL: number, pd
   const lf = _lf;
   riverField(wx, wz, seed, lf[K_K], true);
   // (no detail in a lake's ring, on a valley floor, nor in a crater: their floors are their own)
-  const m = smoothstep(0, 50, RF.xFloor) * (1 - RF.lakeMask) * (lavaLvl > -Infinity ? smoothstep(CRATER_RIM * 0.9, CRATER_RIM * 1.3, craterRR) : 1);
+  const crater = lavaLvl > -Infinity ? smoothstep(CRATER_RIM * 0.9, CRATER_RIM * 1.3, craterRR) : 1;
+  const m = smoothstep(0, 50, RF.xFloor) * (1 - RF.lakeMask) * crater;
 
   // where marshes lie (not in a lake's ring, nor in a river's channel; only on flat land: marsh pools
   // stepping up a hillside would stand at many levels)
@@ -736,11 +1087,22 @@ function landCore(x: number, z: number, seed: number, dp: number, pL: number, pd
     flat *= 1 - smoothstep(0.012, 0.035, Math.hypot(gx, gz));
   }
 
-  // 2. the regions' detail, and the gullies
-  let detail = 0;
+  // 2. the regions' detail, and the gullies; the karst towers kept for after the valleys
+  let detail = 0, towers = 0;
+  if (TERMS.on) {
+    TERMS.U = U; TERMS.scale = m * taper;
+    TERMS.hills = TERMS.ridges = TERMS.karst = TERMS.dunes = TERMS.mesas = TERMS.gullies = 0;
+  }
   if (m > 0) {
-    detail = landDetail(x, z, wx, wz, seed, dp, U, range, massif, lf);
+    detail = landDetail(x, z, wx, wz, seed, dp, U, range, massif, lf, true);
+    if (_kt > 0) {
+      // (under the ceiling a river's floor puts over them, faded with the lake's ring)
+      const ceil = KARST_CEIL * (Math.min(RF.xFloor, 1000) - KARST_BANK) * (1 - RF.lakeMask);
+      towers = Math.max(0, Math.min(_kt, ceil)) * taper * crater;
+    }
+    if (TERMS.on) TERMS.karst = towers / (m * taper);
     detail *= m * taper; // (none toward a beach: the coast ramps down smoothly; cliffs keep theirs)
+    if (TERMS.on) TERMS.lift = detail;
     // (round a river the detail only rises: a hollow beside it would leave the river standing over it)
     const near = 1 - smoothstep(50, 450, RF.xFloor);
     if (near > 0) detail += (0.5 * (detail + Math.sqrt(detail * detail + 36)) - 3 - detail) * near;
@@ -749,10 +1111,35 @@ function landCore(x: number, z: number, seed: number, dp: number, pL: number, pd
     if (nearM > 0) detail += (0.5 * (detail + Math.sqrt(detail * detail + 0.36)) - 0.3 - detail) * nearM;
   }
   let e0 = U + detail;
+  // the canyons: where mesas rule, a valley's steep walls cut through the strata (raised, never cut)
+  let Rs = RF.R;
+  const mwC = smoothstep(0.35, 0.75, lf[K_MESA]);
+  if (mwC > 0 && RF.R < Math.max(e0, RF.F)) {
+    let cw = mwC * smoothstep(CANYON.rim[0], CANYON.rim[1], RF.xFloor) * (1 - RF.lakeMask);
+    if (cw > 0) {
+      // (the wall's slope in the world: the valleys are cut in the warped plane)
+      warpJ(x, z, seed);
+      const M11 = _j11 * _j11 + _j12 * _j12, M12 = _j11 * _j21 + _j12 * _j22, M22 = _j21 * _j21 + _j22 * _j22;
+      const s = Math.sqrt(Math.max(0, M11 * RF.gxx + 2 * M12 * RF.gxz + M22 * RF.gzz));
+      cw *= smoothstep(CANYON.steep[0], CANYON.steep[1], s);
+      if (cw > 0) {
+        const dip = CANYON.dip * vnoise(x * F.mesa, z * F.mesa, seed + 2613);
+        Rs = RF.R + cw * canyonRaise(RF.R + dip, s, s * Math.max(dp, 0.5), seed);
+      }
+    }
+  }
+  if (TERMS.on) {
+    TERMS.lift = m > 0 ? detail - TERMS.lift : 0;
+    const t = Math.max(e0, RF.F);
+    TERMS.terraces = t - e0;
+    TERMS.valleys = Math.min(t, Rs) - t;
+  }
 
   // 3. the valleys cut in, the terraces built up where the land falls away beside a river (never
-  // above any valley: no terrace buries another river's channel), the marshes
-  e0 = Math.min(Math.max(e0, RF.F), RF.R);
+  // above any valley: no terrace buries another river's channel), the karst towers stood on them
+  // whole (cut by the valleys, a tower's flank became a plate tilted with the valley's side), the
+  // marshes
+  e0 = Math.min(Math.max(e0, RF.F), Rs) + towers;
   const vis = RF.vis;
   // the river's water: its level, but never over a bank another valley has cut lower
   const riverW = Math.min(RF.W, RF.cap);
@@ -789,11 +1176,34 @@ function landCore(x: number, z: number, seed: number, dp: number, pL: number, pd
     }
   }
 
-  // 4. the coast: the land meets the sea (U already ramps down to beaches, or stands as cliffs)
-  const K = LANDS.coast;
+  // 4. the coast: the land meets the sea. Toward a beach U ramps down and the land eases to the sea
+  // floor with it; a cliffed coast is cut in one profile (SEA_CLIFF), the wall's rim the land's own
+  // edge (eased to the sea floor like a beach, a cliff's top and toe melted over the easing's ~60 m)
+  const K = LANDS.coast, SC = SEA_CLIFF;
   _land = smoothstep(K.level - 0.004 - 0.03 * (1 - cliff), K.level + 0.002, C);
   const seaFloor = LANDS.sea - 6 - K.shelf * (1 - smoothstep(K.level - 0.12, K.level, C));
-  const e = seaFloor + (e0 - seaFloor) * _land;
+  let e = seaFloor + (e0 - seaFloor) * _land;
+  // (faded out toward the band's edges: inland, where the land may stand higher than the wall reaches)
+  const cw = smoothstep(SC.weight[0], SC.weight[1], cliff) * (1 - smoothstep(0.6 * SC.band, SC.band, Math.abs(C - K.level)));
+  if (cw > 0) {
+    // the distance in from the coastline: C's rise over its world gradient (the warp turns and
+    // stretches the plane, so the gradient is taken in the world's)
+    warpInto(x + SC.h, z, seed); const cX = continentAt(_wx, _wz, seed);
+    warpInto(x, z + SC.h, seed); const cZ = continentAt(_wx, _wz, seed);
+    _wx = wx; _wz = wz;
+    const d = ((C - K.level) * SC.h) / Math.max(Math.hypot(cX - C, cZ - C), 1e-9);
+    const apron = SC.apron * smoothstep(0.45, 0.85, n01(wx, wz, F.tower, seed + 2703));
+    const d0 = d - apron - SC.toe; // (in from the wall's foot)
+    const base = LANDS.sea - SC.platform;
+    const wall = base + SC.wall * d0, talus = base + SC.talus * (d0 + apron);
+    // the platform, sunk behind the wall's foot (so inland the land is never raised to it)
+    const floor = Math.max(seaFloor, base + SC.shelf * Math.min(d, 0)) - SC.wall * Math.max(d0, 0);
+    const kr = SC.rim + SC.wall * dp, kt = 1 + SC.wall * dp, kf = 0.3 + SC.talus * dp;
+    const eC = ksmax(floor, ksmin(e0, ksmax(talus, wall, kt), kr), kf);
+    e += (eC - e) * cw;
+    // (the waters ease to the sea floor between the coastline and the wall's foot)
+    _land += (smoothstep(0, apron + SC.toe, d) - _land) * cw;
+  }
 
   // 5. the water
   _fx = 0; _fz = 0; _speed = 0; _riverK = 0;
@@ -841,6 +1251,10 @@ function landCore(x: number, z: number, seed: number, dp: number, pL: number, pd
   _shore = shore > -Infinity ? ceilH(shore) : -Infinity;
   _e = ceilH(e);
   _wt = ceilH(w);
+  if (TERMS.on) {
+    TERMS.E = _e; TERMS.W = _wt;
+    TERMS.rest = _e - (U + detail + towers + TERMS.terraces + TERMS.valleys);
+  }
   if (_land < 1) { _fx *= _land; _fz *= _land; _speed *= _land; }
   // lava: the liquid of a volcano's crater and of the rivers that rise high on its cone
   _lava = 0;

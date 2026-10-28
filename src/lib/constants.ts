@@ -145,6 +145,8 @@ export const HYDRO = {
   wallRound: 12,
   /** Where the land falls away beside a reach, its floor stands as a terrace with a riser of this slope down to the land. */
   riser: 0.45,
+  /** The walls' slope (RF.gxx…) is the reaches' blended by a soft minimum over their surfaces at this scale (m). */
+  wallSoft: 4,
   /** A drop of more than this (m) within one sixteenth of a reach falls at once (a waterfall). */
   fallDrop: 12,
   /** …but falls at most this high (m); the rest of such a drop runs as cascades. */
@@ -567,9 +569,9 @@ export const SPAWN = {
 export const WORKED_EXAMPLE = {
   camHeight: 30.0,
   aimBelowSummit: 25.0,
-  yaw: 3.32,
+  yaw: 3.39,
   pitch: 0.01,
-  expectedT: 1968.8,
+  expectedT: 1968.3,
   resY: 540, // half-res render target — the real pixel footprint
 };
 

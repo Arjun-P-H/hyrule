@@ -90,3 +90,38 @@ export function boxInView(F: ArrayLike<number>, tx: number, ty: number,
   if (out(ty * fx + F[4], ty * fy + F[5], ty * fz + F[6])) return false;
   return true;
 }
+
+/**
+ * The water mesh's rules (terrain.wgsl.ts: ringTris lists the cells, vsWaterCell lays their
+ * corners). A corner is wet when its water stands WATER_WET above its ground; a cell holds water
+ * when a corner is wet. Its dry corners are laid level with its lowest wet corner, or just under
+ * their ground where that lies lower, so a shore's sheet runs level under the bank and the ground
+ * cuts the shoreline along its own contour.
+ *
+ * On the coarse rings (cells over WATER_COARSE m) a cell with one wet corner is left out when a dry
+ * corner's ground lies more than WATER_DIP cells' width under the water: there the sheet would dive
+ * to the ground and stand as a sliver of steep water (a channel narrower than a cell, on a slope).
+ * Leaving out every one-wet-corner cell, as the rings once did, stair-stepped every coarse shore
+ * to the cell lattice (8–32 m steps; tests/forms.test.ts measures it).
+ */
+export const WATER_WET = 0.02;
+export const WATER_COARSE = 4;
+export const WATER_DIP = 0.125;
+
+/** Whether a cell (corners' ground g and water w, in any fixed order; side cellM m) holds water. */
+export function waterCellDrawn(g: ArrayLike<number>, w: ArrayLike<number>, cellM: number): boolean {
+  let nWet = 0, wetMin = Infinity, dryMin = Infinity, wMax = -Infinity, gMin = Infinity;
+  for (let q = 0; q < 4; q++) {
+    if (w[q] > g[q] + WATER_WET) { nWet++; wetMin = Math.min(wetMin, w[q]); } else dryMin = Math.min(dryMin, g[q]);
+    wMax = Math.max(wMax, w[q]);
+    gMin = Math.min(gMin, g[q]);
+  }
+  if (nWet === 0) return false;
+  if (nWet === 1 && cellM > WATER_COARSE && dryMin < wetMin - WATER_DIP * cellM) return false;
+  return wMax > gMin - 0.6;
+}
+
+/** The water sheet's height at a corner of a water cell whose lowest wet corner stands at wetMin. */
+export function waterCornerH(g: number, w: number, wetMin: number): number {
+  return w > g + WATER_WET ? w : Math.min(wetMin, g - 0.05);
+}
