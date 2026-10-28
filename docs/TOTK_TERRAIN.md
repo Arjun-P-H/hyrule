@@ -573,6 +573,19 @@ Seed 1337 unless noted, MacBook Air M1, headless Chrome, WebGPU.
   - Medium 1.5–6.6 ms (median 2.9);
   - High 2.4–5.5 ms (median 3.8);
   - about unchanged.
+
+  These are the third pass's numbers. The fourth pass did not re-measure them on an M1 (§5).
+- **World shader size** (the fourth pass). SwiftShader, the software GPU these runs use, inlines
+  every call: each call site becomes its own copy of the function. Inlined, `landSurface` in the
+  world shader was:
+  - 633k characters before the pass;
+  - 1,020k with the mesas' two region-weight samples side by side. Each sample is a copy of the
+    uplift and the regions, and `landDetail` is itself inlined three times, so there were six copies;
+  - 859k with the two samples in one loop, the values unchanged.
+
+  Under SwiftShader the GPU process compiles all of a scene's pipelines at once. The before build
+  fits in this container's 14.3 GB, and the after build does not. A hardware driver inlines less,
+  but compile time and frame cost on an M1 were not re-measured.
 - **Streaming** (the game's clipmap):
   - the generator costs 0.44 ms a frame walking and 2.2 ms at 200 m/s;
   - a full rebuild (spawn, teleport) takes ~200 ms of generation and adds ~385 ms to its frame;

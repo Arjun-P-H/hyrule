@@ -22,6 +22,8 @@
  *          first variant runs first and is left out of the ratios: see pickVariants)
  *          --hours=6,12,18.2 (stills of day–night variants at those hours; --day=n the game day)
  *          --hour=18.2 (timing of day–night variants at that hour)
+ *          --serial-compile (one pipeline compile at a time: a software device holds every concurrent
+ *          compile in memory at once, and the world shader's several pipelines can outgrow a small machine)
  * Results: bench/out/webgpu-<mode>.json, frames in bench/out/webgpu/.
  */
 
@@ -284,6 +286,15 @@ async function webgpuPage(): Promise<string> {
   const build = await Bun.build({ entrypoints: [path.join(import.meta.dir, 'gpu/webgpu-page.ts')], target: 'browser' });
   if (!build.success) throw new Error(build.logs.map(String).join('\n'));
   pageJs = await build.outputs[0].text();
+  // (the renderer asks for its pipelines together and awaits them all: queue the asks instead)
+  if (args.includes('--serial-compile')) pageJs = `{
+  let q = Promise.resolve();
+  for (const k of ['createComputePipelineAsync', 'createRenderPipelineAsync']) {
+    const f = GPUDevice.prototype[k];
+    GPUDevice.prototype[k] = function (d) { const p = q.then(() => f.call(this, d)); q = p.catch(() => {}); return p; };
+  }
+}
+${pageJs}`;
   return pageJs;
 }
 
