@@ -1,13 +1,14 @@
 /**
- * Slope histograms of tower, mesa and canyon land (the fp64 CPU twin): where a region rules, the
- * slope (°) at random points, from central differences over 0.5 m at a 0.5 m footprint.
+ * Slope histograms of tower, mesa, canyon and mountain land (the fp64 CPU twin): where a region rules,
+ * the slope (°) at random points, from central differences over 0.5 m at a 0.5 m footprint.
  *
- *   bun bench/forms/slopes.ts [--seed=1337] [--size=160000] [--n=12000] [--root=<tree>] [--json=<file>] [--from=<file>]
+ *   bun bench/forms/slopes.ts [--seed=1337] [--size=160000] [--n=12000] [--only=<id,…>] [--root=<tree>] [--json=<file>] [--from=<file>]
  *
  * --root measures another checkout's terrainMath (a worktree of an older commit, say); --from reprints
  * a --json file. Prints each class's histogram in 5° bins, its shares in the bench (< 15°), talus
  * (28–40°), the 45–60° gap and cliff (> 60°) bands, the modes of its 1° histogram smoothed over 5°, and
  * the form brief's test (docs/FORMS.md): separate talus and cliff modes, not one smear over 45–70°.
+ * The test is for tower, mesa and canyon land; mountain land (ridge) is measured for its page alone.
  */
 import path from 'node:path';
 import { readFileSync, writeFileSync } from 'node:fs';
@@ -23,11 +24,12 @@ const size = Number(arg('size', '160000'));
 const quota = Number(arg('n', '12000'));
 const coarse = 400;
 
-/** The classes: the regions that make them, and for canyons a valley cut at least 10 m deep. */
+/** The classes: the regions that make them, for canyons a valley cut at least 10 m deep, and whether the brief's test applies. */
 const CLASSES = [
-  { id: 'tower', biomes: ['jungle'], valley: false },
-  { id: 'mesa', biomes: ['badlands'], valley: false },
-  { id: 'canyon', biomes: ['badlands', 'desert', 'savanna'], valley: true },
+  { id: 'tower', biomes: ['jungle'], valley: false, test: true },
+  { id: 'mesa', biomes: ['badlands'], valley: false, test: true },
+  { id: 'canyon', biomes: ['badlands', 'desert', 'savanna'], valley: true, test: true },
+  { id: 'ridge', biomes: ['mountains'], valley: false, test: false },
 ] as const;
 
 const w = new Float64Array(BIOMES.length);
@@ -53,8 +55,9 @@ let st = 24601;
 const rnd = () => ((st = (Math.imul(st, 1664525) + 1013904223) | 0) >>> 0) / 4294967296;
 const n = Math.round(size / coarse);
 const from = arg('from', '');
+const only = arg('only', '').split(',').filter(Boolean);
 const out: Record<string, { hist: number[]; n: number; cells: number }> = from ? JSON.parse(readFileSync(from, 'utf8')) : {};
-for (const c of from ? [] : CLASSES) {
+for (const c of from ? [] : CLASSES.filter((k) => !only.length || only.includes(k.id))) {
   // the coarse cells the class's regions rule, in a fixed order; then points at random within them
   const cells: [number, number][] = [];
   for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) {
@@ -105,7 +108,8 @@ for (const [id, { hist, n: N, cells }] of Object.entries(out)) {
   console.log(`${id.padEnd(7)} n ${N} (${cells} cells) bench ${share(hist, 0, 15, N).toFixed(1)} % talus ${share(hist, 28, 41, N).toFixed(1)} % gap45–60 ${share(hist, 45, 60, N).toFixed(1)} % cliff ${share(hist, 60, 91, N).toFixed(1)} % | modes ${modes(hist)}`);
   console.log(`        5° bins ${bins.map((v) => v.toFixed(1)).join(' ')}`);
   const v = separate(bins);
-  console.log(`        talus peak ${v.talus}–${v.talus + 5}°, cliff peak ${v.cliff}–${v.cliff + 5}°, trough ${v.trough.toFixed(2)} → ${v.pass ? 'separate' : 'smear'}`);
+  const tested = CLASSES.find((c) => c.id === id)?.test ?? true;
+  console.log(`        talus peak ${v.talus}–${v.talus + 5}°, cliff peak ${v.cliff}–${v.cliff + 5}°, trough ${v.trough.toFixed(2)} → ${v.pass ? 'separate' : 'smear'}${tested ? '' : ' (not tested)'}`);
 }
 const json = arg('json', '');
 if (json) writeFileSync(json, JSON.stringify(out));

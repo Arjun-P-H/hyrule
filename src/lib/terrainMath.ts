@@ -1100,7 +1100,7 @@ function landCore(x: number, z: number, seed: number, dp: number, pL: number, pd
       const ceil = KARST_CEIL * (Math.min(RF.xFloor, 1000) - KARST_BANK) * (1 - RF.lakeMask);
       towers = Math.max(0, Math.min(_kt, ceil)) * taper * crater;
     }
-    if (TERMS.on) TERMS.karst = towers / (m * taper);
+    if (TERMS.on) TERMS.karst = taper > 0 ? towers / (m * taper) : 0;
     detail *= m * taper; // (none toward a beach: the coast ramps down smoothly; cliffs keep theirs)
     if (TERMS.on) TERMS.lift = detail;
     // (round a river the detail only rises: a hollow beside it would leave the river standing over it)

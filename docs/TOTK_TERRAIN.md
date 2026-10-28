@@ -174,7 +174,7 @@ Generation techniques used:
 ## 2. The audit: TotK against this world, before and after
 
 The same measurements, run on this world. "Before" is the generator before this audit (the first TotK
-pass); "after" is now, after the third pass (a player's review, below). Seeds 1337, 7 and 2024; ranges
+pass); "after" is now, after the fourth pass (the landforms, below). Seeds 1337, 7 and 2024; ranges
 span them.
 - **Water** is read as TotK's map was (a wet mask at 2 m per pixel, bodies of 200 m² and more), over
   16 windows of 5 × 4 km: 288 km² of land, four times TotK's map.
@@ -193,7 +193,7 @@ span them.
 | Desert / badlands share | 7 / 4 % | 3.8 / 10 % | 6–8 / 5–7 % |
 | Ancient (sacred) forest share | ~5 % | 1 % | 2–3 % |
 | Field heights (median above the sea) | 16–48 m | 116 m | 60 m |
-| Mountains (median, highest) | 244–297, 630–730 m | 635, 1,220 m | 322, 676 m |
+| Mountains (median, highest) | 244–297, 630–730 m | 635, 1,220 m | 312–327, 648–679 m |
 | Plateaus (median) | 141–184 m | 413 m | 250 m |
 | Volcano summit | ~870–896 m | 1,130 m | ~910 m |
 | Snow on the volcano, or on its trees | none | yes | none |
@@ -317,10 +317,96 @@ A third pass followed a player's screenshots of seven places, and fixed what the
     valley now has neither. Every valley's walls also leave the floor at the floor's own slope and
     steepen over about 12 m (`HYDRO.wallRound`): a shallow valley is a grassy swale.
 
+A fourth pass followed a player's screenshots of five more places: cliffs, karst towers and mountain
+flanks that did not read as TotK's. It went deeper, not bigger: no new regions or features, the
+existing landforms done properly, to a form brief ([`FORMS.md`](FORMS.md)) with one page per
+landform. Before anything changed, each place was dumped from the CPU twin: the height and each of
+its terms on its own (uplift, hills, ridges, karst, mesas, gullies, valleys, terraces), over
+2 × 2 km at 0.5 m, with hillshade, slope, curvature, geomorphons and spectra. Each artifact was then
+traced to the layer that made it: the height function (shape), the clipmap and its normals
+(sampling), or the material and its light (surface). Seed 1337 (the default; the HUD does not show
+the seed), at 12:00. Place 3's x was hidden by the minimap and was re-read as 1849.
+
+26. **A comb of teeth in the jungle karst** (place 1, shape). The karst towers were round domes, and
+    the river valleys' soft minimum (`RF.R`) clipped them where a valley crossed: the valleys cut
+    80 m into land the karst had raised 83 m (118 m at most). Along the terrace bands that left
+    scalloped cusps 150–300 m apart, and the gully comb (27) and the value-noise ridges (32) added
+    finer teeth. The screenshot's cracked bands and finest teeth are not in the height at 0.5 m, and
+    this build has no cracked-rock material, so they were not reproduced. Towers are now prisms
+    (30), each under a ceiling that rises at 72° from 4 m back from the river's floor (`KARST_CEIL`,
+    `KARST_BANK`), so a tower meets the water in a wall, not a plate tilted by the valley's side.
+    Walls whose contour is a comb fell from 12 % to 0 %. Small wedges remain where a tower stands in
+    a valley.
+27. **Corrugated mountain flanks** (place 2, shape). The gully filter cut gentle land as hard as steep
+    land, each octave adding about 0.25 to the slope, at an even spacing. On a smooth flank its
+    stripes lay side by side as regular dark corrugations, and on the hill beside it as ripples.
+    Gullies now fade in over 6–24° and out over 40–55° (`GULLY_SLOPE`), so walls stay walls and only
+    aprons and flanks gully, and each cell jitters its stripes' spacing by ±40 %. At place 1 the
+    gentle land's comb share fell from 38 % to 3 %.
+28. **Stair-stepped banks and pond edges** (place 3, sampling). The height had no steps. The coarse
+    clipmap rings left out every cell with one wet corner, so beyond the finest rings a shore
+    stepped along the lattice, 8–32 m at a time. Every ring now draws water by one rule
+    (`waterCellDrawn` in `rings.ts`, and its twin in `terrain.wgsl.ts`): a coarse cell with one wet
+    corner is left out only where a dry corner lies more than an eighth of the cell's width under
+    the water, where the sheet would dive into a cliff. The share of place 3's shore on the lattice
+    fell from 24–29 % to 0 %, and a test fails on the old rule.
+29. **A toothed rim over a melted sea cliff** (place 4, shape). The coast rose through a U-shaped
+    ramp (`COAST_RAMP`), the land's full detail ran out over the rim, and the land blend (`_land`)
+    softened the face. A cliffed coast now has a section (`SEA_CLIFF`): a wave-cut platform 1 m
+    under the sea falling seaward at 3°, a talus apron of 34° up to 26 m out, an 80° wall from a
+    toe 6 m in, and a rim rounded over 1.5 m. The rim's run (60° to 15°) fell from 12.75 m to
+    0.5 m, and the wall stands at 80.6°.
+30. **Karst towers as smooth domes with stretched rock** (place 5, shape and surface). Each tower was
+    a radial falloff, H·(1 − q^3.5): a dome with no rim. Its rock was drawn in the ground's plane, so
+    on its sides the texture stretched 2.54–7.45×. A tower is now a prism (`karstTowers`):
+    - seven faces, turned and pushed in or out by the cell's hash, the edges between them rounded
+      over 12 % of the width;
+    - a cap that falls 12 % of its radius to the rim;
+    - a wall of 74–81° down to a foot at 12–20 % of the height, and a talus apron of 32–37° below;
+    - heights of 50–220 m, and a height over width of 0.7–1.5 at the wall's foot;
+    - a 300 m lattice with a tower in 7 cells of 8: wide towers merge on a shared apron
+      (*fengcong*), and narrow ones stand alone on the plain (*fenglin*).
+
+    The rim's run fell from 17.25 m to 2.25 m. Rock steeper than about 45° is now drawn by biplanar
+    mapping on five planes, with world-space strata, vertical joints 13 and 21 m apart, and edge
+    light and cavity dark from the curvature. Its worst stretch is 1.473×.
+31. **Mesa walls and canyon walls smeared over 45–70°** (shape; not in the screenshots, found by the
+    slope histograms). Each mesa tier was a smoothstep of its plan noise, and a canyon's wall was one
+    slope of 45–50°. A tier is now laid out by the distance in from its contour: a caprock band of
+    82° over a cliff of 75–79°, then a talus apron down to the bench of the tier below, each tier a
+    step harder than the one under it. In mesa country a river's valley cuts flat-lying strata
+    28 m ± 30 % thick, each layer's run shared among a cliff, a bench and a talus slope. The mesas'
+    region weight is taken by a forward difference whose step grows with distance (max(1 m,
+    distance / 32,768), `fdSpan`): at a fixed 1 m, fp32 noise put the GPU's ground 4.6 m off the
+    CPU's at 1,000 km.
+32. **Ridges of value noise.** The ridged octaves now come from simplex noise, each damped by the
+    slope already built (`RIDGE_DAMP` 0.25), so the finer octaves add detail on crests and benches
+    more than down flanks.
+33. **The cost: gentler mountains.** Removing the comb and damping the ridges took about a third of
+    the mountains' slope. Over 8 m the mean slope fell from 15.1° to 10.2°, and the share over 30°
+    from 10.6 % to 5.7 %. Summits are 648–679 m on the three seeds (640–717 m before) and medians
+    312–327 m, within TotK's relief, and fields stay at 55–60 m above the sea. Neither build has
+    alpine walls or scree ([`FORMS.md`](FORMS.md) §4.5).
+
+What the fourth pass measured, from the dumps and over 160 km squares ([`FORMS.md`](FORMS.md) §3–5):
+- **Slope modes.** Tower, mesa and canyon land each now show a talus mode at 32–34° and a cliff mode
+  at 75–80°, separate where they were one smear: the lowest bin between them is 0.10 / 0.18 / 0.14
+  of the lower peak, against 0.75 / 1.48 / 8.47, and the 45–60° share is 1.4 / 2.0 / 3.0 %, against
+  5.8 / 6.5 / 16.7 %.
+- **The comb**, along contours over four places and twelve drawn over 80 km: combed walls fell from
+  12 % to 0 %, gentle land from 40 % to 24 %, flanks from 37 % to 28 %.
+- **Geomorphons.** Spur and hollow cells, the teeth and corrugations, fell by a third to a half at
+  places 1, 2 and 5. Footslopes and shoulders rose at place 5.
+- **Spectra.** The power spectrum's exponent over 10–200 m rose from 3.54 to 4.92 (place 1), 4.30 to
+  4.94 (place 2) and 4.82 to 5.13 (place 5): power moved from steps and rough noise into planes.
+- **Stretch.** No face that looks up draws its rock stretched more than 1.473×.
+- **Not set.** The tolerances for geomorphon shares and spectra need the reference DEMs, which were
+  not fetched. The slope, comb, water and stretch tolerances are met.
+
 ## 3. The generator
 
 ```
-world   continent (sea / coast: beaches, or cliffs ≤ 95 m on a ~10 m continuous face)
+world   continent (sea / coast: beaches, or cliffs ≤ 95 m: an 80° wall over talus and a wave-cut platform)
   │     uplift U: lowland swell · mountain countries with range crests · lone massifs · tablelands
   │               · lake basins · volcanoes
 region  drainage graph on a 2,048 m node lattice (CPU, fp64, cached; GPU node table)
@@ -328,8 +414,8 @@ region  drainage graph on a 2,048 m node lattice (CPU, fp64, cached; GPU node ta
   │       exact drainage, levels from the lowest land across each floor, reach profiles, lakes
   │     climate (5.8 km temperature, 3.2 km moisture) + geography → 15 biome regions
 chunk   land = min( max(U + detail·masks, river terraces), river valleys, lake bowls )
-  │       detail: hills, ridges, karst, dunes, mesas + gullies down the land's own slope; near
-  │       rivers and marshes it only rises
+  │       detail: hills, ridges, karst prisms, dunes, mesa tiers, canyon strata + gullies down
+  │       the land's own slope, on flanks only; near rivers and marshes it only rises
   │       ponds in flat meadows, marsh pools in a marsh's heart, a crater's lava lake
 pixel   biome look, flow-mapped water, rapids foam, waterfalls, ice, molten lava
 ```
@@ -355,8 +441,9 @@ and `components/terrain/landsGlsl.ts`.
   for snow, and so are its trees: snags, a few pines, up to the tree line.
 - **Ancient forests:** one candidate per 8 km cell, taking only mild, moist land. Like the volcanoes'
   lattice, theirs lies in the warped plane, so a grove fades out inside its own cell.
-- **Coast:** beaches, or cliffs of 45–95 m. The land rises from the sea floor over a steep but
-  continuous face of about 10 m, never as a sheer step.
+- **Coast:** beaches, or cliffs of 45–95 m (`SEA_CLIFF`). From the sea: a wave-cut platform 1 m
+  under the sea, falling seaward at 3°; a talus apron of 34°, up to 26 m out; an 80° wall from a toe
+  6 m in from the coastline; and a rim rounded over 1.5 m.
 
 ### Rivers (`HYDRO`)
 
@@ -466,6 +553,16 @@ Seed 1337 unless noted, MacBook Air M1, headless Chrome, WebGPU.
   - WebGL2 vs CPU: 1.3 mm at 3 km, 3.4 mm at 12 km; chunk seams under 0.5 mm. (With the three gully
     samples inlined side by side, WebGL2 on an Apple GPU put the gullies' gradient metres off,
     though each sample alone was exact: they now run in one loop.)
+  - After the fourth pass (`port --config=forms`, SwiftShader, before → after):
+    - WGSL vs CPU at the five places, near, mid and far: at most 22.8 mm (place 2, near), against
+      21.9 mm before. The karst and flank views at mid range fell from 21.9 and 19.7 mm to 1.8 and
+      1.6 mm. The sea cliff is now 3.9–5.5 mm, against 0.6–0.9 mm: its 80° wall turns fp32's
+      rounding of x and z into height.
+    - Away from them: 5.3 mm at 10 km (10.3 before), 52.6 mm at 500 km (44.1) and 172.7 mm at
+      1,000 km (155.1), all on coarse levels. Seams are at most 5.9 mm (7.6).
+    - GLSL 100 km or more from spawn was already metres off before the pass (72 m and 23 m on
+      coarse levels at 100 and 250 km; 24 m at 1,000 km fine), and still is (65 m, 12.7 m and
+      38 m). The pass did not look into why.
 - **Walls.** In 2.6 million samples at 2 m (seed 1337), no water stands more than 0.5 m above
   adjacent dry ground. Round 215 lakes, 24 rays each, one ray meets a drop: a waterfall at an outlet.
 - **River continuity.** Visible channels are dry along 0.02 % of their length, with no gap of 16 m or
@@ -482,12 +579,19 @@ Seed 1337 unless noted, MacBook Air M1, headless Chrome, WebGPU.
 - **CPU:** one world evaluation takes 7.4 µs: points round a pond now share its cell's verdict. The
   river table takes ~320 ms the first time and 32 ms per re-centre (measured with the machine
   loaded). The WebGL2 world function costs 38 ns an evaluation, 8 % more than with the old gullies.
-- **Tests:** 279 pass, including the hydrology suite:
+- **Tests:** 287 pass, including the hydrology suite:
   - drainage reaches the sea or a lake;
   - levels never rise downstream;
   - banks stand at the water;
   - basin lakes and lakes on rivers are level, and their shores stand above their water all round;
   - the GPU table matches the CPU.
+
+  The fourth pass adds three detectors (`tests/forms.test.ts`). Each fails on the build before it
+  and passes after:
+  - the comb: a spectral peak along contours on steep cells at place 1;
+  - the stair-step: the share of the shore at place 3 that runs along the 8, 16 and 32 m cells'
+    edges, where a cell left out cuts the water off (15 % or more by the old rule, under 2 % now);
+  - the stretch: the biplanar rock's worst texel stretch over all slopes and aspects (under 1.5×).
 
 ## 5. What still differs, and what is not done
 
@@ -514,4 +618,22 @@ Seed 1337 unless noted, MacBook Air M1, headless Chrome, WebGPU.
   costs that a worker and staggered levels would hide.
 - **WebGL2 is slower.** The WebGL2 fallback ray-marches the full world per pixel, so it is correct
   but much slower than the WebGPU clipmap.
+- **The fourth pass's rock is WebGPU only.** The biplanar rock, its strata and joints, and the
+  curvature light are in the clipmap's shader. The WebGL2 fallback has the new shapes but none of
+  that look.
+- **Mountains are gentler, not more TotK-like.** The fourth pass took about a third of their slope
+  (33). There are still no alpine walls, knife ridges or scree fans like Hebra's or the Dueling
+  Peaks'. The ridge page in [`FORMS.md`](FORMS.md) §4.5 says what they would need.
+- **The reference DEMs were not fetched.** No tolerance for geomorphon shares or spectra is set
+  from USGS 3DEP, swissALTI3D, the EA's lidar or GLO-30, so those two measures show only which way
+  the terrain moved ([`FORMS.md`](FORMS.md) §3 and §7). The repository holds no TotK captures
+  either. The golden frames sit beside an empty reference slot.
+- **A heightfield's limit.** At 10–50 m the heightfield reaches the brief's planes, benches and
+  slope modes. It cannot carry wall detail finer than 2–6 m in height, and it cannot undercut: no
+  foot notch on a tower, no sea notch, no caprock overhang. [`FORMS.md`](FORMS.md) §6 proposes the
+  smallest cliff-mesh layer that would; it is not built.
+- **Wedges in the karst.** Where a tower stands in a river's valley, small wedges of its prism are
+  left between the ceiling and the valley's side (26).
+- **Not measured here:** the frame cost on an M1 at Medium (`bun run bench`), and the blind A/B with
+  five or more players. The golden frames and the A/B kit are ready, but the A/B needs people.
 - **Not done:** caves, boulder fields, lava that harms, local waves where the hero swims.

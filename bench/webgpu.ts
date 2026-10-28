@@ -140,8 +140,9 @@ const VARIANTS: Record<string, TerrainVariant> = {
   'game-med-pixel': { ...GAME_VARIANT, sky: 'cycle', renderScale: 0.5, stub: { PER_PIXEL_GROUND: 1 } } as TerrainVariant,
   // Its normal from the sun layer's cached (smooth) gradient instead of gradientAt (terrain.wgsl.ts CACHED_GRAD).
   'game-med-cgrad': { ...GAME_VARIANT, sky: 'cycle', renderScale: 0.5, stub: { CACHED_GRAD: 1 } } as TerrainVariant,
-  // The terrain's shading, part by part (STUB_* in terrain.wgsl.ts): its biome colours, normals, shadows, fog; none of it.
-  ...Object.fromEntries((['BIOME', 'GRAD', 'SHADOW', 'FOG', 'SHADE'] as const).map((k) => [`game-med-no${k.toLowerCase()}`,
+  // The terrain's shading, part by part (STUB_* in terrain.wgsl.ts): its biome colours, normals, shadows, fog, the rock's
+  // detail, joints, strata and curvature light; none of it.
+  ...Object.fromEntries((['BIOME', 'GRAD', 'SHADOW', 'FOG', 'ROCK', 'SHADE'] as const).map((k) => [`game-med-no${k.toLowerCase()}`,
     { ...GAME_VARIANT, sky: 'cycle', renderScale: 0.5, stub: { [`STUB_${k}`]: 1 } } as TerrainVariant])),
   direct: { height: 'direct' },
   'clip512': { height: 'cached', clip: { n: 512, levels: 8, spacing0: 0.5, margin: 4 }, genDpScale: 1, blend: 0.25 },
