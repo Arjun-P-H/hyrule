@@ -343,7 +343,7 @@ the seed), at 12:00. Place 3's x was hidden by the minimap and was re-read as 18
     stripes lay side by side as regular dark corrugations, and on the hill beside it as ripples.
     Gullies now fade in over 6–24° and out over 40–55° (`GULLY_SLOPE`), so walls stay walls and only
     aprons and flanks gully, and each cell jitters its stripes' spacing by ±40 %. At place 1 the
-    gentle land's comb share fell from 38 % to 3 %.
+    gentle land's comb share fell from 38 % to 10 %.
 28. **Stair-stepped banks and pond edges** (place 3, sampling). The height had no steps. The coarse
     clipmap rings left out every cell with one wet corner, so beyond the finest rings a shore
     stepped along the lattice, 8–32 m at a time. Every ring now draws water by one rule
@@ -453,11 +453,11 @@ What the fourth pass measured, from the dumps and over 160 km squares ([`FORMS.m
   5.8 / 6.5 / 16.7 %. At tower land's edge they were a smear until 35 (0.45) and are now separate
   (0.22).
 - **The comb**, along contours over four places and twelve drawn over 80 km: combed walls fell from
-  12 % to 0 %, gentle land from 40 % to 24 %, flanks from 37 % to 28 %.
-- **Geomorphons.** Spur and hollow cells, the teeth and corrugations, fell by a third to a half at
-  places 1, 2 and 5. Footslopes and shoulders rose at place 5.
-- **Spectra.** The power spectrum's exponent over 10–200 m rose from 3.54 to 4.92 (place 1), 4.30 to
-  4.94 (place 2) and 4.82 to 5.13 (place 5): power moved from steps and rough noise into planes.
+  12 % to 0 %, gentle land from 40 % to 25 %, flanks from 37 % to 25 %, steep land from 29 % to 21 %.
+- **Geomorphons.** Spur and hollow cells, the teeth and corrugations, fell by 37–54 % at places 1, 2
+  and 5. Footslopes, shoulders and flats rose there, most at place 5.
+- **Spectra.** The power spectrum's exponent over 10–200 m rose from 3.54 to 4.79 (place 1), 4.30 to
+  4.69 (place 2) and 4.82 to 5.08 (place 5): power moved from steps and rough noise into planes.
 - **Stretch.** No face that looks up draws its rock stretched more than 1.473×.
 - **Not set.** The tolerances for geomorphon shares and spectra need the reference DEMs, which were
   not fetched. The slope, comb, water and stretch tolerances are met.

@@ -354,17 +354,18 @@ Place 3's x was hidden by the minimap. It was re-read as 1849, and the window sp
 
 | Place | Landform | β before | β after | Slope class | Spur | Hollow | Ridge | Valley | Footslope | Shoulder | Flat |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| 1 (5767, −25258) | Jungle karst | 3.54 | 4.92 | 48.8 → 63.5 | 14.7 → 8.7 | 13.2 → 6.6 | 4.6 → 3.0 | 5.5 → 3.7 | 3.4 → 3.8 | 3.8 → 4.3 | 4.8 → 5.5 |
-| 2 (5571.8, −25027.4) | Mountain flank | 4.30 | 4.94 | 48.8 → 60.7 | 12.3 → 7.4 | 11.2 → 5.4 | 4.8 → 3.4 | 5.6 → 4.0 | 4.1 → 4.7 | 4.9 → 5.5 | 7.1 → 8.0 |
+| 1 (5767, −25258) | Jungle karst | 3.54 | 4.79 | 48.8 → 64.9 | 14.7 → 7.8 | 13.2 → 6.4 | 4.6 → 2.9 | 5.5 → 3.0 | 3.4 → 4.3 | 3.8 → 4.5 | 4.8 → 5.6 |
+| 2 (5571.8, −25027.4) | Mountain flank | 4.30 | 4.69 | 48.8 → 62.1 | 12.3 → 6.5 | 11.2 → 5.2 | 4.8 → 3.3 | 5.6 → 3.2 | 4.1 → 5.2 | 4.9 → 5.7 | 7.1 → 8.1 |
 | 3 (1849, −2753) | River banks | 3.61 | 3.61 | 81.9 → 86.5 | 6.9 → 4.5 | 5.6 → 3.6 | 3.1 → 3.1 | 1.7 → 1.6 | 0.1 → 0.0 | 0.2 → 0.2 | 0.0 → 0.0 |
 | 4 (1205, −2644) | Sea cliff | 3.74 | 3.73 | 86.4 → 90.6 | 4.5 → 2.6 | 3.8 → 2.0 | 2.0 → 1.7 | 1.0 → 0.8 | 0.4 → 0.5 | 0.2 → 0.3 | 1.4 → 1.4 |
-| 5 (−2585.4, −3520.1) | Karst towers | 4.82 | 5.13 | 50.1 → 64.3 | 16.4 → 11.7 | 15.5 → 9.1 | 6.5 → 4.3 | 8.6 → 5.0 | 0.8 → 2.3 | 0.4 → 1.6 | 0.1 → 0.7 |
+| 5 (−2585.4, −3520.1) | Karst towers | 4.82 | 5.08 | 50.1 → 65.2 | 16.4 → 10.4 | 15.5 → 8.6 | 6.5 → 4.2 | 8.6 → 4.9 | 0.8 → 2.6 | 0.4 → 2.2 | 0.1 → 1.2 |
 
 Geomorphon shares are in %.
 
-- **The spur–hollow pairs** (the teeth of a comb, and the corrugations on a flank) fell by a third to
-  a half at places 1, 2 and 5.
-- **Benches and breaks.** Footslopes and shoulders rose at place 5, and flats at places 1, 2 and 5.
+- **The spur–hollow pairs** (the teeth of a comb, and the corrugations on a flank) fell by 37–54 % at
+  places 1, 2 and 5.
+- **Benches and breaks.** Footslopes, shoulders and flats rose at places 1, 2 and 5, most at place 5
+  (footslopes 0.8 → 2.6 %, shoulders 0.4 → 2.2 %).
 - **β** rose at the places whose forms changed (1, 2 and 5), toward the planes-and-kinks end (§3).
   It held where they did not.
 
@@ -374,15 +375,15 @@ DFT. A trace is a comb when its strongest 32–160 m swing is at least 8° and h
 
 | Slope band | Comb share, before | Comb share, after | Median swing, before | Median swing, after |
 | :--- | :--- | :--- | :--- | :--- |
-| Gentle, < 12° | 40 % | 24 % | 19.5° | 11.7° |
-| Flank, 20–40° | 37 % | 28 % | 15.2° | 9.5° |
-| Steep, 40–60° | 29 % | 25 % | 11.6° | 8.7° |
+| Gentle, < 12° | 40 % | 25 % | 19.5° | 12.0° |
+| Flank, 20–40° | 37 % | 25 % | 15.2° | 9.1° |
+| Steep, 40–60° | 29 % | 21 % | 11.6° | 8.8° |
 | Wall, > 60° | 12 % | 0 % | 3.2° | 0.2° |
 
-Place 1's gentle band fell from 38 % to 3 %, and place 5's walls from 31 % to 0 %.
+Place 1's gentle band fell from 38 % to 10 %, and place 5's walls from 31 % to 0 %.
 
 `analyze.py` also has an older straight-line score (a spectral peak along a line), and it *rose* at
-place 5: 0.73 → 2.07 dB at 42.7 m. That is the towers' faces, a median of 45.9 m long, and not a
+place 5: 0.73 → 1.66 dB at 42.7 m. That is the towers' faces, a median of 45.9 m long, and not a
 comb: with the karst term taken out at place 1 it falls from 0.90 to 0.46. The contour detector is
 the one the tests use.
 
