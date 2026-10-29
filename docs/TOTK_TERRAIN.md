@@ -432,15 +432,18 @@ the seed), at 12:00. Place 3's x was hidden by the minimap and was re-read as 18
     CPU twin's at place 5's mid frame, 0.26 m at its near frame and 30–32 mm at places 1 and 2: over
     the player's `GROUND_BIAS` (0.08 m). The two fp32 twins agreed within 40 mm, so the cause was
     precision, not the port. Over 128 m the noise is 128 times smaller. Perturbing the CPU twin's
-    gradient by the same relative error predicts 13 mm at the worst point, against 1.71 m over 1 m.
-    The walls' slopes hardly move: on the edge test, 15–60° goes from 4.3 % to 3.7 % and over 60°
-    stays at 74 %. At 256 m the walls start to blur (8.0 % at 15–60°).
+    gradient by the same relative error predicted 13 mm at the worst point, against 1.71 m over 1 m,
+    and the port check measured 9.8 and 9.4 mm at place 5's near and mid frames (§4). The walls'
+    slopes hardly move: on the edge test, 15–60° goes from 4.3 % to 3.7 % and over 60° stays at
+    74 %. At 256 m the walls start to blur (8.0 % at 15–60°).
 
     The same tower is now cut in a wall: a plain at 114–120 m, then 170, 222 and 270 m at 25 m steps
     (2 m/m, 64°). Over 1 m it stood at 3 m/m. The 128 m step takes the share's gradient partway up
-    the rise, where it is steeper than at the tower, so this wall lies back from 72°. On tower tops at the edge (the jungle's weight 0.35–0.75, the towers over 40 m), 62 % of
-    the slopes over 0.5 m lay at 15–60° and 35 % over 60°; now 4 % and 74 %. The edge's slope modes
-    were one smear (trough 0.45) and are separate (0.22). A test fails on the scaled towers. Far out,
+    the rise, where it is steeper than at the tower, so this wall lies back from 72°.
+
+    On tower tops at the edge (the jungle's weight 0.35–0.75, the towers over 40 m), 62 % of the
+    slopes over 0.5 m lay at 15–60° and 35 % over 60°; now 4 % and 74 %. The edge's slope modes were
+    one smear (trough 0.45) and are separate (0.22). A test fails on the scaled towers. Far out,
     where the towers fade to their mean height, that mean is still scaled by the weight.
 
 What the fourth pass measured, from the dumps and over 160 km squares ([`FORMS.md`](FORMS.md) §3–5):
@@ -614,9 +617,13 @@ Seed 1337 unless noted, MacBook Air M1, headless Chrome, WebGPU.
       21.9 mm before. (The pass's first build had 22.8 mm there; the towers' new ceiling (2, 34)
       halved places 1 and 2 near.) The karst and flank views at mid range fell from 21.9 and
       19.7 mm to 1.8 and 1.6 mm. The sea cliff is now 3.9–5.5 mm, against 0.6–0.9 mm: its 80° wall
-      turns fp32's rounding of x and z into height.
-    - Away from them: 5.3 mm at 10 km (10.3 before), 52.6 mm at 500 km (44.1) and 172.7 mm at
-      1,000 km (155.1), all on coarse levels. Seams are at most 5.9 mm (7.6).
+      turns fp32's rounding of x and z into height. Place 5's towers are 9.8 and 9.4 mm near and
+      mid, against 5.6 and 3.6 mm before the pass and 2.7 mm before the edge ceiling (35), whose
+      gradient over 1 m had put them 0.26 and 1.69 m off. The GLSL twin is within 0.2 mm of the
+      WGSL twin there.
+    - Away from them: 81.4 mm on the coarse level at spawn (81.4 before), 5.3 mm at 10 km (10.3),
+      52.6 mm at 500 km (44.1) and 172.7 mm at 1,000 km (155.1), all on coarse levels. Seams are at
+      most 5.9 mm (7.6).
     - Tree placement at places 1–5 near (`parity --config=forms`, frames 0, 3, 6, 9 and 12):
       99.999 % of cells agree. 4 of ~22,400 land plants are on one side only, none is of another
       species and none moved; sky plants agree for all.
