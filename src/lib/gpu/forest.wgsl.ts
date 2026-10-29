@@ -219,30 +219,56 @@ struct PlSite {
   zone: i32, dom: i32, level: f32, fill: f32, mask: f32, open: f32,
 };
 
+// The ground at g: its height, the water's level (the sea, a lake, a river at its own level), the shore,
+// and the slope over 1.5 m; the slope is left at 1e9 where the ground is under or within 0.4 m of the
+// water. The three samples share one call site, as do plSite's nine coarse ones: a software GPU inlines
+// every call, and a whole copy of the world's height per sample made forestGen too big to build.
+fn plGround(g: vec2f) -> vec4f {
+  var o = vec4f(0.0, 0.0, 0.0, 1e9);
+  var d = vec2f(0.0);
+  for (var k = 0; k < 3; k++) {
+    let s = landSurface(g + vec2f(select(0.0, 1.5, k == 1), select(0.0, 1.5, k == 2)), 1.0, u.seed);
+    if (k == 0) {
+      o = vec4f(s.e, s.w, s.shore, 1e9);
+      if (s.e < s.w + 0.4) { return o; }
+    } else {
+      d[k - 1] = s.e - o.x;
+    }
+  }
+  o.w = length(d) / 1.5;
+  return o;
+}
+
 fn plSite(x: f32, z: f32, region: f32, zoneR: f32) -> PlSite {
   var o: PlSite;
   o.ok = false;
   let g = vec2f(x, z);
-  // the ground and the water's level (the sea, a lake, a river at its own level)
-  let sf = landSurface(g, 1.0, u.seed);
-  o.e = sf.e;
-  o.wt = sf.w;
-  o.shore = sf.shore;
+  let gr = plGround(g);
+  o.e = gr.x;
+  o.wt = gr.y;
+  o.shore = gr.z;
   if (o.e < o.wt + 0.4) { return o; }
-  o.slope = length(vec2f(elevation(g + vec2f(1.5, 0.0), 1.0, u.seed) - o.e, elevation(g + vec2f(0.0, 1.5), 1.0, u.seed) - o.e)) / 1.5;
+  o.slope = gr.w;
+  // the coarse ground at g and 36 m round it, then at g and 84 m round it (E, W, N, S)
   let L = ${f(PLACE.relief.step)};
   let dp = ${f(PLACE.relief.dp)};
-  let e0 = landCoarse(g, dp, u.seed);
-  let relief = (landCoarse(g + vec2f(L, 0.0), dp, u.seed) + landCoarse(g - vec2f(L, 0.0), dp, u.seed)
-    + landCoarse(g + vec2f(0.0, L), dp, u.seed) + landCoarse(g - vec2f(0.0, L), dp, u.seed) - 4.0 * e0) / L;
-  // Forest bodies follow the hills (84 m), not every hummock.
   let H = ${f(PLACE.hills.step)};
   let hp = ${f(PLACE.hills.dp)};
-  let h0 = landCoarse(g, hp, u.seed);
-  let hE = landCoarse(g + vec2f(H, 0.0), hp, u.seed);
-  let hW = landCoarse(g - vec2f(H, 0.0), hp, u.seed);
-  let hN = landCoarse(g + vec2f(0.0, H), hp, u.seed);
-  let hS = landCoarse(g - vec2f(0.0, H), hp, u.seed);
+  var c: array<f32, 10>;
+  for (var k = 0; k < 10; k++) {
+    let j = k % 5;
+    let r = select(L, H, k >= 5);
+    let dx = select(0.0, select(-r, r, j == 1), j == 1 || j == 2);
+    let dz = select(0.0, select(-r, r, j == 3), j == 3 || j == 4);
+    c[k] = landCoarse(g + vec2f(dx, dz), select(dp, hp, k >= 5), u.seed);
+  }
+  let relief = (c[1] + c[2] + c[3] + c[4] - 4.0 * c[0]) / L;
+  // Forest bodies follow the hills (84 m), not every hummock.
+  let h0 = c[5];
+  let hE = c[6];
+  let hW = c[7];
+  let hN = c[8];
+  let hS = c[9];
   let hills = (hE + hW + hN + hS - 4.0 * h0) / H;
   let hillSlope = length(vec2f(hE - hW, hN - hS)) / (2.0 * H);
   o.hollow = smoothstep(0.03, 0.15, relief);
@@ -330,9 +356,8 @@ fn plantAt(ix: i32, iz: i32, lid: vec2f, xz: vec2f, bits: u32) -> vec4u {
     if (plU16(lp, 0u) < p * forest.camOff.z) {
       // (its own spot, a few metres off: dry and not on a cliff's edge there too)
       let g2 = (vec2f(f32(ix), f32(iz)) + vec2f(fract(fx), fract(fz))) * F_CELL;
-      let s2 = landSurface(g2, 1.0, u.seed);
-      let sl2 = length(vec2f(elevation(g2 + vec2f(1.5, 0.0), 1.0, u.seed) - s2.e, elevation(g2 + vec2f(0.0, 1.5), 1.0, u.seed) - s2.e)) / 1.5;
-      if (s2.e >= s2.w + 0.4 && sl2 < 0.6) {
+      let s2 = plGround(g2);
+      if (s2.x >= s2.y + 0.4 && s2.w < 0.6) {
         off = (lid + vec2f(fract(fx), fract(fz))) * F_CELL;
         let sp = plPair(Z_LSP[st.dom], plU16(lp, 16u));
         return plRecord(sp, off, 0.0, 1.15 + 0.2 * pick, plSnow(st.Ts, sp), 0u, bits, -1);

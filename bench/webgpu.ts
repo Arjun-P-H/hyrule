@@ -22,8 +22,8 @@
  *          first variant runs first and is left out of the ratios: see pickVariants)
  *          --hours=6,12,18.2 (stills of day–night variants at those hours; --day=n the game day)
  *          --hour=18.2 (timing of day–night variants at that hour)
- *          --serial-compile (one pipeline compile at a time: a software device holds every concurrent
- *          compile in memory at once, and the world shader's several pipelines can outgrow a small machine)
+ *          --serial-compile (one pipeline compile at a time, each reported with its time: a device lost
+ *          while compiling, say SwiftShader out of address space, names the pipeline it was on)
  * Results: bench/out/webgpu-<mode>.json, frames in bench/out/webgpu/.
  */
 
@@ -286,12 +286,25 @@ async function webgpuPage(): Promise<string> {
   const build = await Bun.build({ entrypoints: [path.join(import.meta.dir, 'gpu/webgpu-page.ts')], target: 'browser' });
   if (!build.success) throw new Error(build.logs.map(String).join('\n'));
   pageJs = await build.outputs[0].text();
-  // (the renderer asks for its pipelines together and awaits them all: queue the asks instead)
+  // (the renderer asks for its pipelines together and awaits them all: queue the asks instead, and
+  // report each one, so a device lost during the compiles names the pipeline it was on)
   if (args.includes('--serial-compile')) pageJs = `{
   let q = Promise.resolve();
+  const say = (s) => fetch('/progress', { method: 'POST', body: JSON.stringify({ mode: 'compile', preset: s }) });
   for (const k of ['createComputePipelineAsync', 'createRenderPipelineAsync']) {
     const f = GPUDevice.prototype[k];
-    GPUDevice.prototype[k] = function (d) { const p = q.then(() => f.call(this, d)); q = p.catch(() => {}); return p; };
+    GPUDevice.prototype[k] = function (d) {
+      const ep = d.compute ? d.compute.entryPoint : d.vertex.entryPoint + '/' + (d.fragment ? d.fragment.entryPoint : '-');
+      const p = q.then(async () => {
+        const t = performance.now();
+        await say(ep + ' start');
+        const r = await f.call(this, d);
+        await say(ep + ' ' + ((performance.now() - t) / 1000).toFixed(0) + ' s,');
+        return r;
+      });
+      q = p.catch(() => {});
+      return p;
+    };
   }
 }
 ${pageJs}`;
