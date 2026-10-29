@@ -658,22 +658,24 @@ Seed 1337 unless noted, MacBook Air M1, headless Chrome, WebGPU.
 - **CPU:** one world evaluation takes 7.4 µs: points round a pond now share its cell's verdict. The
   river table takes ~320 ms the first time and 32 ms per re-centre (measured with the machine
   loaded). The WebGL2 world function costs 38 ns an evaluation, 8 % more than with the old gullies.
-- **Tests:** 288 pass, including the hydrology suite:
+- **Tests:** 289 pass, including the hydrology suite:
   - drainage reaches the sea or a lake;
   - levels never rise downstream;
   - banks stand at the water;
   - basin lakes and lakes on rivers are level, and their shores stand above their water all round;
   - the GPU table matches the CPU.
 
-  The fourth pass adds four detectors (`tests/forms.test.ts`). The first three fail on the build
-  before the pass, the fourth on the pass's first build, and all pass now:
+  The fourth pass adds five detectors (`tests/forms.test.ts`). The first three and the fifth fail on
+  the build before the pass, the fourth on the pass's first build, and all pass now:
   - the comb: a spectral peak along contours on steep cells at place 1;
   - the stair-step: the share of the shore at place 3 that runs along the 8, 16 and 32 m cells'
     edges, where a cell left out cuts the water off (15 % or more by the old rule, under 2 % now);
   - the stretch: the biplanar rock's worst texel stretch over all slopes and aspects (under 1.5×);
   - the toe: the share of the towers' first 8 m by a river that stands over 60° (30 % on the
     pass's first build, under 2 % now; 34). The domes before the pass had gentle feet, so it passes
-    on that build too.
+    on that build too;
+  - the edge: on towers over 40 m where the jungle's weight is 0.35–0.75, the share of slopes at
+    15–60° (62 % before, under 10 % now: 3.7 %) and over 60° (35 % before, over 60 % now: 74 %; 35).
 
 ## 5. What still differs, and what is not done
 
