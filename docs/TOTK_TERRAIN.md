@@ -445,6 +445,18 @@ the seed), at 12:00. Place 3's x was hidden by the minimap and was re-read as 18
     slopes over 0.5 m lay at 15–60° and 35 % over 60°; now 4 % and 74 %. The edge's slope modes were
     one smear (trough 0.45) and are separate (0.21). A test fails on the scaled towers. Far out,
     where the towers fade to their mean height, that mean is still scaled by the weight.
+36. **A grid on the rock faces** (found in the golden frames: surface). Place 4's near frame drew the
+    sea cliff's face in square tiles about 7 m across. With the rock's detail off the tiles went,
+    so they were the surface, not the shape or the mesh. The rock's planes (30) drew their broad
+    patches (7 m) and the cracks between blocks (a ridged 2 m octave) in value noise. Its square
+    cells line up with a plane's axes, and an upright plane's axes are the level and the plumb, so
+    the walls showed a grid. Both octaves are now simplex noise (`rockPlane`):
+    - at 3/8 of value noise's frequency, which gives the same features (`RIDGE_SPAN`);
+    - scaled by 84, which matches value noise's rms (0.455). The drawing's spread on a face is
+      0.323 against 0.328 before.
+
+    The ground plane's stretched drawing was there before this pass, so no grid showed on the old
+    faces.
 
 What the fourth pass measured, from the dumps and over 160 km squares ([`FORMS.md`](FORMS.md) §3–5):
 - **Slope modes.** Tower, mesa and canyon land each now show a talus mode at 32–34° and a cliff mode
@@ -718,7 +730,14 @@ Seed 1337 unless noted, MacBook Air M1, headless Chrome, WebGPU.
 - **The reference DEMs were not fetched.** No tolerance for geomorphon shares or spectra is set
   from USGS 3DEP, swissALTI3D, the EA's lidar or GLO-30, so those two measures show only which way
   the terrain moved ([`FORMS.md`](FORMS.md) §3 and §7). The repository holds no TotK captures
-  either. The golden frames sit beside an empty reference slot.
+  either. The golden frames ([`forms-golden.jpg`](forms-golden.jpg)) sit beside an empty reference
+  column.
+- **Teeth on the rims.** Seen from 100–150 m, the towers' rims show teeth 1–2 px deep and 5–6 px
+  apart at 640 × 400. They are the clipmap's mesh, not grass or the edge light. A rim bends within
+  a few cells, so the flat triangles between lattice points stand off it by about a quarter of a
+  cell, and that repeats every cell. Rounding the rims wide enough to hide them would bring the
+  domes back. A rim drawn as its own mesh would not depend on the lattice ([`FORMS.md`](FORMS.md)
+  §6).
 - **A heightfield's limit.** At 10–50 m the heightfield reaches the brief's planes, benches and
   slope modes. It cannot carry wall detail finer than 2–6 m in height, and it cannot undercut: no
   foot notch on a tower, no sea notch, no caprock overhang. [`FORMS.md`](FORMS.md) §6 proposes the

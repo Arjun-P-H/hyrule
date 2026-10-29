@@ -387,6 +387,26 @@ place 5: 0.73 → 1.66 dB at 42.7 m. That is the towers' faces, a median of 45.9
 comb: with the karst term taken out at place 1 it falls from 0.90 to 0.46. The contour detector is
 the one the tests use.
 
+**The golden frames** are in [`forms-golden.jpg`](forms-golden.jpg): seed 1337 at 12:00, game-med at
+640 × 400 on SwiftShader (`bun bench/webgpu.ts stills --config=forms`). Each place's cameras stand
+120, 450 and 1500 m from its subject on one bearing (`bench/forms/frames.ts`).
+
+- **Places 1 and 2 frame the same tower.** They are 302 m apart, and the tower is the most relief
+  within reach of both. The grassy dome is now a walled tower on a talus apron (near), and two
+  flat-capped towers (mid and far).
+- **Place 3 looks the same.** The stair-step fix is under a metre, too fine to see from 120 m, so
+  the water-edge test in `tests/forms.test.ts` measures it instead.
+- **Place 4:** the sea cliff's face was melted into streaks down the wall, the ground's drawing
+  stretched over an 80° face. The biplanar rock draws it now. The first after frames drew it as a
+  grid of 7 m tiles. The tiles went with the rock's detail off, so they were the surface, and a CPU
+  render of the rock's planes traced them to value noise. The rock is now drawn in simplex noise
+  (`TOTK_TERRAIN.md` entry 36), as in these frames.
+- **Place 5:** walled prisms with flat caps in place of domes. The slab across the mid frame's
+  foreground is the tower at the jungle's edge, now cut in a wall (`TOTK_TERRAIN.md` entry 35). The
+  rims show teeth 1–2 px deep about 5–6 px apart. They are not grass (they are the same with grass
+  off) but the clipmap's mesh (§6, Rims).
+- **The TotK column is empty.** The repository holds no captures. `sheet.py --ref=<dir>` fills it.
+
 ## 6. What a heightfield can reach, and the smallest cliff mesh
 
 **Camera and clipmap.** The camera has a 70° vertical field over 900 rows, which is about 643 px per
@@ -405,10 +425,34 @@ metre at 1 m. The clipmap's finest level is 0.5 m within ±32 m of the camera, a
 
   At 30–50 m and beyond, a rim reads as a crisp edge on a wall tens of metres high. At 10 m it reads
   as a rounded arris, and finer would alias.
+- **Teeth on the rims** (found in the golden frames: sampling). Place 5's rims show teeth 1–2 px deep,
+  5–6 px apart, at 640 × 400. The clipmap draws a rim as flat triangles between its lattice points,
+  and the rim bends within a few cells, so the mesh stands off the true rim by an amount that changes
+  with where the rim falls in its cell. That repeats every cell along the rim. On place 5's highest
+  tower, with the adaptive diagonal, against each level's own prefiltered E:
+
+  | Cell | Median | p90 | Rim's run (10–90 % of its slope) | Median at 48 cells' distance |
+  | :--- | :--- | :--- | :--- | :--- |
+  | 0.5 m | 0.03 m | 0.05 m | 6.5 cells | 0.4 px |
+  | 1 m | 0.14 m | 0.20 m | 3.3 cells | 0.8 px |
+  | 2 m | 0.39 m | 0.54 m | 2.4 cells | 1.2 px |
+  | 4 m | 1.00 m | 1.37 m | 1.9 cells | 1.5 px |
+
+  A slope change Δg over n cells leaves about Δg·s/(8n), and Δg ≈ 4 gives 0.04, 0.15, 0.42 and
+  1.05 m, so the bend explains it. The cell grows with distance (it is d/64 to d/32), so the teeth
+  hold about the same size on screen at every distance: 0.4–1.5 px by median, 2 px at p90, with a
+  cell 4.5–9 px long. The near frame sees its rims at 100–150 m, in the 2 and 4 m cells.
+
+  Rounding the rims wider cannot cure it. Under half a pixel, a rim needs 5–9 cells of rounding at
+  640 × 400 and 10–20 at 900 rows. At 900 rows, a rim seen from 100 m would be rounded over 16–60 m.
+  That is the soft dome the brief removes. A rim drawn as its own mesh would not depend on the
+  lattice.
 - **Detail on the face.** At 77°, one 0.5 m cell climbs 2.1 m of wall, and a 1 m cell 4.2 m (3.0 m
   and 6.0 m at the sea cliff's 80°). The geometry carries nothing on a face finer than 2–6 m in
   height. Strata, joints and ledges are drawn by the surface: biplanar rock, world-space strata and
   vertical joints, and curvature edge light (WebGPU only; the WebGL2 demo raymarcher has none of it).
+  The rock is drawn in simplex noise. Value noise's square cells drew a grid of 7 m tiles on the
+  walls (`TOTK_TERRAIN.md` entry 36).
 - **No overhangs.** A heightfield has no undercut: not the foot notches of a Guilin tower, not a sea
   notch, not a caprock overhang.
 

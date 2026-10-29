@@ -49,20 +49,24 @@ export function rockStretch(n: readonly [number, number, number]): number {
 
 const v3 = (a: readonly number[]) => `vec3f(${a.map((x) => (Number.isInteger(x) ? `${x}.0` : String(x))).join(', ')})`;
 
-/** WGSL: the planes and rockDetail (needs vnoise). */
+/** WGSL: the planes and rockDetail (needs snoise). */
 export const ROCK_WGSL = /* wgsl */ `
 const ROCK_AX = array<vec3f, ${ROCK_AXES.length}>(${ROCK_AXES.map(v3).join(', ')});
 const ROCK_U = array<vec3f, ${ROCK_AXES.length}>(${ROCK_U.map(v3).join(', ')});
 const ROCK_V = array<vec3f, ${ROCK_AXES.length}>(${ROCK_V.map(v3).join(', ')});
 
 // One plane's drawing at its coordinates uv (m): broad patches (7 m) and the cracks between blocks
-// (a ridged 2 m octave), each faded to its mean as it shrinks under the footprint dp.
+// (a ridged 2 m octave), each faded to its mean as it shrinks under the footprint dp. Simplex, not
+// value noise: value noise's square cells drew a grid of 7 m tiles on the walls. For the same
+// features simplex runs at 3/8 of value noise's frequency (RIDGE_SPAN), and ROCK_SN gives it value
+// noise's spread.
+const ROCK_SN: f32 = 84.0;
 fn rockPlane(uv: vec2f, dp: f32, seed: i32) -> f32 {
   let k1 = 1.0 - smoothstep(1.75, 3.5, dp);
   if (k1 <= 0.0) { return 0.0; }
-  var d = 0.55 * k1 * vnoise(uv.x / 7.0, uv.y / 7.0, seed);
+  var d = 0.55 * k1 * ROCK_SN * snoise(uv.x / 18.67, uv.y / 18.67, seed).x;
   let k2 = 1.0 - smoothstep(0.5, 1.0, dp);
-  if (k2 > 0.0) { d += 0.45 * k2 * (0.5 - abs(vnoise(uv.x / 1.9, uv.y / 1.9, seed + 1))) * 2.0; }
+  if (k2 > 0.0) { d += 0.45 * k2 * (0.5 - abs(ROCK_SN * snoise(uv.x / 5.07, uv.y / 5.07, seed + 1).x)) * 2.0; }
   return d;
 }
 
