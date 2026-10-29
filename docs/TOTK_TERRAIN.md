@@ -443,15 +443,15 @@ the seed), at 12:00. Place 3's x was hidden by the minimap and was re-read as 18
 
     On tower tops at the edge (the jungle's weight 0.35–0.75, the towers over 40 m), 62 % of the
     slopes over 0.5 m lay at 15–60° and 35 % over 60°; now 4 % and 74 %. The edge's slope modes were
-    one smear (trough 0.45) and are separate (0.22). A test fails on the scaled towers. Far out,
+    one smear (trough 0.45) and are separate (0.21). A test fails on the scaled towers. Far out,
     where the towers fade to their mean height, that mean is still scaled by the weight.
 
 What the fourth pass measured, from the dumps and over 160 km squares ([`FORMS.md`](FORMS.md) §3–5):
 - **Slope modes.** Tower, mesa and canyon land each now show a talus mode at 32–34° and a cliff mode
-  at 75–80°, separate where they were one smear: the lowest bin between them is 0.11 / 0.18 / 0.14
-  of the lower peak, against 0.75 / 1.48 / 8.47, and the 45–60° share is 1.3 / 2.0 / 3.0 %, against
+  at 75–80°, separate where they were one smear: the lowest bin between them is 0.11 / 0.14 / 0.15
+  of the lower peak, against 0.75 / 1.48 / 8.47, and the 45–60° share is 1.3 / 2.2 / 3.0 %, against
   5.8 / 6.5 / 16.7 %. At tower land's edge they were a smear until 35 (0.45) and are now separate
-  (0.22).
+  (0.21).
 - **The comb**, along contours over four places and twelve drawn over 80 km: combed walls fell from
   12 % to 0 %, gentle land from 40 % to 25 %, flanks from 37 % to 25 %, steep land from 29 % to 21 %.
 - **Geomorphons.** Spur and hollow cells, the teeth and corrugations, fell by 37–54 % at places 1, 2

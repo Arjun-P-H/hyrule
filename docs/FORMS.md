@@ -58,8 +58,8 @@ rough figures. These are the figures the generator's parameters were chosen to.
 | :--- | :--- | :--- | :--- |
 | Talus mode | 32–37° (the 5° bin peaks over 30–40°) | The angle of repose of coarse rock debris | **Met**: towers 32°, mesas 34°, canyons 34° |
 | Cliff mode | 70–85° (the 5° bin peaks over 65–90°) | Tower walls, sandstone cliffs and chalk faces stand near vertical | **Met**: towers 77°; mesas and canyons peak in the 75–80° bin |
-| Separate modes | The lowest 5° bin between the talus and cliff peaks is at most half the lower peak; both are local maxima | This brief, §1.1 | **Met**: troughs 0.15 / 0.18 / 0.14, against 0.75 / 1.48 / 8.47 before |
-| The 45–60° gap | Under the talus share, and well under the before's | §1.1 | **Met**: 1.6 / 2.0 / 3.0 %, against 5.8 / 6.5 / 16.7 % |
+| Separate modes | The lowest 5° bin between the talus and cliff peaks is at most half the lower peak; both are local maxima | This brief, §1.1 | **Met**: troughs 0.11 / 0.14 / 0.15, against 0.75 / 1.48 / 8.47 before |
+| The 45–60° gap | Under the talus share, and well under the before's | §1.1 | **Met**: 1.3 / 2.2 / 3.0 %, against 5.8 / 6.5 / 16.7 % |
 | Tower height over width | 0.7–1.5 at the wall's foot | Guilin tower karst (§4.1) | **Met** by construction |
 | Talus apron | 32–37° | The angle of repose | **Met** by construction on every landform |
 | Comb | At place 1, under 15 % of contours on steep cells swing ≥ 20° at 32–160 m, and the 75th percentile is under 18° | §1.3 | **Met** (`tests/forms.test.ts`, which fails on the before) |
@@ -154,7 +154,7 @@ over 0.5 m at a 0.5 m footprint (the nearest clipmap level's). The breaks come f
 | Before | 64.0 % | 6.1 % | 5.8 % | 12.0 % | 0°, 29°, 37°, 39°, 60°, 72° | smear (0.75) |
 | After | 71.0 % | 11.6 % | 1.3 % | 8.2 % | 0°, 32°, 77° | separate (0.11) |
 | Edge, scaled | 76.2 % | 6.9 % | 2.4 % | 5.3 % | 0°, 20°, 29° | smear (0.45) |
-| Edge, after | 79.8 % | 6.7 % | 1.3 % | 5.2 % | 0° | separate (0.22) |
+| Edge, after | 80.0 % | 7.0 % | 1.5 % | 4.8 % | 0° | separate (0.21) |
 
 Tower land is where the jungle's weight is at least 0.6, its edge where it is 0.35–0.75.
 
@@ -165,7 +165,7 @@ bin between them. (On the pass's first build the after row was 70.3 / 11.3 / 1.4
 8.3 %, trough 0.15), and the edge's ceiling put walls back on the towers there.) At the edge, the
 scaled towers' bins fell from 3.0 % at 30–35° to 0.8 % over 45–60°, then climbed steadily (0.9,
 1.0, 1.2) to 1.7 % at 75–80°, with no trough between talus and cliff. Now they fall to 0.4–0.7 %
-over 45–70° and stand again at 1.5 and 1.9 % over 70–80°.
+over 45–70° and stand again at 1.2 and 1.8 % over 70–80°.
 
 ### 4.2 Butte and mesa
 
@@ -209,9 +209,9 @@ over 45–70° and stand again at 1.5 and 1.9 % over 70–80°.
 | Mesa land | Bench | Talus | Gap | Cliff | Modes | Test |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | Before | 74.5 % | 5.1 % | 6.5 % | 4.4 % | 0°, 49° | smear (1.48) |
-| After | 75.2 % | 12.8 % | 2.0 % | 4.9 % | 0°, 34° | separate (0.18) |
+| After | 75.2 % | 12.2 % | 2.2 % | 5.3 % | 0°, 34° | separate (0.14) |
 
-The cliff's mode stands out in 5° bins (75–80°: 2.6 %, between 0.6 % on either side), but it falls
+The cliff's mode stands out in 5° bins (75–80°: 2.8 %, between 0.7 % on either side), but it falls
 under the 4 % of peak that the 1° modes count. Mesa land is mostly cap and plain.
 
 ### 4.3 Canyon wall
@@ -254,7 +254,7 @@ under the 4 % of peak that the 1° modes count. Mesa land is mostly cap and plai
 | Canyon land (valley cut ≥ 10 m) | Bench | Talus | Gap | Cliff | Modes | Test |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | Before | 55.4 % | 11.8 % | 16.7 % | 2.5 % | 0°, 7°, 24°, 44°, 46°, 50° | smear (8.47) |
-| After | 63.9 % | 18.5 % | 3.0 % | 5.2 % | 0°, 5°, 34°, 77° | separate (0.14) |
+| After | 63.6 % | 18.5 % | 3.0 % | 5.4 % | 0°, 5°, 25°, 34°, 77° | separate (0.15) |
 
 The 5° mode is the benches. Before, a canyon wall was one slope of about 45–50°, which is the smear
 the brief rules out.
@@ -320,7 +320,7 @@ the brief rules out.
 | Mountain land, 0.5 m | Bench | Talus | Gap | Cliff | Modes |
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | Before | 56.5 % | 11.2 % | 1.6 % | 0.1 % | 6°, 8° |
-| After | 79.7 % | 5.0 % | 1.0 % | 0.1 % | 4° |
+| After | 80.0 % | 4.8 % | 1.1 % | 0.1 % | 4°, 31°, 33° |
 
 - **Over 8 m** (central differences at 20,000 random points over 80 km, where mountains weigh at
   least 0.7): the mean slope fell from 15.1° to 10.2°, and the share over 30° from 10.6 % to 5.7 %.
