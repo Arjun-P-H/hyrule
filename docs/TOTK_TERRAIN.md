@@ -366,7 +366,10 @@ the seed), at 12:00. Place 3's x was hidden by the minimap and was re-read as 18
     - a wall of 74–81° down to a foot at 12–20 % of the height, and a talus apron of 32–37° below;
     - heights of 50–220 m, and a height over width of 0.7–1.5 at the wall's foot;
     - a 300 m lattice with a tower in 7 cells of 8: wide towers merge on a shared apron
-      (*fengcong*), and narrow ones stand alone on the plain (*fenglin*).
+      (*fengcong*), and narrow ones stand alone on the plain (*fenglin*);
+    - laid out in the world, not in the domain warp's plane as before, where the warp stretched and
+      sheared each prism (by up to about 2×, 34). So each tower stands where it did, moved by the
+      warp's offset (a median of 478 m round place 5).
 
     The rim's run fell from 17.25 m to 2.25 m. Rock steeper than about 45° is now drawn by biplanar
     mapping on five planes, with world-space strata, vertical joints 13 and 21 m apart, and edge
@@ -408,12 +411,44 @@ the seed), at 12:00. Place 3's x was hidden by the minimap and was re-read as 18
     Now 0.1 % and none do, and 86 % lie at 30–50°. Toes on a valley's side stand at 38–47°, steeper
     than the brief's 32–37°: the ceiling caps the towers' term, and the valley's side adds its own
     slope. A test fails on the old ceiling.
+35. **Towers melted at their region's edge** (found in the golden frames: shape). Place 5's mid frame
+    showed a grassy dome in the foreground: a tower 175 m tall where the jungle's weight was about
+    0.65. The towers were scaled by their region's weight, which rises from 0 to 1 over a median of
+    214 m (78–751 m, p10–p90), so at the edge every slope was multiplied by the weight and the whole
+    tower tilted by the weight's gradient times its height. Across that tower the ground rose in a ramp, 133 m to 222 m
+    over 200 m. The towers now stand whole, under a ceiling like a river's (34, `KARST_EDGE`):
+    - it starts where the karst's share of the landform is 0.55 (the weight ½), and rises with the
+      distance in from there (the share over its gradient's length): at the talus's 35° for 8 m,
+      then at 72° where a tower covers the ground;
+    - it lifts away by 90 m of distance over shares of 0.65–0.75, so it stands clear of every tower
+      where the share's gradient is no longer taken;
+    - the gradient is a forward difference over 128 m (`KARST_EDGE_STEP`, or the mesas' growing
+      step (31) where that is longer).
+
+    Over the mesas' 1 m step the walls broke the twins' parity. In fp32 the share carries a few
+    millionths of noise, which put the GPU twins' gradient up to 0.9 % off at place 5. The distance
+    in is the share over that gradient, up to 65 m there, so it moved by up to 0.6 m, and the 3 m/m
+    wall moved its height three times that. The WGSL and GLSL twins stood 1.69 m and 1.70 m from the
+    CPU twin's at place 5's mid frame, 0.26 m at its near frame and 30–32 mm at places 1 and 2: over
+    the player's `GROUND_BIAS` (0.08 m). The two fp32 twins agreed within 40 mm, so the cause was
+    precision, not the port. Over 128 m the noise is 128 times smaller. Perturbing the CPU twin's
+    gradient by the same relative error predicts 13 mm at the worst point, against 1.71 m over 1 m.
+    The walls' slopes hardly move: on the edge test, 15–60° goes from 4.3 % to 3.7 % and over 60°
+    stays at 74 %. At 256 m the walls start to blur (8.0 % at 15–60°).
+
+    The same tower is now cut in a wall: a plain at 114–120 m, then 170, 222 and 270 m at 25 m steps
+    (2 m/m, 64°). Over 1 m it stood at 3 m/m. The 128 m step takes the share's gradient partway up
+    the rise, where it is steeper than at the tower, so this wall lies back from 72°. On tower tops at the edge (the jungle's weight 0.35–0.75, the towers over 40 m), 62 % of
+    the slopes over 0.5 m lay at 15–60° and 35 % over 60°; now 4 % and 74 %. The edge's slope modes
+    were one smear (trough 0.45) and are separate (0.22). A test fails on the scaled towers. Far out,
+    where the towers fade to their mean height, that mean is still scaled by the weight.
 
 What the fourth pass measured, from the dumps and over 160 km squares ([`FORMS.md`](FORMS.md) §3–5):
 - **Slope modes.** Tower, mesa and canyon land each now show a talus mode at 32–34° and a cliff mode
-  at 75–80°, separate where they were one smear: the lowest bin between them is 0.15 / 0.18 / 0.14
-  of the lower peak, against 0.75 / 1.48 / 8.47, and the 45–60° share is 1.6 / 2.0 / 3.0 %, against
-  5.8 / 6.5 / 16.7 %.
+  at 75–80°, separate where they were one smear: the lowest bin between them is 0.11 / 0.18 / 0.14
+  of the lower peak, against 0.75 / 1.48 / 8.47, and the 45–60° share is 1.3 / 2.0 / 3.0 %, against
+  5.8 / 6.5 / 16.7 %. At tower land's edge they were a smear until 35 (0.45) and are now separate
+  (0.22).
 - **The comb**, along contours over four places and twelve drawn over 80 km: combed walls fell from
   12 % to 0 %, gentle land from 40 % to 24 %, flanks from 37 % to 28 %.
 - **Geomorphons.** Spur and hollow cells, the teeth and corrugations, fell by a third to a half at

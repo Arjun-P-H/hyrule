@@ -24,12 +24,17 @@ const size = Number(arg('size', '160000'));
 const quota = Number(arg('n', '12000'));
 const coarse = 400;
 
-/** The classes: the regions that make them, for canyons a valley cut at least 10 m deep, and whether the brief's test applies. */
+/**
+ * The classes: the regions that make them and the range of their weight, for canyons a valley cut at
+ * least 10 m deep, and whether the brief's test applies. `edge` is tower land's edge, where the
+ * region's weight is still rising.
+ */
 const CLASSES = [
-  { id: 'tower', biomes: ['jungle'], valley: false, test: true },
-  { id: 'mesa', biomes: ['badlands'], valley: false, test: true },
-  { id: 'canyon', biomes: ['badlands', 'desert', 'savanna'], valley: true, test: true },
-  { id: 'ridge', biomes: ['mountains'], valley: false, test: false },
+  { id: 'tower', biomes: ['jungle'], w: [0.6, 2], valley: false, test: true },
+  { id: 'edge', biomes: ['jungle'], w: [0.35, 0.75], valley: false, test: true },
+  { id: 'mesa', biomes: ['badlands'], w: [0.6, 2], valley: false, test: true },
+  { id: 'canyon', biomes: ['badlands', 'desert', 'savanna'], w: [0.6, 2], valley: true, test: true },
+  { id: 'ridge', biomes: ['mountains'], w: [0.6, 2], valley: false, test: false },
 ] as const;
 
 const w = new Float64Array(BIOMES.length);
@@ -37,11 +42,11 @@ const s: [number, number] = [0, 0];
 const E = (x: number, z: number) => T.elevation(x, z, seed, 0.5);
 /** Dry land at (x, z) in the tree measured. */
 const dry = (x: number, z: number) => { const [g, wt] = T.surfaceAt(x, z, seed, s, 0.5); return g > wt + 0.01; };
-function rules(x: number, z: number, biomes: readonly string[]): boolean {
+function rules(x: number, z: number, biomes: readonly string[], [lo, hi]: readonly number[]): boolean {
   C.landRegions(x, z, seed, w);
   let sum = 0;
   for (const b of biomes) sum += w[(BIOMES as readonly string[]).indexOf(b)];
-  return sum >= 0.6;
+  return sum >= lo && sum < hi;
 }
 /** How deep the rivers' valleys cut at (x, z) (m, ≥ 0), from the CPU twin's term record. */
 function valleyCut(x: number, z: number): number {
@@ -62,7 +67,7 @@ for (const c of from ? [] : CLASSES.filter((k) => !only.length || only.includes(
   const cells: [number, number][] = [];
   for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) {
     const x = -size / 2 + (i + 0.5) * coarse, z = -size / 2 + (j + 0.5) * coarse;
-    if (rules(x, z, c.biomes) && dry(x, z)) cells.push([x, z]);
+    if (rules(x, z, c.biomes, c.w) && dry(x, z)) cells.push([x, z]);
   }
   const hist = new Array(91).fill(0);
   let got = 0;

@@ -11,7 +11,7 @@
 
 import { CLIMATE, F, GEO, HYDRO, LANDS } from '../../lib/constants';
 import { BI, BIOMES, BIOME_COUNT, LANDFORM, LANDFORM_KEYS, LOOK, SNOW_ALBEDO } from '../../lib/biomes';
-import { CANYON, CEIL_SPAN, CEIL_START, DRY_TABLE, ERO_STEP, GULLY_SLOPE, KARST_BANK, KARST_CEIL, KARST_CEIL_OFF, KARST_NORMALS, KARST_TALUS, KARST_TURNS, LAND_MEANS, MESA, RIDGE_AMP, RIDGE_DAMP, RIDGE_FREQ, RIDGE_SCALE, RIDGE_SPAN, SEA_CLIFF } from '../../lib/terrainMath';
+import { CANYON, CEIL_SPAN, CEIL_START, DRY_TABLE, ERO_STEP, GULLY_SLOPE, KARST_BANK, KARST_CEIL, KARST_CEIL_OFF, KARST_EDGE, KARST_EDGE_FADE, KARST_EDGE_LIFT, KARST_EDGE_STEP, KARST_NORMALS, KARST_TALUS, KARST_TURNS, LAND_MEANS, MESA, RIDGE_AMP, RIDGE_DAMP, RIDGE_FREQ, RIDGE_SCALE, RIDGE_SPAN, SEA_CLIFF } from '../../lib/terrainMath';
 import { SIMPLEX_F2, SIMPLEX_G2, SIMPLEX_GRAD } from '../../lib/noise';
 import { COAST_RAMP, CRATER_RIM, SINK } from '../../lib/hydro';
 import { EROSION_GLSL } from '../../lib/erosion';
@@ -52,6 +52,8 @@ const vec2 SIMPLEX_GRAD[16] = vec2[16](${SIMPLEX_GRAD.map((g) => `vec2(${f(g[0])
 const vec2 KARST_NORMALS[${KARST_NORMALS.length}] = vec2[${KARST_NORMALS.length}](${KARST_NORMALS.map((v) => `vec2(${f(v[0])}, ${f(v[1])})`).join(', ')});
 const vec2 KARST_TURNS[${KARST_TURNS.length}] = vec2[${KARST_TURNS.length}](${KARST_TURNS.map((v) => `vec2(${f(v[0])}, ${f(v[1])})`).join(', ')});
 const float KARST_CEIL = ${f(KARST_CEIL)}, KARST_BANK = ${f(KARST_BANK)}, KARST_TALUS = ${f(KARST_TALUS)}, KARST_CEIL_OFF = ${f(KARST_CEIL_OFF)};
+const float KARST_EDGE = ${f(KARST_EDGE)}, KARST_EDGE_LIFT = ${f(KARST_EDGE_LIFT)};
+const vec2 KARST_EDGE_FADE = vec2(${KARST_EDGE_FADE.map(f).join(', ')});
 const vec4 GULLY_SLOPE = vec4(${GULLY_SLOPE.map(f).join(', ')});
 // per biome its landform (LANDFORM_KEYS order): LF_TABLE[b * ${NK} + k]
 const float LF_TABLE[${LF.length}] = float[${LF.length}](${LF.join(', ')});
@@ -365,20 +367,25 @@ const vec2 MESA_TIERS[3] = vec2[3](${MESA.tiers.map((t) => `vec2(${f(t[0])}, ${f
 float mesaPlan(vec2 g, int seed) {
   return 0.5 + 0.35 * vnoise(g.x * F_MESA, g.y * F_MESA, seed + 2501) + 0.15 * vnoise(g.x * F_MESAFINE, g.y * F_MESAFINE, seed + 2502);
 }
-// The mesas' region weight at world g (its own warp, uplift and regions).
-float mesaWeightAt(vec2 g, int seed) {
+// The mesas' and the karst's shares of the landform at world g (their own warp, uplift and regions).
+vec2 sharesAt(vec2 g, int seed) {
   vec2 w;
   domainWarp(g.x, g.y, seed, 0.0, w);
   float wt[${NB}];
   vec4 clim;
   vec2 sp;
   regionsFrom(g, w, upliftAt(w, seed), seed, wt, clim, sp);
-  return smoothstep(0.35, 0.75, lfParam(wt, ${KI('mesa')}));
+  return vec2(lfParam(wt, ${KI('mesa')}), lfParam(wt, ${KI('karst')}));
 }
-// The mesas at world g where their region weighs mw (from the blended landform's share lfm), the weight
-// applied, and into cov how much of g is mesa (mirror terrainMath.ts mesasE: each tier a cap, a wall and
-// a talus apron laid out by the distance in from its contour, refined by a secant step).
-float mesasE(vec2 g, int seed, float dp, float mw, float lfm, out float cov) {
+// The towers' ceiling u m in from where it starts, over a point that is tower by c (terrainMath.ts karstCeiling).
+float karstCeiling(float u, float c) {
+  float ct = KARST_TALUS * u;
+  return ct + max(0.0, KARST_CEIL * u - KARST_CEIL_OFF - ct) * c;
+}
+// The mesas at world g where their region weighs mw, its gradient mg, the weight applied, and into cov
+// how much of g is mesa (mirror terrainMath.ts mesasE: each tier a cap, a wall and a talus apron laid
+// out by the distance in from its contour, refined by a secant step).
+float mesasE(vec2 g, int seed, float dp, float mw, vec2 mg, out float cov) {
   cov = 0.0;
   float hm = smoothstep(0.001, ${f(MESA.rise)}, mw);
   if (hm <= 0.0) return 0.0;
@@ -386,13 +393,8 @@ float mesasE(vec2 g, int seed, float dp, float mw, float lfm, out float cov) {
   vec3 b = vnoiseG(g.x * F_MESAFINE, g.y * F_MESAFINE, seed + 2502);
   float n = 0.5 + 0.35 * a.x + 0.15 * b.x;
   vec2 gr = 0.35 * F_MESA * a.yz + 0.15 * F_MESAFINE * b.yz;
-  // (the tiers retreat with the region's weight, whose gradient is a forward difference (MESA.fdSpan) where it is not yet 1)
-  vec2 mg = vec2(0.0);
-  if (lfm < 0.85) {
-    float h = max(1.0, length(g) / ${f(MESA.fdSpan)});
-    mg = (vec2(mesaWeightAt(g + vec2(h, 0.0), seed), mesaWeightAt(g + vec2(0.0, h), seed)) - mw) / h;
-    gr += ${f(MESA.retreat)} * mg;
-  }
+  // (the tiers retreat with the region's weight, along its gradient: landDetail's)
+  gr += ${f(MESA.retreat)} * mg;
   float gl = max(length(gr), 1e-7);
   vec2 u = gr / gl;
   float mu = ${f(MESA.retreat)} * dot(mg, u);
@@ -817,24 +819,47 @@ float landDetail(vec2 g, vec2 w, Uplift up, float hills, float ridge, float kars
   float rs = min(1.0, 2.0 * up.range + 1.6 * up.massif);
   if (ridge > 0.0) detail += ridge * (0.3 + 0.7 * rs) * ridgesAt(w, seed, dp);
   float kw = smoothstep(0.35, 0.75, karst);
+  float mw = smoothstep(0.35, 0.75, mesa);
+  float wK = clamp(2.0 - 2.0 * dp / 150.0, 0.0, 1.0);
+  // (the karst's share's and the mesas' weight's gradients where not yet 1: terrainMath.ts landDetail)
+  bool fdK = kw > 0.001 && wK > 0.0 && karst < KARST_EDGE_FADE.y, fdM = mw > 0.001 && mesa < 0.85;
+  vec2 kg = vec2(0.0), mg = vec2(0.0);
+  if (fdK || fdM) {
+    float far = length(g) / ${f(MESA.fdSpan)};
+    // (the mesas' two steps, then the karst's, in one loop)
+    for (int k = 0; k < 4; k++) {
+      bool isK = k >= 2;
+      if (isK ? !fdK : !fdM) continue;
+      float h = isK ? max(${f(KARST_EDGE_STEP)}, far) : max(1.0, far);
+      bool zs = (k & 1) == 1;
+      vec2 sh = sharesAt(g + (zs ? vec2(0.0, h) : vec2(h, 0.0)), seed);
+      float d = isK ? (sh.y - karst) / h : (smoothstep(0.35, 0.75, sh.x) - mw) / h;
+      if (isK) { if (zs) kg.y = d; else kg.x = d; } else { if (zs) mg.y = d; else mg.x = d; }
+    }
+  }
   float kc = 0.0;
   kt = vec2(0.0); // (the towers' height, and how much of it is tower)
   if (kw > 0.001) {
-    float wK = clamp(2.0 - 2.0 * dp / 150.0, 0.0, 1.0);
-    float t = TOWER_MEAN;
+    float t = kw * TOWER_MEAN;
     if (wK > 0.0) {
       vec2 kk = karstTowers(g, seed, dp);
-      t = wK * kk.x + (1.0 - wK) * TOWER_MEAN;
       kt.y = wK * kk.y;
-      kc = kw * kt.y;
+      // (whole within their region, cut at its edge under a ceiling: terrainMath.ts KARST_EDGE)
+      float k = kk.x, cut = 1.0;
+      if (fdK) {
+        float u = (karst - KARST_EDGE) / max(length(kg), 1e-9) + KARST_EDGE_LIFT * smoothstep(KARST_EDGE_FADE.x, KARST_EDGE_FADE.y, karst);
+        k = max(0.0, min(k, karstCeiling(u, kt.y)));
+        cut = clamp(0.1 * u, 0.0, 1.0);
+      }
+      t = wK * k + (1.0 - wK) * t;
+      kc = cut * kt.y;
     }
-    kt.x = kw * t;
+    kt.x = t;
     if (!river) detail += kt.x;
   }
   float dw = smoothstep(0.35, 0.75, dune);
   if (dw > 0.001) detail += dw * dunesE(g, seed, dp);
-  float mw = smoothstep(0.35, 0.75, mesa);
-  if (mw > 0.001) { float mc; detail += mesasE(g, seed, dp, mw, mesa, mc); kc = max(kc, mc); }
+  if (mw > 0.001) { float mc; detail += mesasE(g, seed, dp, mw, mg, mc); kc = max(kc, mc); }
   if (eros > 0.01) {
     // (down the land itself, laid out in the world: terrainMath.ts landDetail)
     float rk = ridge > 0.0 ? ridge * (0.3 + 0.7 * rs) : 0.0;
@@ -910,8 +935,8 @@ vec4 landCore(vec2 g, float dp, int seed, vec4 pond) {
   if (kt.x > 0.0) {
     float h = 0.5 * (M.x - M.z);
     float sig = sqrt(0.5 * (M.x + M.z) + sqrt(h * h + M.y * M.y));
-    float u = (min(rv.xFloor, 1000.0) - KARST_BANK) / sig, ct = KARST_TALUS * u;
-    towers = max(0.0, min(kt.x, (ct + max(0.0, KARST_CEIL * u - KARST_CEIL_OFF - ct) * kt.y) * (1.0 - rv.lakeMask))) * up.taper * crater;
+    float u = (min(rv.xFloor, 1000.0) - KARST_BANK) / sig;
+    towers = max(0.0, min(kt.x, karstCeiling(u, kt.y) * (1.0 - rv.lakeMask))) * up.taper * crater;
   }
   if (cwC > 0.0) {
     float s = sqrt(max(0.0, M.x * rv.gt.x + 2.0 * M.y * rv.gt.y + M.z * rv.gt.z));

@@ -2,7 +2,8 @@ import { describe, expect, test } from 'bun:test';
 import { rasterShader } from '../src/lib/gpu/terrain.wgsl';
 import { WATER_COARSE, WATER_WET, waterCellDrawn, waterCornerH } from '../src/lib/gpu/rings';
 import { ROCK_AXES, ROCK_WGSL, rockStretch } from '../src/lib/gpu/rockLook';
-import { elevation, surfaceAt, TERMS } from '../src/lib/terrainMath';
+import { elevation, landRegions, surfaceAt, TERMS } from '../src/lib/terrainMath';
+import { BIOMES } from '../src/lib/biomes';
 import { RF } from '../src/lib/hydro';
 import { PLACES } from '../bench/forms/places';
 
@@ -210,6 +211,37 @@ describe('the towers by a river', () => {
     expect(slopes.filter((a) => a > 60).length / slopes.length).toBeLessThan(0.02);
     expect(slopes.filter((a) => a >= 25 && a < 50).length / slopes.length).toBeGreaterThan(0.6);
   }, 60_000);
+});
+
+// The towers at their region's edge: scaled by the region's weight, as they were, they melted there into
+// domes, each wall × the weight and each cap tilted by its gradient × the tower's height. Now they
+// stand under a ceiling from where the karst's share is ½: cut in a wall, or whole.
+describe('the towers at their region\'s edge', () => {
+  test('stand as walls and caps, not tilted domes', () => {
+    let s = 4242;
+    const rnd = () => ((s = (Math.imul(s, 1664525) + 1013904223) | 0) >>> 0) / 4294967296;
+    const E = (x: number, z: number) => elevation(x, z, SEED, 0);
+    const J = (BIOMES as readonly string[]).indexOf('jungle'), w = new Float64Array(BIOMES.length);
+    const at = [PLACES[4], PLACES[0], PLACES[1]], o: [number, number] = [0, 0];
+    const slopes: number[] = [];
+    for (let tries = 0; tries < 200_000 && slopes.length < 300; tries++) {
+      const p = at[tries % 3], x = p.x + (rnd() - 0.5) * 4000, z = p.z + (rnd() - 0.5) * 4000;
+      // (the edge: the jungle's weight 0.35–0.75, where the towers' weight rises; on a tower over 40 m)
+      landRegions(x, z, SEED, w);
+      if (w[J] < 0.35 || w[J] >= 0.75) continue;
+      TERMS.on = true;
+      surfaceAt(x, z, SEED, o, 0);
+      const k = TERMS.karst * TERMS.scale;
+      TERMS.on = false;
+      if (k < 40) continue;
+      const H = 0.5;
+      slopes.push(Math.atan(Math.hypot(E(x + H, z) - E(x - H, z), E(x, z + H) - E(x, z - H)) / (2 * H)) * (180 / Math.PI));
+    }
+    expect(slopes.length).toBeGreaterThanOrEqual(200);
+    // (on the build before, 62 % of these stood 15–60° and 35 % over 60°; now 4 % and 74 %)
+    expect(slopes.filter((a) => a >= 15 && a < 60).length / slopes.length).toBeLessThan(0.1);
+    expect(slopes.filter((a) => a >= 60).length / slopes.length).toBeGreaterThan(0.6);
+  }, 120_000);
 });
 
 // The rock's detail on a face: drawn on the ground plane alone (as before) it smeared down a wall

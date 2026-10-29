@@ -578,6 +578,28 @@ export const KARST_CEIL = 3, KARST_BANK = 4, KARST_TALUS = 0.7, KARST_TOE = 8;
 /** (the steep line's offset, so the two meet KARST_TOE m up) */
 export const KARST_CEIL_OFF = KARST_TOE * (KARST_CEIL / KARST_TALUS - 1);
 /**
+ * At their region's edge the towers stand under the same ceiling, rising from where the karst's share
+ * of the landform is KARST_EDGE (its weight ½), by the distance in from there (the share over its
+ * gradient's length): a tower the edge crosses is cut in a wall over a short apron, the rest stand
+ * whole. Scaled by the region's weight, as they were, they melted there into domes, every slope × the
+ * weight, tilted by its gradient × their height (the weight rises 0 → 1 over ~200 m). The ceiling
+ * lifts away over the shares KARST_EDGE_FADE by KARST_EDGE_LIFT m of distance, so that it stands over
+ * every tower where the share's gradient is no longer taken.
+ */
+export const KARST_EDGE = 0.55, KARST_EDGE_FADE = [0.65, 0.75] as const, KARST_EDGE_LIFT = 90;
+/**
+ * The share's gradient is a forward difference over KARST_EDGE_STEP m (or MESA.fdSpan's step, if longer).
+ * Over 1 m, as the mesas take theirs, the fp32 twins' gradient was up to 0.9 % off, and the distance
+ * in (the share over it, up to 65 m) with it: their walls stood up to 1.7 m off the CPU twin's.
+ */
+export const KARST_EDGE_STEP = 128;
+
+/** The towers' ceiling u m in from where it starts, over a point that is tower by c. */
+function karstCeiling(u: number, c: number): number {
+  const ct = KARST_TALUS * u;
+  return ct + Math.max(0, KARST_CEIL * u - KARST_CEIL_OFF - ct) * c;
+}
+/**
  * A cliffed coast's cross-section, along the distance d (m) in from the coastline (C = level): a wall
  * at `wall` (m/m, 80°) rising from a wave-cut platform `platform` m under the sea (falling seaward at
  * `shelf` to the sea floor), standing `toe` m in from the coastline behind a talus apron (`talus` m/m,
@@ -593,7 +615,7 @@ export const SEA_CLIFF = {
 
 /** How much of the last point karstTowers evaluated is tower (0 on the apron's lower half, 1 on the wall and cap). */
 let _kcov = 0;
-/** The towers' height (m, × their region's weight) at the last point landDetail evaluated, and how much of it is tower (_kcov, faded with them far out). */
+/** The towers' height (m, under their region's edge: KARST_EDGE) at the last point landDetail evaluated, and how much of it is tower (_kcov, faded with them far out). */
 let _kt = 0, _ktc = 0;
 
 /**
@@ -712,21 +734,23 @@ function mesaPlan(x: number, z: number, seed: number): number {
 }
 
 const _wm = new Float64Array(NB);
-/** The mesas' region weight at world (x, z) (its own warp, uplift and regions: they overwrite the scratch theirs share). */
-function mesaWeightAt(x: number, z: number, seed: number): number {
+/** The mesas' and the karst's shares of the landform at world (x, z). */
+let _shM = 0, _shK = 0;
+/** …into _shM, _shK (their own warp, uplift and regions: they overwrite the scratch the point's share). */
+function sharesAt(x: number, z: number, seed: number): void {
   warpInto(x, z, seed);
   upliftAt(_wx, _wz, seed);
   regionsInto(x, z, _wx, _wz, seed, _wm);
-  let s = 0;
-  for (let b = 0; b < NB; b++) s += _wm[b] * LF_TABLE[b * NK + K_MESA];
-  return smoothstep(0.35, 0.75, s);
+  let m = 0, k = 0;
+  for (let b = 0; b < NB; b++) { m += _wm[b] * LF_TABLE[b * NK + K_MESA]; k += _wm[b] * LF_TABLE[b * NK + K_KARST]; }
+  _shM = m; _shK = k;
 }
 
 /**
- * The mesas at world (x, z), where their region weighs mw (from the blended landform's
- * share lfm; m, the weight applied); their cover into _mcov.
+ * The mesas at world (x, z), where their region weighs mw, its gradient (mx, mz) (m, the weight
+ * applied); their cover into _mcov.
  */
-function mesasE(x: number, z: number, seed: number, dp: number, mw: number, lfm: number): number {
+function mesasE(x: number, z: number, seed: number, dp: number, mw: number, mx: number, mz: number): number {
   _mcov = 0;
   const hm = smoothstep(0.001, MESA.rise, mw);
   if (hm <= 0) return 0;
@@ -736,17 +760,8 @@ function mesasE(x: number, z: number, seed: number, dp: number, mw: number, lfm:
   let gx = 0.35 * F.mesa * ax + 0.15 * F.mesafine * VN.dx, gz = 0.35 * F.mesa * az + 0.15 * F.mesafine * VN.dy;
   // The tiers retreat toward the region's edge, their contours where n = threshold + lift; lift follows
   // the region's weight, which across its fade changes as fast as n or faster, so the distance to a
-  // contour is measured along the gradient of both (the weight's a forward difference, MESA.fdSpan, where it
-  // is not yet 1: beyond lfm 0.85 it is 1 here and a step away)
-  let mx = 0, mz = 0;
-  if (lfm < 0.85) {
-    const sx = _wx, sz = _wz, sT = _T0, sM = _M, sC = _C, sU = _U, sv = _vW, ss = _sW;
-    const h = Math.max(1, Math.hypot(x, z) / MESA.fdSpan);
-    mx = (mesaWeightAt(x + h, z, seed) - mw) / h;
-    mz = (mesaWeightAt(x, z + h, seed) - mw) / h;
-    _wx = sx; _wz = sz; _T0 = sT; _M = sM; _C = sC; _U = sU; _vW = sv; _sW = ss;
-    gx += MESA.retreat * mx; gz += MESA.retreat * mz;
-  }
+  // contour is measured along the gradient of both (landDetail's)
+  gx += MESA.retreat * mx; gz += MESA.retreat * mz;
   const gl = Math.max(Math.hypot(gx, gz), 1e-7), ux = gx / gl, uz = gz / gl;
   const mu = MESA.retreat * (mx * ux + mz * uz);
   const hd0 = n01(x, z, F.mesa, seed + 2503);
@@ -1008,18 +1023,49 @@ function landDetail(x: number, z: number, wx: number, wz: number, seed: number, 
   }
   // (karst, dunes and mesas only where their region rules: a few tiers in a meadow would be cliffs)
   const kw = smoothstep(0.35, 0.75, lf[K_KARST]), dw = smoothstep(0.35, 0.75, lf[K_DUNE]), mw = smoothstep(0.35, 0.75, lf[K_MESA]);
+  const wK = clamp(2 - 2 * dp / 150, 0, 1);
+  // (where the karst's share or the mesas' weight is not yet 1, their gradients, by forward differences
+  // (KARST_EDGE_STEP, MESA.fdSpan): the towers' edge, the tiers' retreat. Beyond a mesa share of 0.85 its
+  // weight is 1 here and a step away)
+  const fdK = kw > 0.001 && wK > 0 && lf[K_KARST] < KARST_EDGE_FADE[1], fdM = mw > 0.001 && lf[K_MESA] < 0.85;
+  let kx = 0, kz = 0, mx = 0, mz = 0;
+  if (fdK || fdM) {
+    const sx = _wx, sz = _wz, sT = _T0, sM = _M, sC = _C, sU = _U, sv = _vW, ss = _sW;
+    const far = Math.hypot(x, z) / MESA.fdSpan;
+    if (fdM) {
+      const h = Math.max(1, far);
+      sharesAt(x + h, z, seed); mx = (smoothstep(0.35, 0.75, _shM) - mw) / h;
+      sharesAt(x, z + h, seed); mz = (smoothstep(0.35, 0.75, _shM) - mw) / h;
+    }
+    if (fdK) {
+      const h = Math.max(KARST_EDGE_STEP, far);
+      sharesAt(x + h, z, seed); kx = (_shK - lf[K_KARST]) / h;
+      sharesAt(x, z + h, seed); kz = (_shK - lf[K_KARST]) / h;
+    }
+    _wx = sx; _wz = sz; _T0 = sT; _M = sM; _C = sC; _U = sU; _vW = sv; _sW = ss;
+  }
   let kc = 0;
   _kt = _ktc = 0;
   if (kw > 0.001) {
-    const wK = clamp(2 - 2 * dp / 150, 0, 1);
-    let t = TOWER_MEAN;
-    if (wK > 0) { t = wK * karstTowers(x, z, seed, dp) + (1 - wK) * TOWER_MEAN; _ktc = wK * _kcov; kc = kw * _ktc; }
-    _kt = kw * t;
+    // (far out the towers' mean, × the region's weight)
+    let t = kw * TOWER_MEAN;
+    if (wK > 0) {
+      let k = karstTowers(x, z, seed, dp), cut = 1;
+      _ktc = wK * _kcov;
+      if (fdK) {
+        const u = (lf[K_KARST] - KARST_EDGE) / Math.max(Math.hypot(kx, kz), 1e-9) + KARST_EDGE_LIFT * smoothstep(KARST_EDGE_FADE[0], KARST_EDGE_FADE[1], lf[K_KARST]);
+        k = Math.max(0, Math.min(k, karstCeiling(u, _ktc)));
+        cut = clamp(0.1 * u, 0, 1); // (the gullies kept off what stands of a tower)
+      }
+      t = wK * k + (1 - wK) * t;
+      kc = cut * _ktc;
+    }
+    _kt = t;
     if (!river) detail += _kt;
     if (rec) TERMS.karst = _kt;
   }
   if (dw > 0.001) { const t = dw * dunesE(x, z, seed, dp); detail += t; if (rec) TERMS.dunes = t; }
-  if (mw > 0.001) { const t = mesasE(x, z, seed, dp, mw, lf[K_MESA]); detail += t; kc = Math.max(kc, _mcov); if (rec) TERMS.mesas = t; }
+  if (mw > 0.001) { const t = mesasE(x, z, seed, dp, mw, mx, mz); detail += t; kc = Math.max(kc, _mcov); if (rec) TERMS.mesas = t; }
   if (lf[K_ERO] > 0.01) {
     // (the gullies run down the land itself, its hills and ridges, and are laid out in the world: laid
     // out in the warped plane and down the uplift alone, they ran side by side for kilometres, a comb
@@ -1127,8 +1173,8 @@ function landCore(x: number, z: number, seed: number, dp: number, pL: number, pd
     // distance to the floor shrunk by the warp's largest stretch, so no ceiling stands steeper in the
     // world than designed)
     const h = 0.5 * (M11 - M22), sig = Math.sqrt(0.5 * (M11 + M22) + Math.sqrt(h * h + M12 * M12));
-    const u = (Math.min(RF.xFloor, 1000) - KARST_BANK) / sig, ct = KARST_TALUS * u;
-    const ceil = (ct + Math.max(0, KARST_CEIL * u - KARST_CEIL_OFF - ct) * ktc) * (1 - RF.lakeMask);
+    const u = (Math.min(RF.xFloor, 1000) - KARST_BANK) / sig;
+    const ceil = karstCeiling(u, ktc) * (1 - RF.lakeMask);
     towers = Math.max(0, Math.min(kt, ceil)) * taper * crater;
   }
   if (TERMS.on) TERMS.karst = m > 0 && taper > 0 ? towers / (m * taper) : 0;

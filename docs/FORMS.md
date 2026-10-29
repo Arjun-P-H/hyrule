@@ -125,6 +125,12 @@ over 0.5 m at a 0.5 m footprint (the nearest clipmap level's). The breaks come f
     (`KARST_BANK`, `KARST_TALUS`, `KARST_TOE`, `KARST_CEIL`). A tower meets the water in a wall over
     a short apron, not a plate tilted by the valley's side, and its apron is laid back, never cut
     off in a step ([`TOTK_TERRAIN.md`](TOTK_TERRAIN.md) §2, 34).
+  - **At the region's edge.** The towers stand whole under the same kind of ceiling, from where the
+    karst's share of the landform is 0.55 (`KARST_EDGE`), by the distance in from there (the share
+    over its gradient's length). A tower the edge crosses is cut in a wall over a short apron.
+    Scaled by the region's weight, as they were, they melted there into tilted domes
+    ([`TOTK_TERRAIN.md`](TOTK_TERRAIN.md) §2, 35). The gradient is a forward difference over 128 m
+    (`KARST_EDGE_STEP`): over 1 m, fp32's noise in the share moved the GPU twins' walls up to 1.7 m.
 - **Clustering.** Towers sit on a 300 m lattice, and 7 cells in 8 hold one. Each centre lies in the
   middle 60 % of its cell. Each point takes the highest tower of the 3 × 3 cells around it. Towers
   wider than their spacing merge into a cluster on a shared apron, like *fengcong*. Narrower ones
@@ -146,12 +152,20 @@ over 0.5 m at a 0.5 m footprint (the nearest clipmap level's). The breaks come f
 | Tower land | Bench < 15° | Talus 28–40° | Gap 45–60° | Cliff > 60° | Modes | Test |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | Before | 64.0 % | 6.1 % | 5.8 % | 12.0 % | 0°, 29°, 37°, 39°, 60°, 72° | smear (0.75) |
-| After | 70.0 % | 11.4 % | 1.6 % | 8.3 % | 0°, 32°, 77° | separate (0.15) |
+| After | 71.0 % | 11.6 % | 1.3 % | 8.2 % | 0°, 32°, 77° | separate (0.11) |
+| Edge, scaled | 76.2 % | 6.9 % | 2.4 % | 5.3 % | 0°, 20°, 29° | smear (0.45) |
+| Edge, after | 79.8 % | 6.7 % | 1.3 % | 5.2 % | 0° | separate (0.22) |
 
-The 5° bins after: 54.3, 11.2, 4.5, 2.7, 2.4, 3.7, **5.0**, 4.0, 2.3, 0.6, 0.6, 0.5, 0.6, 0.9, 2.2,
-**3.4**, 1.2, 0.0 %. That is a talus mode at 30–35° and a cliff mode at 75–80°, with 0.5–0.9 % per
-bin between them. (The ceiling's fix at the towers' feet moved toes out of the cliff bins: on the
-pass's first build the after row was 70.3 / 11.3 / 1.4 / 8.3 %, trough 0.10.)
+Tower land is where the jungle's weight is at least 0.6, its edge where it is 0.35–0.75.
+
+The 5° bins after: 55.4, 11.3, 4.3, 2.5, 2.0, 3.6, **5.1**, 4.0, 2.3, 0.4, 0.4, 0.5, 0.6, 0.7, 2.2,
+**3.4**, 1.3, 0.0 %. That is a talus mode at 30–35° and a cliff mode at 75–80°, with 0.4–0.7 % per
+bin between them. (On the pass's first build the after row was 70.3 / 11.3 / 1.4 / 8.3 %, trough
+0.10. The ceiling's fix at the towers' feet moved toes out of the cliff bins (70.0 / 11.4 / 1.6 /
+8.3 %, trough 0.15), and the edge's ceiling put walls back on the towers there.) At the edge, the
+scaled towers' bins fell from 3.0 % at 30–35° to 0.8 % over 45–60°, then climbed steadily (0.9,
+1.0, 1.2) to 1.7 % at 75–80°, with no trough between talus and cliff. Now they fall to 0.4–0.7 %
+over 45–70° and stand again at 1.5 and 1.9 % over 70–80°.
 
 ### 4.2 Butte and mesa
 
@@ -418,7 +432,7 @@ tower and sea cliff within about 64–100 m of the camera.
 | Dumps of E and each term (2 × 2 km at 0.5 m, float32) | `bun bench/forms/dump.ts` |
 | Hillshade, slope, curvature, geomorphons, spectrum and comb score per place | `python3 -I bench/forms/analyze.py <dump dir>/<place>` |
 | Breaks of slope | `python3 -I bench/forms/breaks.py <dump dir>/<place>` |
-| Slope histograms by landform | `bun bench/forms/slopes.ts [--only=tower,mesa,canyon,ridge] [--root=<older checkout>]` |
+| Slope histograms by landform | `bun bench/forms/slopes.ts [--only=tower,edge,mesa,canyon,ridge] [--root=<older checkout>]` |
 | Contour comb | `bun bench/forms/comb.ts [--root=<older checkout>]` |
 | Relief | `bun bench/forms/relief.ts` |
 | Golden frames at the five places (near, mid and far, 12:00) | `bun bench/webgpu.ts stills --config=forms` |
