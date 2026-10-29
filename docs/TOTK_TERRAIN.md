@@ -582,6 +582,9 @@ Seed 1337 unless noted, MacBook Air M1, headless Chrome, WebGPU.
       turns fp32's rounding of x and z into height.
     - Away from them: 5.3 mm at 10 km (10.3 before), 52.6 mm at 500 km (44.1) and 172.7 mm at
       1,000 km (155.1), all on coarse levels. Seams are at most 5.9 mm (7.6).
+    - Tree placement at places 1–5 near (`parity --config=forms`, frames 0, 3, 6, 9 and 12):
+      99.999 % of cells agree. 4 of ~22,400 land plants are on one side only, none is of another
+      species and none moved; sky plants agree for all.
     - GLSL 100 km or more from spawn was already metres off before the pass (72 m and 23 m on
       coarse levels at 100 and 250 km; 24 m at 1,000 km fine), and still is (65 m, 12.7 m and
       38 m). The pass did not look into why.
@@ -603,14 +606,15 @@ Seed 1337 unless noted, MacBook Air M1, headless Chrome, WebGPU.
     uplift and the regions, and `landDetail` is itself inlined three times, so there were six copies;
   - 859k with the two samples in one loop, the values unchanged.
 
-  The forest's generator (`forestGen`) holds six copies of `landSurface` and nine of the coarse
+  The forest's generator (`forestGen`) held six copies of `landSurface` and ten of the coarse
   ground. Inlined, it grew from 4,439k characters to 5,796k with the pass. Building it, SwiftShader
   ran Chrome's GPU process out of its ~16 GiB allocator pool: ~15–16.6 GiB reserved, then a failed
   request of ~0.9–1.2 GiB, and the device was lost. It was not short of the machine's memory, and
   compiling the pipelines one at a time (`--serial-compile`) did not help. Its ground samples now
-  share call sites in loops (`plGround`, and one loop for the nine coarse samples), the values
-  unchanged. Inlined it is 1,853k, and it builds in 55 s at a peak of ~6 GB. A hardware driver
-  inlines less, but compile time and frame cost on an M1 were not re-measured.
+  share call sites in loops (`plGround`, and one loop for the ten coarse samples), the same
+  expressions as before, and placement still agrees with the CPU (above). Inlined it is 1,853k,
+  and it builds in 55 s at a peak of ~6 GB. A hardware driver inlines less, but compile time and
+  frame cost on an M1 were not re-measured.
 - **Streaming** (the game's clipmap):
   - the generator costs 0.44 ms a frame walking and 2.2 ms at 200 m/s;
   - a full rebuild (spawn, teleport) takes ~200 ms of generation and adds ~385 ms to its frame;
