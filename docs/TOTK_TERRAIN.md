@@ -575,10 +575,11 @@ Seed 1337 unless noted, MacBook Air M1, headless Chrome, WebGPU.
     samples inlined side by side, WebGL2 on an Apple GPU put the gullies' gradient metres off,
     though each sample alone was exact: they now run in one loop.)
   - After the fourth pass (`port --config=forms`, SwiftShader, before → after):
-    - WGSL vs CPU at the five places, near, mid and far: at most 22.8 mm (place 2, near), against
-      21.9 mm before. The karst and flank views at mid range fell from 21.9 and 19.7 mm to 1.8 and
-      1.6 mm. The sea cliff is now 3.9–5.5 mm, against 0.6–0.9 mm: its 80° wall turns fp32's
-      rounding of x and z into height.
+    - WGSL vs CPU at the five places, near, mid and far: at most 11.8 mm (place 2, near), against
+      21.9 mm before. (The pass's first build had 22.8 mm there; the towers' new ceiling (2, 34)
+      halved places 1 and 2 near.) The karst and flank views at mid range fell from 21.9 and
+      19.7 mm to 1.8 and 1.6 mm. The sea cliff is now 3.9–5.5 mm, against 0.6–0.9 mm: its 80° wall
+      turns fp32's rounding of x and z into height.
     - Away from them: 5.3 mm at 10 km (10.3 before), 52.6 mm at 500 km (44.1) and 172.7 mm at
       1,000 km (155.1), all on coarse levels. Seams are at most 5.9 mm (7.6).
     - GLSL 100 km or more from spawn was already metres off before the pass (72 m and 23 m on
