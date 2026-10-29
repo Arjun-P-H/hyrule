@@ -569,11 +569,14 @@ export const KARST_FACES = [0, 0.95, 1.71, 2.62, 3.41, 4.33, 5.37] as const;
 export const KARST_NORMALS = KARST_FACES.map((a) => [Math.cos(a), Math.sin(a)] as const);
 export const KARST_TURNS = Array.from({ length: 16 }, (_, k) => [Math.cos((k * Math.PI) / 8), Math.sin((k * Math.PI) / 8)] as const);
 /**
- * Toward a river the towers stand under a ceiling rising this steeply (m/m, 72°) from KARST_BANK m
- * back from its floor's edge: a tower by the water meets it in a sheer face, never a slope cut into
- * a tilted plate by the valley's side.
+ * Toward a river the towers stand under a ceiling rising from KARST_BANK m back from its floor's edge,
+ * first at the talus's KARST_TALUS (m/m, 35°) for KARST_TOE m, then at KARST_CEIL (72°), in the
+ * world's metres: a tower by the water meets it in a sheer face over a short apron, never a slope cut
+ * into a tilted plate by the valley's side, nor an apron cut off in a step at the floor's edge.
  */
-export const KARST_CEIL = 3, KARST_BANK = 4;
+export const KARST_CEIL = 3, KARST_BANK = 4, KARST_TALUS = 0.7, KARST_TOE = 8;
+/** (the steep line's offset, so the two meet KARST_TOE m up) */
+export const KARST_CEIL_OFF = KARST_TOE * (KARST_CEIL / KARST_TALUS - 1);
 /**
  * A cliffed coast's cross-section, along the distance d (m) in from the coastline (C = level): a wall
  * at `wall` (m/m, 80°) rising from a wave-cut platform `platform` m under the sea (falling seaward at
@@ -590,8 +593,8 @@ export const SEA_CLIFF = {
 
 /** How much of the last point karstTowers evaluated is tower (0 on the apron's lower half, 1 on the wall and cap). */
 let _kcov = 0;
-/** The towers' height (m, × their region's weight) at the last point landDetail evaluated. */
-let _kt = 0;
+/** The towers' height (m, × their region's weight) at the last point landDetail evaluated, and how much of it is tower (_kcov, faded with them far out). */
+let _kt = 0, _ktc = 0;
 
 /**
  * Karst towers (the form brief, docs/FORMS.md): one on most cells of a 300 m lattice laid out in
@@ -1006,11 +1009,11 @@ function landDetail(x: number, z: number, wx: number, wz: number, seed: number, 
   // (karst, dunes and mesas only where their region rules: a few tiers in a meadow would be cliffs)
   const kw = smoothstep(0.35, 0.75, lf[K_KARST]), dw = smoothstep(0.35, 0.75, lf[K_DUNE]), mw = smoothstep(0.35, 0.75, lf[K_MESA]);
   let kc = 0;
-  _kt = 0;
+  _kt = _ktc = 0;
   if (kw > 0.001) {
     const wK = clamp(2 - 2 * dp / 150, 0, 1);
     let t = TOWER_MEAN;
-    if (wK > 0) { t = wK * karstTowers(x, z, seed, dp) + (1 - wK) * TOWER_MEAN; kc = kw * wK * _kcov; }
+    if (wK > 0) { t = wK * karstTowers(x, z, seed, dp) + (1 - wK) * TOWER_MEAN; _ktc = wK * _kcov; kc = kw * _ktc; }
     _kt = kw * t;
     if (!river) detail += _kt;
     if (rec) TERMS.karst = _kt;
@@ -1088,19 +1091,14 @@ function landCore(x: number, z: number, seed: number, dp: number, pL: number, pd
   }
 
   // 2. the regions' detail, and the gullies; the karst towers kept for after the valleys
-  let detail = 0, towers = 0;
+  let detail = 0, kt = 0, ktc = 0;
   if (TERMS.on) {
     TERMS.U = U; TERMS.scale = m * taper;
     TERMS.hills = TERMS.ridges = TERMS.karst = TERMS.dunes = TERMS.mesas = TERMS.gullies = 0;
   }
   if (m > 0) {
     detail = landDetail(x, z, wx, wz, seed, dp, U, range, massif, lf, true);
-    if (_kt > 0) {
-      // (under the ceiling a river's floor puts over them, faded with the lake's ring)
-      const ceil = KARST_CEIL * (Math.min(RF.xFloor, 1000) - KARST_BANK) * (1 - RF.lakeMask);
-      towers = Math.max(0, Math.min(_kt, ceil)) * taper * crater;
-    }
-    if (TERMS.on) TERMS.karst = taper > 0 ? towers / (m * taper) : 0;
+    kt = _kt; ktc = _ktc;
     detail *= m * taper; // (none toward a beach: the coast ramps down smoothly; cliffs keep theirs)
     if (TERMS.on) TERMS.lift = detail;
     // (round a river the detail only rises: a hollow beside it would leave the river standing over it)
@@ -1114,18 +1112,32 @@ function landCore(x: number, z: number, seed: number, dp: number, pL: number, pd
   // the canyons: where mesas rule, a valley's steep walls cut through the strata (raised, never cut)
   let Rs = RF.R;
   const mwC = smoothstep(0.35, 0.75, lf[K_MESA]);
-  if (mwC > 0 && RF.R < Math.max(e0, RF.F)) {
-    let cw = mwC * smoothstep(CANYON.rim[0], CANYON.rim[1], RF.xFloor) * (1 - RF.lakeMask);
-    if (cw > 0) {
-      // (the wall's slope in the world: the valleys are cut in the warped plane)
-      warpJ(x, z, seed);
-      const M11 = _j11 * _j11 + _j12 * _j12, M12 = _j11 * _j21 + _j12 * _j22, M22 = _j21 * _j21 + _j22 * _j22;
-      const s = Math.sqrt(Math.max(0, M11 * RF.gxx + 2 * M12 * RF.gxz + M22 * RF.gzz));
-      cw *= smoothstep(CANYON.steep[0], CANYON.steep[1], s);
-      if (cw > 0) {
-        const dip = CANYON.dip * vnoise(x * F.mesa, z * F.mesa, seed + 2613);
-        Rs = RF.R + cw * canyonRaise(RF.R + dip, s, s * Math.max(dp, 0.5), seed);
-      }
+  let cwC = mwC > 0 && RF.R < Math.max(e0, RF.F) ? mwC * smoothstep(CANYON.rim[0], CANYON.rim[1], RF.xFloor) * (1 - RF.lakeMask) : 0;
+  // (the towers' ceiling and the canyons' walls are measured in the world: the valleys are cut in the
+  // warped plane, its metric J Jᵀ)
+  let M11 = 1, M12 = 0, M22 = 1;
+  if (kt > 0 || cwC > 0) {
+    warpJ(x, z, seed);
+    M11 = _j11 * _j11 + _j12 * _j12; M12 = _j11 * _j21 + _j12 * _j22; M22 = _j21 * _j21 + _j22 * _j22;
+  }
+  let towers = 0;
+  if (kt > 0) {
+    // (under the ceiling a river's floor puts over them, faded with the lake's ring: its steep part only
+    // over their walls, so an apron reaching toward the river is laid back, never cut in a step; the
+    // distance to the floor shrunk by the warp's largest stretch, so no ceiling stands steeper in the
+    // world than designed)
+    const h = 0.5 * (M11 - M22), sig = Math.sqrt(0.5 * (M11 + M22) + Math.sqrt(h * h + M12 * M12));
+    const u = (Math.min(RF.xFloor, 1000) - KARST_BANK) / sig, ct = KARST_TALUS * u;
+    const ceil = (ct + Math.max(0, KARST_CEIL * u - KARST_CEIL_OFF - ct) * ktc) * (1 - RF.lakeMask);
+    towers = Math.max(0, Math.min(kt, ceil)) * taper * crater;
+  }
+  if (TERMS.on) TERMS.karst = m > 0 && taper > 0 ? towers / (m * taper) : 0;
+  if (cwC > 0) {
+    const s = Math.sqrt(Math.max(0, M11 * RF.gxx + 2 * M12 * RF.gxz + M22 * RF.gzz));
+    cwC *= smoothstep(CANYON.steep[0], CANYON.steep[1], s);
+    if (cwC > 0) {
+      const dip = CANYON.dip * vnoise(x * F.mesa, z * F.mesa, seed + 2613);
+      Rs = RF.R + cwC * canyonRaise(RF.R + dip, s, s * Math.max(dp, 0.5), seed);
     }
   }
   if (TERMS.on) {

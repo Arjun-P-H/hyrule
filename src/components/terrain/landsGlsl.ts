@@ -11,7 +11,7 @@
 
 import { CLIMATE, F, GEO, HYDRO, LANDS } from '../../lib/constants';
 import { BI, BIOMES, BIOME_COUNT, LANDFORM, LANDFORM_KEYS, LOOK, SNOW_ALBEDO } from '../../lib/biomes';
-import { CANYON, CEIL_SPAN, CEIL_START, DRY_TABLE, ERO_STEP, GULLY_SLOPE, KARST_BANK, KARST_CEIL, KARST_NORMALS, KARST_TURNS, LAND_MEANS, MESA, RIDGE_AMP, RIDGE_DAMP, RIDGE_FREQ, RIDGE_SCALE, RIDGE_SPAN, SEA_CLIFF } from '../../lib/terrainMath';
+import { CANYON, CEIL_SPAN, CEIL_START, DRY_TABLE, ERO_STEP, GULLY_SLOPE, KARST_BANK, KARST_CEIL, KARST_CEIL_OFF, KARST_NORMALS, KARST_TALUS, KARST_TURNS, LAND_MEANS, MESA, RIDGE_AMP, RIDGE_DAMP, RIDGE_FREQ, RIDGE_SCALE, RIDGE_SPAN, SEA_CLIFF } from '../../lib/terrainMath';
 import { SIMPLEX_F2, SIMPLEX_G2, SIMPLEX_GRAD } from '../../lib/noise';
 import { COAST_RAMP, CRATER_RIM, SINK } from '../../lib/hydro';
 import { EROSION_GLSL } from '../../lib/erosion';
@@ -51,7 +51,7 @@ const float SIMPLEX_F2 = ${f(SIMPLEX_F2)}, SIMPLEX_G2 = ${f(SIMPLEX_G2)};
 const vec2 SIMPLEX_GRAD[16] = vec2[16](${SIMPLEX_GRAD.map((g) => `vec2(${f(g[0])}, ${f(g[1])})`).join(', ')});
 const vec2 KARST_NORMALS[${KARST_NORMALS.length}] = vec2[${KARST_NORMALS.length}](${KARST_NORMALS.map((v) => `vec2(${f(v[0])}, ${f(v[1])})`).join(', ')});
 const vec2 KARST_TURNS[${KARST_TURNS.length}] = vec2[${KARST_TURNS.length}](${KARST_TURNS.map((v) => `vec2(${f(v[0])}, ${f(v[1])})`).join(', ')});
-const float KARST_CEIL = ${f(KARST_CEIL)}, KARST_BANK = ${f(KARST_BANK)};
+const float KARST_CEIL = ${f(KARST_CEIL)}, KARST_BANK = ${f(KARST_BANK)}, KARST_TALUS = ${f(KARST_TALUS)}, KARST_CEIL_OFF = ${f(KARST_CEIL_OFF)};
 const vec4 GULLY_SLOPE = vec4(${GULLY_SLOPE.map(f).join(', ')});
 // per biome its landform (LANDFORM_KEYS order): LF_TABLE[b * ${NK} + k]
 const float LF_TABLE[${LF.length}] = float[${LF.length}](${LF.join(', ')});
@@ -812,23 +812,24 @@ float ceilH(float h) { return h > CEIL_START ? CEIL_START + CEIL_SPAN * tanh((h 
 
 // The regions' detail over the uplift at world g, warped w, before any mask, and into kt the towers' height
 // (mirror terrainMath.ts landDetail: with river the towers are left out of the detail).
-float landDetail(vec2 g, vec2 w, Uplift up, float hills, float ridge, float karst, float dune, float mesa, float eros, int seed, float dp, bool river, out float kt) {
+float landDetail(vec2 g, vec2 w, Uplift up, float hills, float ridge, float karst, float dune, float mesa, float eros, int seed, float dp, bool river, out vec2 kt) {
   float detail = hills * hillsAt(w * F_MACRO, seed, dp);
   float rs = min(1.0, 2.0 * up.range + 1.6 * up.massif);
   if (ridge > 0.0) detail += ridge * (0.3 + 0.7 * rs) * ridgesAt(w, seed, dp);
   float kw = smoothstep(0.35, 0.75, karst);
   float kc = 0.0;
-  kt = 0.0;
+  kt = vec2(0.0); // (the towers' height, and how much of it is tower)
   if (kw > 0.001) {
     float wK = clamp(2.0 - 2.0 * dp / 150.0, 0.0, 1.0);
     float t = TOWER_MEAN;
     if (wK > 0.0) {
       vec2 kk = karstTowers(g, seed, dp);
       t = wK * kk.x + (1.0 - wK) * TOWER_MEAN;
-      kc = kw * wK * kk.y;
+      kt.y = wK * kk.y;
+      kc = kw * kt.y;
     }
-    kt = kw * t;
-    if (!river) detail += kt;
+    kt.x = kw * t;
+    if (!river) detail += kt.x;
   }
   float dw = smoothstep(0.35, 0.75, dune);
   if (dw > 0.001) detail += dw * dunesE(g, seed, dp);
@@ -881,13 +882,11 @@ vec4 landCore(vec2 g, float dp, int seed, vec4 pond) {
     vec2 gU = vec2(upliftAt(w + vec2(8.0, 0.0), seed).U - up.U, upliftAt(w + vec2(0.0, 8.0), seed).U - up.U) / 8.0;
     flat2 *= 1.0 - smoothstep(0.012, 0.035, length(gU));
   }
-  float detail = 0.0, towers = 0.0;
+  float detail = 0.0;
+  vec2 kt = vec2(0.0);
   if (m > 0.0) {
-    float kt;
     detail = landDetail(g, w, up, hills, ridge, karst, dune, mesa, eros, seed, dp, true, kt);
     detail *= m * up.taper;
-    // (the towers under the ceiling a river's floor puts over them: terrainMath.ts landCore)
-    if (kt > 0.0) towers = max(0.0, min(kt, KARST_CEIL * (min(rv.xFloor, 1000.0) - KARST_BANK) * (1.0 - rv.lakeMask))) * up.taper * crater;
     // (round a river the detail only rises: a hollow beside it would leave the river standing over it)
     float near = 1.0 - smoothstep(50.0, 450.0, rv.xFloor);
     if (near > 0.0) detail += (0.5 * (detail + sqrt(detail * detail + 36.0)) - 3.0 - detail) * near;
@@ -899,18 +898,27 @@ vec4 landCore(vec2 g, float dp, int seed, vec4 pond) {
   // the canyons: where mesas rule, a valley's steep walls cut through the strata (terrainMath.ts landCore)
   float Rs = rv.R;
   float mwC = smoothstep(0.35, 0.75, mesa);
-  if (mwC > 0.0 && rv.R < max(e0, rv.F)) {
-    float cw = mwC * smoothstep(${f(CANYON.rim[0])}, ${f(CANYON.rim[1])}, rv.xFloor) * (1.0 - rv.lakeMask);
-    if (cw > 0.0) {
-      // (the wall's slope in the world: the valleys are cut in the warped plane)
-      vec4 J = warpJ(g, seed);
-      vec3 M = vec3(J.x * J.x + J.y * J.y, J.x * J.z + J.y * J.w, J.z * J.z + J.w * J.w);
-      float s = sqrt(max(0.0, M.x * rv.gt.x + 2.0 * M.y * rv.gt.y + M.z * rv.gt.z));
-      cw *= smoothstep(${f(CANYON.steep[0])}, ${f(CANYON.steep[1])}, s);
-      if (cw > 0.0) {
-        float dip = ${f(CANYON.dip)} * vnoise(g.x * F_MESA, g.y * F_MESA, seed + 2613);
-        Rs = rv.R + cw * canyonRaise(rv.R + dip, s, s * max(dp, 0.5), seed);
-      }
+  float cwC = mwC > 0.0 && rv.R < max(e0, rv.F) ? mwC * smoothstep(${f(CANYON.rim[0])}, ${f(CANYON.rim[1])}, rv.xFloor) * (1.0 - rv.lakeMask) : 0.0;
+  // (the towers' ceiling and the canyons' walls measured in the world, the warp's metric J Jᵀ: terrainMath.ts landCore)
+  vec3 M = vec3(1.0, 0.0, 1.0);
+  if (kt.x > 0.0 || cwC > 0.0) {
+    vec4 J = warpJ(g, seed);
+    M = vec3(J.x * J.x + J.y * J.y, J.x * J.z + J.y * J.w, J.z * J.z + J.w * J.w);
+  }
+  // (the towers under the ceiling a river's floor puts over them: terrainMath.ts landCore)
+  float towers = 0.0;
+  if (kt.x > 0.0) {
+    float h = 0.5 * (M.x - M.z);
+    float sig = sqrt(0.5 * (M.x + M.z) + sqrt(h * h + M.y * M.y));
+    float u = (min(rv.xFloor, 1000.0) - KARST_BANK) / sig, ct = KARST_TALUS * u;
+    towers = max(0.0, min(kt.x, (ct + max(0.0, KARST_CEIL * u - KARST_CEIL_OFF - ct) * kt.y) * (1.0 - rv.lakeMask))) * up.taper * crater;
+  }
+  if (cwC > 0.0) {
+    float s = sqrt(max(0.0, M.x * rv.gt.x + 2.0 * M.y * rv.gt.y + M.z * rv.gt.z));
+    cwC *= smoothstep(${f(CANYON.steep[0])}, ${f(CANYON.steep[1])}, s);
+    if (cwC > 0.0) {
+      float dip = ${f(CANYON.dip)} * vnoise(g.x * F_MESA, g.y * F_MESA, seed + 2613);
+      Rs = rv.R + cwC * canyonRaise(rv.R + dip, s, s * max(dp, 0.5), seed);
     }
   }
   e0 = min(max(e0, rv.F), Rs) + towers;
@@ -1000,7 +1008,7 @@ float landBare(vec2 g, float dp, int seed) {
   vec4 clim;
   vec2 sp;
   regionsFrom(g, w, up, seed, wt, clim, sp);
-  float kt;
+  vec2 kt;
   return up.U + landDetail(g, w, up, lfParam(wt, ${KI('hills')}), lfParam(wt, ${KI('ridge')}), lfParam(wt, ${KI('karst')}),
     lfParam(wt, ${KI('dune')}), lfParam(wt, ${KI('mesa')}), lfParam(wt, ${KI('erosion')}), seed, dp, false, kt) * up.taper;
 }
@@ -1030,7 +1038,7 @@ vec4 pondAt(vec2 g, int seed) {
   regionsFrom(c, w, up, seed, wt, clim, sp);
   if (float(h2 & 0xffffu) / 65535.0 >= lfParam(wt, ${KI('pond')})) return none;
   // the land itself at its centre (the pond lies just under it) and round its rim: a pond needs flat land
-  float kt;
+  vec2 kt;
   float ec = up.U + landDetail(c, w, up, lfParam(wt, ${KI('hills')}), lfParam(wt, ${KI('ridge')}), lfParam(wt, ${KI('karst')}),
     lfParam(wt, ${KI('dune')}), lfParam(wt, ${KI('mesa')}), lfParam(wt, ${KI('erosion')}), seed, 4.0, false, kt) * up.taper;
   if (abs(landBare(c + 1.25 * R * vec2(1.0, 0.0), 4.0, seed) - ec) > 0.06 * R) return none;

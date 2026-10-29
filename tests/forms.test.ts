@@ -2,7 +2,8 @@ import { describe, expect, test } from 'bun:test';
 import { rasterShader } from '../src/lib/gpu/terrain.wgsl';
 import { WATER_COARSE, WATER_WET, waterCellDrawn, waterCornerH } from '../src/lib/gpu/rings';
 import { ROCK_AXES, ROCK_WGSL, rockStretch } from '../src/lib/gpu/rockLook';
-import { elevation, surfaceAt } from '../src/lib/terrainMath';
+import { elevation, surfaceAt, TERMS } from '../src/lib/terrainMath';
+import { RF } from '../src/lib/hydro';
 import { PLACES } from '../bench/forms/places';
 
 // The land's forms, judged by measures (docs/TOTK_TERRAIN.md, the fourth pass): each of these failed
@@ -180,6 +181,35 @@ describe('the comb', () => {
     expect(amps.filter((a) => a >= 20).length / amps.length).toBeLessThan(0.15);
     expect(amps[Math.floor(amps.length * 0.75)]).toBeLessThan(18);
   }, 120_000);
+});
+
+// A tower's foot by a river: the ceiling a river's floor puts over the towers once rose at 72° from 4 m
+// back, so it cut the apron off in a sheer step a few metres tall. Now it lays the apron back at the
+// talus's angle and keeps its steep part for the walls, in the world's metres.
+describe('the towers by a river', () => {
+  test('their aprons meet the floor at the talus, not in a step', () => {
+    let s = 777;
+    const rnd = () => ((s = (Math.imul(s, 1664525) + 1013904223) | 0) >>> 0) / 4294967296;
+    const E = (x: number, z: number) => elevation(x, z, SEED, 0);
+    const at = [PLACES[0], PLACES[4]], o: [number, number] = [0, 0];
+    const slopes: number[] = [];
+    for (let tries = 0; tries < 200_000 && slopes.length < 400; tries++) {
+      const p = at[tries % 2], x = p.x + (rnd() - 0.5) * 1600, z = p.z + (rnd() - 0.5) * 1600;
+      TERMS.on = true;
+      surfaceAt(x, z, SEED, o, 0);
+      const k = TERMS.karst * TERMS.scale, xf = RF.xFloor;
+      TERMS.on = false;
+      // (the toe: the towers' first 8 m, within 30 m of a valley floor's edge)
+      if (!(xf > 0 && xf < 30 && k > 0.25 && k < 8)) continue;
+      const H = 0.5;
+      slopes.push(Math.atan(Math.hypot(E(x + H, z) - E(x - H, z), E(x, z + H) - E(x, z - H)) / (2 * H)) * (180 / Math.PI));
+    }
+    expect(slopes.length).toBeGreaterThanOrEqual(200);
+    // (on this pass's first build, 31 % of these toes stood over 60° and 28 % over 70°; now 0.1 % and
+    // none. The round domes before it had gentle feet.)
+    expect(slopes.filter((a) => a > 60).length / slopes.length).toBeLessThan(0.02);
+    expect(slopes.filter((a) => a >= 25 && a < 50).length / slopes.length).toBeGreaterThan(0.6);
+  }, 60_000);
 });
 
 // The rock's detail on a face: drawn on the ground plane alone (as before) it smeared down a wall
