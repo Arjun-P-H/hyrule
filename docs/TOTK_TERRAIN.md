@@ -738,6 +738,10 @@ Seed 1337 unless noted, MacBook Air M1, headless Chrome, WebGPU.
   cell, and that repeats every cell. Rounding the rims wide enough to hide them would bring the
   domes back. A rim drawn as its own mesh would not depend on the lattice ([`FORMS.md`](FORMS.md)
   §6).
+- **The golden frames depend on their order.** The sky islands are built a few a frame and drawn
+  only once all are. A still converged over eight frames from a cold start can miss them and their
+  shadows: place 4's near frame does. The stills runner does not wait for the islands. Both sets
+  were rendered in one run each, in the same order ([`FORMS.md`](FORMS.md) §5).
 - **A heightfield's limit.** At 10–50 m the heightfield reaches the brief's planes, benches and
   slope modes. It cannot carry wall detail finer than 2–6 m in height, and it cannot undercut: no
   foot notch on a tower, no sea notch, no caprock overhang. [`FORMS.md`](FORMS.md) §6 proposes the

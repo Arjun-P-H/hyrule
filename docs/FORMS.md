@@ -388,7 +388,7 @@ comb: with the karst term taken out at place 1 it falls from 0.90 to 0.46. The c
 the one the tests use.
 
 **The golden frames** are in [`forms-golden.jpg`](forms-golden.jpg): seed 1337 at 12:00, game-med at
-640 × 400 on SwiftShader (`bun bench/webgpu.ts stills --config=forms`). Each place's cameras stand
+640 × 400 on SwiftShader (`bun bench/webgpu.ts stills --config=forms --converge=8`). Each place's cameras stand
 120, 450 and 1500 m from its subject on one bearing (`bench/forms/frames.ts`).
 
 - **Places 1 and 2 frame the same tower.** They are 302 m apart, and the tower is the most relief
@@ -405,6 +405,12 @@ the one the tests use.
   foreground is the tower at the jungle's edge, now cut in a wall (`TOTK_TERRAIN.md` entry 35). The
   rims show teeth 1–2 px deep about 5–6 px apart. They are not grass (they are the same with grass
   off) but the clipmap's mesh (§6, Rims).
+- **The order of the frames matters.** The sky islands are built a few a frame, 3 ms of building in
+  each (`skyRealm.ts`), and drawn only once all are built. On SwiftShader the eight frames a still
+  converges over are too few from a cold start. Place 4's near frame rendered first in a run has no
+  island shadow over the cliff's right half, and its sea is paler (mean 27, 129, 180 against 19,
+  101, 161). Rendered after the mid frame, it has both. With the islands off, it matches the cold
+  render to 2.5 of 255. So each set is one run, frames 0–14 in order.
 - **The TotK column is empty.** The repository holds no captures. `sheet.py --ref=<dir>` fills it.
 
 ## 6. What a heightfield can reach, and the smallest cliff mesh
