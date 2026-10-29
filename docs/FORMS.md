@@ -58,8 +58,8 @@ rough figures. These are the figures the generator's parameters were chosen to.
 | :--- | :--- | :--- | :--- |
 | Talus mode | 32–37° (the 5° bin peaks over 30–40°) | The angle of repose of coarse rock debris | **Met**: towers 32°, mesas 34°, canyons 34° |
 | Cliff mode | 70–85° (the 5° bin peaks over 65–90°) | Tower walls, sandstone cliffs and chalk faces stand near vertical | **Met**: towers 77°; mesas and canyons peak in the 75–80° bin |
-| Separate modes | The lowest 5° bin between the talus and cliff peaks is at most half the lower peak; both are local maxima | This brief, §1.1 | **Met**: troughs 0.10 / 0.18 / 0.14, against 0.75 / 1.48 / 8.47 before |
-| The 45–60° gap | Under the talus share, and well under the before's | §1.1 | **Met**: 1.4 / 2.0 / 3.0 %, against 5.8 / 6.5 / 16.7 % |
+| Separate modes | The lowest 5° bin between the talus and cliff peaks is at most half the lower peak; both are local maxima | This brief, §1.1 | **Met**: troughs 0.15 / 0.18 / 0.14, against 0.75 / 1.48 / 8.47 before |
+| The 45–60° gap | Under the talus share, and well under the before's | §1.1 | **Met**: 1.6 / 2.0 / 3.0 %, against 5.8 / 6.5 / 16.7 % |
 | Tower height over width | 0.7–1.5 at the wall's foot | Guilin tower karst (§4.1) | **Met** by construction |
 | Talus apron | 32–37° | The angle of repose | **Met** by construction on every landform |
 | Comb | At place 1, under 15 % of contours on steep cells swing ≥ 20° at 32–160 m, and the 75th percentile is under 18° | §1.3 | **Met** (`tests/forms.test.ts`, which fails on the before) |
@@ -119,9 +119,12 @@ over 0.5 m at a 0.5 m footprint (the nearest clipmap level's). The breaks come f
   - **Sizes.** Heights are 50–220 m, and H/W at the wall's foot is 0.7–1.5.
   - **Breaks.** They are rounded over the footprint (`ws = clamp(dp, 1, 24)`), never finer than a
     pixel can show.
-  - **Near rivers.** Each tower stands under a ceiling that rises at 72° from 4 m back from the
-    river's floor (`KARST_CEIL`, `KARST_BANK`), so it meets the water in a wall, not a plate tilted
-    by the valley's side.
+  - **Near rivers.** Each tower stands under a ceiling that a river's floor puts over it, measured
+    in the world's metres (the valleys are cut in the domain warp's plane). From 4 m back from the
+    floor's edge it rises at the talus's 35° for 8 m, then at 72° over the wall and cap
+    (`KARST_BANK`, `KARST_TALUS`, `KARST_TOE`, `KARST_CEIL`). A tower meets the water in a wall over
+    a short apron, not a plate tilted by the valley's side, and its apron is laid back, never cut
+    off in a step ([`TOTK_TERRAIN.md`](TOTK_TERRAIN.md) §2, 34).
 - **Clustering.** Towers sit on a 300 m lattice, and 7 cells in 8 hold one. Each centre lies in the
   middle 60 % of its cell. Each point takes the highest tower of the 3 × 3 cells around it. Towers
   wider than their spacing merge into a cluster on a shared apron, like *fengcong*. Narrower ones
@@ -143,11 +146,12 @@ over 0.5 m at a 0.5 m footprint (the nearest clipmap level's). The breaks come f
 | Tower land | Bench < 15° | Talus 28–40° | Gap 45–60° | Cliff > 60° | Modes | Test |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | Before | 64.0 % | 6.1 % | 5.8 % | 12.0 % | 0°, 29°, 37°, 39°, 60°, 72° | smear (0.75) |
-| After | 70.3 % | 11.3 % | 1.4 % | 8.3 % | 0°, 32°, 77° | separate (0.10) |
+| After | 70.0 % | 11.4 % | 1.6 % | 8.3 % | 0°, 32°, 77° | separate (0.15) |
 
-The 5° bins after: 54.3, 11.3, 4.6, 2.7, 2.4, 3.7, **5.0**, 4.0, 2.3, 0.5, 0.5, 0.4, 0.5, 0.7, 2.0,
-**3.7**, 1.3, 0.0 %. That is a talus mode at 30–35° and a cliff mode at 75–80°, with 0.4–0.7 % per
-bin between them.
+The 5° bins after: 54.3, 11.2, 4.5, 2.7, 2.4, 3.7, **5.0**, 4.0, 2.3, 0.6, 0.6, 0.5, 0.6, 0.9, 2.2,
+**3.4**, 1.2, 0.0 %. That is a talus mode at 30–35° and a cliff mode at 75–80°, with 0.5–0.9 % per
+bin between them. (The ceiling's fix at the towers' feet moved toes out of the cliff bins: on the
+pass's first build the after row was 70.3 / 11.3 / 1.4 / 8.3 %, trough 0.10.)
 
 ### 4.2 Butte and mesa
 

@@ -333,10 +333,11 @@ the seed), at 12:00. Place 3's x was hidden by the minimap and was re-read as 18
     scalloped cusps 150–300 m apart, and the gully comb (27) and the value-noise ridges (32) added
     finer teeth. The screenshot's cracked bands and finest teeth are not in the height at 0.5 m, and
     this build has no cracked-rock material, so they were not reproduced. Towers are now prisms
-    (30), each under a ceiling that rises at 72° from 4 m back from the river's floor (`KARST_CEIL`,
-    `KARST_BANK`), so a tower meets the water in a wall, not a plate tilted by the valley's side.
-    Walls whose contour is a comb fell from 12 % to 0 %. Small wedges remain where a tower stands in
-    a valley.
+    (30), each under a ceiling that a river's floor puts over them: from 4 m back from the floor's
+    edge it rises at the talus's 35° for 8 m, then at 72° over a tower's wall and cap (`KARST_BANK`,
+    `KARST_TALUS`, `KARST_TOE`, `KARST_CEIL`; 34). A tower meets the water in a wall over a short
+    apron, not a plate tilted by the valley's side. Walls whose contour is a comb fell from 12 % to
+    0 %. Small wedges remain where a tower stands in a valley.
 27. **Corrugated mountain flanks** (place 2, shape). The gully filter cut gentle land as hard as steep
     land, each octave adding about 0.25 to the slope, at an even spacing. On a smooth flank its
     stripes lay side by side as regular dark corrugations, and on the hill beside it as ripples.
@@ -389,11 +390,29 @@ the seed), at 12:00. Place 3's x was hidden by the minimap and was re-read as 18
     from 10.6 % to 5.7 %. Summits are 648–679 m on the three seeds (640–717 m before) and medians
     312–327 m, within TotK's relief, and fields stay at 55–60 m above the sea. Neither build has
     alpine walls or scree ([`FORMS.md`](FORMS.md) §4.5).
+34. **A step at a tower's foot** (found in the golden frames: shape). The first build of this pass
+    showed a dark band at the foot of the towers by a river (place 1's near frame). Profiled down the
+    view line, the towers' term equalled the river's ceiling there: 1.5 m, then 4.4 m half a metre on.
+    The ceiling rose at 72° from 4 m back from the floor's edge, so it cut the apron off in a sheer
+    step a few metres tall. It was also steeper than designed. The valleys are cut in the domain
+    warp's plane, and the distance to a floor's edge is measured there (`RF.xFloor`). On that apron
+    the warp shrank the world's metres about 2× (|∇xFloor| ≈ 1.93), so 72° stood at about 80°. The
+    ceiling now:
+    - divides that distance by the warp's largest stretch, from its Jacobian in all three twins, so
+      it stands in the world's metres;
+    - rises at the talus's 35° for its first 8 m, then at 72°;
+    - takes the steep part only as far as a tower covers the ground (`_kcov`), so an apron is laid
+      back to the talus, never cut.
+
+    Within 30 m of a floor's edge, 31 % of the towers' first 8 m stood over 60° and 28 % over 70°.
+    Now 0.1 % and none do, and 86 % lie at 30–50°. Toes on a valley's side stand at 38–47°, steeper
+    than the brief's 32–37°: the ceiling caps the towers' term, and the valley's side adds its own
+    slope. A test fails on the old ceiling.
 
 What the fourth pass measured, from the dumps and over 160 km squares ([`FORMS.md`](FORMS.md) §3–5):
 - **Slope modes.** Tower, mesa and canyon land each now show a talus mode at 32–34° and a cliff mode
-  at 75–80°, separate where they were one smear: the lowest bin between them is 0.10 / 0.18 / 0.14
-  of the lower peak, against 0.75 / 1.48 / 8.47, and the 45–60° share is 1.4 / 2.0 / 3.0 %, against
+  at 75–80°, separate where they were one smear: the lowest bin between them is 0.15 / 0.18 / 0.14
+  of the lower peak, against 0.75 / 1.48 / 8.47, and the 45–60° share is 1.6 / 2.0 / 3.0 %, against
   5.8 / 6.5 / 16.7 %.
 - **The comb**, along contours over four places and twelve drawn over 80 km: combed walls fell from
   12 % to 0 %, gentle land from 40 % to 24 %, flanks from 37 % to 28 %.
@@ -583,9 +602,14 @@ Seed 1337 unless noted, MacBook Air M1, headless Chrome, WebGPU.
     uplift and the regions, and `landDetail` is itself inlined three times, so there were six copies;
   - 859k with the two samples in one loop, the values unchanged.
 
-  Under SwiftShader the GPU process compiles all of a scene's pipelines at once. The before build
-  fits in this container's 14.3 GB, and the after build does not. A hardware driver inlines less,
-  but compile time and frame cost on an M1 were not re-measured.
+  The forest's generator (`forestGen`) holds six copies of `landSurface` and nine of the coarse
+  ground. Inlined, it grew from 4,439k characters to 5,796k with the pass. Building it, SwiftShader
+  ran Chrome's GPU process out of its ~16 GiB allocator pool: ~15–16.6 GiB reserved, then a failed
+  request of ~0.9–1.2 GiB, and the device was lost. It was not short of the machine's memory, and
+  compiling the pipelines one at a time (`--serial-compile`) did not help. Its ground samples now
+  share call sites in loops (`plGround`, and one loop for the nine coarse samples), the values
+  unchanged. Inlined it is 1,853k, and it builds in 55 s at a peak of ~6 GB. A hardware driver
+  inlines less, but compile time and frame cost on an M1 were not re-measured.
 - **Streaming** (the game's clipmap):
   - the generator costs 0.44 ms a frame walking and 2.2 ms at 200 m/s;
   - a full rebuild (spawn, teleport) takes ~200 ms of generation and adds ~385 ms to its frame;
@@ -594,19 +618,22 @@ Seed 1337 unless noted, MacBook Air M1, headless Chrome, WebGPU.
 - **CPU:** one world evaluation takes 7.4 µs: points round a pond now share its cell's verdict. The
   river table takes ~320 ms the first time and 32 ms per re-centre (measured with the machine
   loaded). The WebGL2 world function costs 38 ns an evaluation, 8 % more than with the old gullies.
-- **Tests:** 287 pass, including the hydrology suite:
+- **Tests:** 288 pass, including the hydrology suite:
   - drainage reaches the sea or a lake;
   - levels never rise downstream;
   - banks stand at the water;
   - basin lakes and lakes on rivers are level, and their shores stand above their water all round;
   - the GPU table matches the CPU.
 
-  The fourth pass adds three detectors (`tests/forms.test.ts`). Each fails on the build before it
-  and passes after:
+  The fourth pass adds four detectors (`tests/forms.test.ts`). The first three fail on the build
+  before the pass, the fourth on the pass's first build, and all pass now:
   - the comb: a spectral peak along contours on steep cells at place 1;
   - the stair-step: the share of the shore at place 3 that runs along the 8, 16 and 32 m cells'
     edges, where a cell left out cuts the water off (15 % or more by the old rule, under 2 % now);
-  - the stretch: the biplanar rock's worst texel stretch over all slopes and aspects (under 1.5×).
+  - the stretch: the biplanar rock's worst texel stretch over all slopes and aspects (under 1.5×);
+  - the toe: the share of the towers' first 8 m by a river that stands over 60° (30 % on the
+    pass's first build, under 2 % now; 34). The domes before the pass had gentle feet, so it passes
+    on that build too.
 
 ## 5. What still differs, and what is not done
 
