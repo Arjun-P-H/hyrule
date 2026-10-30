@@ -1,0 +1,96 @@
+<h2>The cloud world under the islands: which shape feels right?</h2>
+<p class="subtitle">Side views, not to scale. The hero jumps about 1.2 m and glides about 3 m forward for every 1 m it drops, so a cloud you climb <em>up</em> to has to be a short hop away, while one <em>below</em> can be far off.</p>
+
+<svg width="0" height="0" style="position:absolute">
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#5b8fd6"/><stop offset="1" stop-color="#cfe3f7"/>
+    </linearGradient>
+    <linearGradient id="cl" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff"/><stop offset="1" stop-color="#c9d5e6"/>
+    </linearGradient>
+    <g id="isle">
+      <path d="M-40 0 Q0 -8 40 0 L28 6 L14 30 L4 18 L-6 38 L-18 12 L-30 8 Z" fill="#7a6a58"/>
+      <path d="M-40 0 Q0 -8 40 0 L38 3 L-38 3 Z" fill="#5f9a4a"/>
+      <path d="M2 18 L4 26 M-6 30 L-6 36" stroke="#7fc8ff" stroke-width="1.5"/>
+    </g>
+    <g id="hero"><circle cx="0" cy="-7" r="2.2" fill="#e8552e"/><rect x="-1.6" y="-5" width="3.2" height="5" fill="#e8552e"/></g>
+  </defs>
+</svg>
+
+<div class="cards">
+  <div class="card" data-choice="dunes" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <svg viewBox="0 0 320 220" width="100%">
+        <rect width="320" height="220" fill="url(#sky)"/>
+        <use href="#isle" x="70" y="40"/><use href="#isle" x="240" y="28" transform="scale(1)"/>
+        <!-- floating puffs -->
+        <ellipse cx="120" cy="118" rx="16" ry="6" fill="url(#cl)"/>
+        <ellipse cx="150" cy="106" rx="14" ry="5" fill="url(#cl)"/>
+        <ellipse cx="200" cy="124" rx="18" ry="6" fill="url(#cl)"/>
+        <!-- rolling floor -->
+        <path d="M0 170 Q30 150 60 160 T120 155 T180 165 T240 150 T320 160 L320 220 L0 220 Z" fill="url(#cl)"/>
+        <use href="#hero" x="60" y="160"/>
+        <text x="8" y="212" font-size="9" fill="#46566e">gentle swells, ~10–60 m tall</text>
+      </svg>
+    </div>
+    <div class="card-body">
+      <h3>A. Rolling dunes</h3>
+      <p>A soft, walkable floor of low swells, with a few puffs drifting above. It's calm and easy to cross. The islands stay far overhead, so you need the puffs or a portal to reach them.</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="stacks" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <svg viewBox="0 0 320 220" width="100%">
+        <rect width="320" height="220" fill="url(#sky)"/>
+        <use href="#isle" x="80" y="30"/><use href="#isle" x="250" y="40"/>
+        <!-- towering stacks reaching toward islands -->
+        <path d="M20 220 L20 120 Q30 100 45 110 Q55 90 70 105 L72 220 Z" fill="url(#cl)"/>
+        <path d="M170 220 L168 80 Q180 60 195 72 Q210 55 222 78 L224 220 Z" fill="url(#cl)"/>
+        <!-- deep valley floor -->
+        <path d="M0 205 Q60 198 120 206 T240 202 T320 206 L320 220 L0 220 Z" fill="url(#cl)"/>
+        <!-- puffs stepping up a stack -->
+        <ellipse cx="110" cy="160" rx="13" ry="5" fill="url(#cl)"/>
+        <ellipse cx="135" cy="140" rx="12" ry="5" fill="url(#cl)"/>
+        <ellipse cx="155" cy="118" rx="12" ry="5" fill="url(#cl)"/>
+        <use href="#hero" x="110" y="155"/>
+        <text x="8" y="196" font-size="9" fill="#46566e">deep valleys, tall towers</text>
+      </svg>
+    </div>
+    <div class="card-body">
+      <h3>B. Towering stacks</h3>
+      <p>Big cumulus towers rise out of deep valleys, and some reach nearly up to the islands. Staircases of puffs lead up their sides. The highs and lows are dramatic, and the towers are the way up.</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="shelves" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <svg viewBox="0 0 320 220" width="100%">
+        <rect width="320" height="220" fill="url(#sky)"/>
+        <use href="#isle" x="70" y="32"/><use href="#isle" x="245" y="36"/>
+        <!-- lower floor with hills -->
+        <path d="M0 190 Q40 170 80 185 Q120 160 160 182 T240 175 T320 188 L320 220 L0 220 Z" fill="url(#cl)"/>
+        <!-- mid shelves -->
+        <path d="M30 140 Q60 128 100 138 Q90 148 40 148 Z" fill="url(#cl)"/>
+        <path d="M150 130 Q185 116 220 128 Q210 140 160 140 Z" fill="url(#cl)"/>
+        <path d="M230 100 Q260 90 290 98 Q280 108 240 108 Z" fill="url(#cl)"/>
+        <!-- small puffs bridging -->
+        <ellipse cx="120" cy="160" rx="9" ry="4" fill="url(#cl)"/>
+        <ellipse cx="130" cy="145" rx="8" ry="3.5" fill="url(#cl)"/>
+        <ellipse cx="225" cy="116" rx="8" ry="3.5" fill="url(#cl)"/>
+        <use href="#hero" x="185" y="122"/>
+        <text x="8" y="212" font-size="9" fill="#46566e">hilly floor + shelves in tiers</text>
+      </svg>
+    </div>
+    <div class="card-body">
+      <h3>C. Layered shelves</h3>
+      <p>A hilly cloud floor with broad shelves floating at a few heights, joined by small puffs. It reads as levels you climb tier by tier toward the islands, which makes it the most platformer-like.</p>
+    </div>
+  </div>
+</div>
+
+<div class="section" style="margin-top:1.5em">
+  <p class="label">Not shown yet</p>
+  <p>The portal, what happens if you fall below the lowest cloud, and whether the clouds look soft (fuzzy edges) or sculpted (solid and lit like snow). We can pick those once the shape feels right.</p>
+</div>
